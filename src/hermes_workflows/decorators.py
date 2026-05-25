@@ -15,14 +15,28 @@ class DurableStepCall:
 
     __durable_step_call__ = True
 
-    def __init__(self, ctx: Any, step_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]):
+    def __init__(
+        self,
+        ctx: Any,
+        step_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        payload_builder: Callable[[], dict[str, Any]] | None = None,
+    ):
         self.ctx = ctx
         self.step_name = step_name
         self.args = args
         self.kwargs = kwargs
+        self.payload_builder = payload_builder
 
     def __await__(self) -> Generator[Any, None, Any]:
-        return self.ctx.run_step(self.step_name, self.args, self.kwargs).__await__()
+        return self.ctx.run_step(
+            self.step_name,
+            self.args,
+            self.kwargs,
+            payload_builder=self.payload_builder,
+        ).__await__()
 
 
 def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:

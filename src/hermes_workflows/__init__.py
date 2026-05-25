@@ -10,5 +10,6 @@ v0 intentionally tiny:
 
 from .decorators import step, workflow
 from .engine import RunResult, WorkflowEngine
+from .prompts import AgentPrompt, render_prompt
 
-__all__ = ["RunResult", "WorkflowEngine", "step", "workflow"]
+__all__ = ["AgentPrompt", "RunResult", "WorkflowEngine", "render_prompt", "step", "workflow"]

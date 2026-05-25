@@ -13,6 +13,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - command claiming/leasing for external worker processes
 - approval request primitive through `ctx.approval.request(...)`
 - durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
+- render-only prompt-file steps through `AgentPrompt("prompt.md", **vars)`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
 - manual `signal()` resume API
 - tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list`
@@ -97,6 +98,56 @@ async def research_brief(ctx, inputs):
 ```
 
 On the first decider pass it records `StepRequested` for every missing child and exits on `gather:0`. When workers complete the children, replay resolves the gathered results in argument order without re-running completed steps.
+
+## Prompt-file steps
+
+`AgentPrompt` keeps workflow control flow in Python while moving editable prompt text into markdown files:
+
+```python
+from hermes_workflows import AgentPrompt, workflow
+
+
+@workflow
+async def plan_workflow(ctx, inputs):
+    rendered = await AgentPrompt(
+        "examples/prompts/repo_change_plan.md",
+        goal=inputs["goal"],
+        repo_path=inputs["repo_path"],
+        verification_commands=inputs["verification_commands"],
+    )(ctx)
+
+    approval = await ctx.approval.request(
+        "Approve this implementation plan?",
+        key="approve_implementation_plan",
+        artifact=rendered,
+        approver="human:skylar",
+    )
+    return {"prompt": rendered, "approval": approval}
+```
+
+Prompt files use a tiny `{{variable}}` syntax:
+
+```markdown
+# Implementation plan request
+
+Goal: {{goal}}
+
+Repository: {{repo_path}}
+
+Verification commands:
+
+{{verification_commands}}
+```
+
+V0 is deliberately render-only: `AgentPrompt` returns a JSON-serializable rendered prompt packet and does not call an LLM/agent runner yet. The prompt file can be a `str`, `pathlib.Path`, or any Python path-like object. List/dict variables render as pretty JSON, and missing variables fail closed.
+
+The prompt content is snapshotted into the `StepRequested` event when the durable step is first requested. That means:
+
+- an already-completed prompt step replays from workflow history without needing the prompt file to still exist
+- a pending prompt step uses the original request-time prompt content even if the markdown file is edited before a worker drains it
+- `AgentPrompt` works inside `ctx.gather(...)` like other durable step calls
+
+`AgentPrompt` is not an approval bypass. Use normal `ctx.approval.request(...)` for human gates; prompt rendering is just another memoized step result.
 
 ## Workflow-backed PR path
 
@@ -215,5 +266,5 @@ pytest -q
 Expected now:
 
 ```text
-30 passed
+41 passed
 ```

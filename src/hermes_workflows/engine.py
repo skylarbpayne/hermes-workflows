@@ -605,7 +605,15 @@ class WorkflowContext:
         self._gather_call_count = 0
         self.approval = ApprovalClient(self)
 
-    async def run_step(self, step_name: str, args: Tuple[Any, ...], kwargs: Dict[str, Any], *, block: bool = True) -> Any:
+    async def run_step(
+        self,
+        step_name: str,
+        args: Tuple[Any, ...],
+        kwargs: Dict[str, Any],
+        *,
+        block: bool = True,
+        payload_builder: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> Any:
         call_index = self._step_call_counts.get(step_name, 0)
         self._step_call_counts[step_name] = call_index + 1
         key = f"step:{step_name}:{call_index}"
@@ -615,7 +623,12 @@ class WorkflowContext:
             return completed["output"]
 
         if self._last_event("StepRequested", key) is None:
-            payload = {"step_name": step_name, "args": list(args), "kwargs": kwargs}
+            if payload_builder is None:
+                payload = {"step_name": step_name, "args": list(args), "kwargs": kwargs}
+            else:
+                payload = payload_builder()
+                if payload.get("step_name") != step_name:
+                    raise ValueError("payload_builder step_name must match durable step name")
             with self.engine._connect() as con:
                 inserted = self.engine._append_event(
                     con,
@@ -653,7 +666,13 @@ class WorkflowContext:
                 if inspect.iscoroutine(call):
                     call.close()
                 raise TypeError("ctx.gather only supports @step calls in this spike")
-            result = await self.run_step(call.step_name, call.args, call.kwargs, block=False)
+            result = await self.run_step(
+                call.step_name,
+                call.args,
+                call.kwargs,
+                block=False,
+                payload_builder=getattr(call, "payload_builder", None),
+            )
             if isinstance(result, PendingStep):
                 pending.append(result.key)
                 results.append(None)
