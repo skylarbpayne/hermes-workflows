@@ -9,6 +9,7 @@ from hermes_workflows import WorkflowEngine, step, workflow
 
 
 RUNS = []
+SHOULD_FAIL_STALE = False
 
 
 @step
@@ -28,6 +29,13 @@ async def worker_boom(ctx, value):
     raise RuntimeError(f"boom {value}")
 
 
+@step
+async def worker_stale_sensitive(ctx):
+    if SHOULD_FAIL_STALE:
+        raise RuntimeError("stale worker should not win")
+    return "fresh result"
+
+
 @workflow
 async def worker_gather_workflow(ctx, inputs):
     left, right = await ctx.gather(
@@ -40,6 +48,11 @@ async def worker_gather_workflow(ctx, inputs):
 @workflow
 async def worker_failure_workflow(ctx, inputs):
     return await worker_boom(ctx, inputs["value"])
+
+
+@workflow
+async def worker_stale_workflow(ctx, inputs):
+    return await worker_stale_sensitive(ctx)
 
 
 def command_row(db, key):
@@ -122,6 +135,35 @@ def test_worker_records_step_failure_and_marks_command_failed(tmp_path):
     events = engine.events("wf_fail")
     assert [event["type"] for event in events].count("StepFailed") == 1
     assert events[-1]["type"] == "StepFailed"
+
+
+def test_stale_worker_cannot_overwrite_reclaimed_command_result(tmp_path):
+    global SHOULD_FAIL_STALE
+    SHOULD_FAIL_STALE = False
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_stale_workflow, {}, workflow_id="wf_stale")
+
+    stale = engine.claim_command("wf_stale", worker_id="worker-a", lease_seconds=-1)
+    fresh = engine.claim_command("wf_stale", worker_id="worker-b", lease_seconds=60)
+    assert stale is not None
+    assert fresh is not None
+    assert fresh["attempts"] == 2
+
+    completed = engine._execute_run_step_command("wf_stale", fresh)
+    assert completed.status == "completed"
+    assert completed.result == "fresh result"
+
+    SHOULD_FAIL_STALE = True
+    try:
+        stale_result = engine._execute_run_step_command("wf_stale", stale)
+    finally:
+        SHOULD_FAIL_STALE = False
+
+    assert stale_result.status == "completed"
+    assert stale_result.result == "fresh result"
+    assert command_row(db, "step:worker_stale_sensitive:0")["status"] == "completed"
+    assert [event["type"] for event in engine.events("wf_stale")].count("StepFailed") == 0
 
 
 CLI_WORKFLOW_MODULE = '''

@@ -343,23 +343,29 @@ class WorkflowEngine:
         try:
             output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
         except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
             with self._connect() as con:
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'failed', last_error_json = ?, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND attempts = ?
+                    """,
+                    (JsonCodec.dumps(error), _now(), command["id"], command["claimed_by"], command["attempts"]),
+                ).rowcount
+                if changed == 0:
+                    return self._result_from_instance(workflow_id)
                 self._append_event(
                     con,
                     workflow_id,
                     "StepFailed",
                     key=key,
-                    payload={"error": {"type": type(exc).__name__, "message": str(exc)}},
-                    idempotency_key=f"failed:{key}:{command['id']}",
+                    payload={"error": error},
+                    idempotency_key=f"failed:{key}:{command['id']}:{command['attempts']}",
                     ignore_duplicate=True,
-                )
-                con.execute(
-                    """
-                    UPDATE workflow_commands_outbox
-                    SET status = 'failed', last_error_json = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (JsonCodec.dumps({"type": type(exc).__name__, "message": str(exc)}), _now(), command["id"]),
                 )
                 con.execute(
                     """
@@ -367,19 +373,24 @@ class WorkflowEngine:
                     SET status = 'failed', error_json = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (JsonCodec.dumps({"type": type(exc).__name__, "message": str(exc)}), _now(), workflow_id),
+                    (JsonCodec.dumps(error), _now(), workflow_id),
                 )
             return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
 
         with self._connect() as con:
-            con.execute(
+            changed = con.execute(
                 """
                 UPDATE workflow_commands_outbox
                 SET status = 'completed', lease_expires_at = NULL, updated_at = ?
                 WHERE id = ?
+                  AND status = 'running'
+                  AND claimed_by = ?
+                  AND attempts = ?
                 """,
-                (_now(), command["id"]),
-            )
+                (_now(), command["id"], command["claimed_by"], command["attempts"]),
+            ).rowcount
+        if changed == 0:
+            return self._result_from_instance(workflow_id)
         return self.complete_step(workflow_id, key, output)
 
     def _next_pending_command(self, workflow_id: str, *, command_type: str) -> Optional[sqlite3.Row]:
