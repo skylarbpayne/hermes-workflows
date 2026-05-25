@@ -63,6 +63,7 @@ def test_run_until_idle_executes_local_steps_once_then_waits_for_approval(tmp_pa
     assert [event["type"] for event in events] == [
         "WorkflowStarted",
         "StepRequested",
+        "CommandClaimed",
         "StepCompleted",
         "ApprovalRequested",
         "WaitRequested",
@@ -125,11 +126,13 @@ def test_signal_approval_resumes_and_drains_downstream_steps(tmp_path):
     assert [event["type"] for event in restarted.events("wf_real_trip")] == [
         "WorkflowStarted",
         "StepRequested",
+        "CommandClaimed",
         "StepCompleted",
         "ApprovalRequested",
         "WaitRequested",
         "SignalReceived",
         "StepRequested",
+        "CommandClaimed",
         "StepCompleted",
         "WorkflowCompleted",
     ]

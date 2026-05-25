@@ -32,11 +32,26 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    start = sub.add_parser("start", help="Start/replay a workflow decider without draining step commands")
+    start.add_argument("workflow_ref", help="module:function")
+    start.add_argument("--db", required=True, type=Path)
+    start.add_argument("--id", required=True, dest="workflow_id")
+    start.add_argument("--input-json", required=True)
+
     run = sub.add_parser("run", help="Run a workflow until idle")
     run.add_argument("workflow_ref", help="module:function")
     run.add_argument("--db", required=True, type=Path)
     run.add_argument("--id", required=True, dest="workflow_id")
     run.add_argument("--input-json", required=True)
+
+    worker = sub.add_parser("worker", help="Execute leased run_step commands for a workflow")
+    worker.add_argument("workflow_ref", help="module:function; imported so the decider and steps are registered")
+    worker.add_argument("--db", required=True, type=Path)
+    worker.add_argument("--id", required=True, dest="workflow_id")
+    worker.add_argument("--worker-id", default="cli-worker")
+    worker.add_argument("--lease-seconds", type=int, default=30)
+    worker.add_argument("--once", action="store_true", help="Execute at most one command")
+    worker.add_argument("--max-commands", type=int)
 
     signal = sub.add_parser("signal", help="Send a signal to a workflow and drain runnable steps")
     signal.add_argument("workflow_ref", help="module:function; imported so the decider is registered")
@@ -52,12 +67,32 @@ def main(argv: list[str] | None = None) -> int:
     engine = WorkflowEngine(args.db)
     workflow = load_workflow(args.workflow_ref)
 
-    if args.command == "run":
+    if args.command == "start":
+        result = engine.start(
+            workflow,
+            json.loads(args.input_json),
+            workflow_id=args.workflow_id,
+        )
+    elif args.command == "run":
         result = engine.run_until_idle(
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
         )
+    elif args.command == "worker":
+        if args.once:
+            result = engine.worker_once(
+                args.workflow_id,
+                worker_id=args.worker_id,
+                lease_seconds=args.lease_seconds,
+            )
+        else:
+            result = engine.worker_until_idle(
+                args.workflow_id,
+                worker_id=args.worker_id,
+                lease_seconds=args.lease_seconds,
+                max_commands=args.max_commands,
+            )
     elif args.command == "signal":
         result = engine.signal(
             args.workflow_id,
