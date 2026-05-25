@@ -233,7 +233,38 @@ async def open_pull_request(ctx, inputs: Dict[str, Any], evidence: Dict[str, Any
 
     existing = _run(["gh", "pr", "view", "--json", "number,url,state"], cwd=repo, env=env, timeout=120)
     if existing["ok"]:
-        return {"opened": False, "existing": True, "view": existing, "push": push, "body_path": body["body_path"]}
+        edit = {"ok": True, "output": "update_existing_pr disabled", "returncode": 0}
+        if inputs.get("update_existing_pr", True):
+            edit = _run(
+                [
+                    "gh",
+                    "pr",
+                    "edit",
+                    "--title",
+                    inputs.get("pr_title") or inputs["goal"],
+                    "--body-file",
+                    body["body_path"],
+                ],
+                cwd=repo,
+                env=env,
+                timeout=180,
+            )
+            if not edit["ok"]:
+                raise RuntimeError(edit["output"])
+            existing = _run(
+                ["gh", "pr", "view", "--json", "number,url,state,headRefName,baseRefName"],
+                cwd=repo,
+                env=env,
+                timeout=120,
+            )
+        return {
+            "opened": False,
+            "existing": True,
+            "view": existing,
+            "edit": edit,
+            "push": push,
+            "body_path": body["body_path"],
+        }
 
     command = [
         "gh",
