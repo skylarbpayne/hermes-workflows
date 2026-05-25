@@ -8,10 +8,30 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_workflows import step, workflow
+from hermes_workflows import AgentPrompt, step, workflow
 
 
 DEFAULT_VERIFICATION_COMMANDS = ["pytest -q"]
+DEFAULT_NON_GOALS = [
+    "Do not implement before this plan is explicitly approved.",
+    "Do not treat plan approval as merge or deployment approval.",
+    "Do not broaden the slice beyond the named repo workflow change.",
+]
+DEFAULT_PROPOSED_CHANGES = [
+    "Write or update targeted tests first.",
+    "Implement the smallest code change required by the approved plan.",
+    "Document approval provenance in PR/status evidence.",
+]
+DEFAULT_API_CHANGES = [
+    "Approval signal key: approve_implementation_plan.",
+    "Approval source must be human:skylar with external provenance.",
+]
+DEFAULT_OPEN_QUESTIONS = ["None for this slice after plan approval."]
+DEFAULT_PLAN_PROMPT_PATH = Path(__file__).parent / "prompts" / "repo_change_plan.md"
+
+
+def _bullets(items: List[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
 
 
 def _run(command: List[str], *, cwd: Path, env: Optional[Dict[str, str]] = None, timeout: int = 300) -> Dict[str, Any]:
@@ -133,7 +153,16 @@ def _require_approved_implementation_plan(ctx, inputs: Dict[str, Any]) -> Dict[s
     if not _source_has_provenance(durable_source) or not _has_matching_plan_approval_event(plan_status.get("events") or [], durable_plan):
         raise RuntimeError("repo_pr_workflow requires durable implementation plan approval event with external provenance")
 
-    for field in ("plan_workflow_id", "plan_artifact_path", "approved_by", "approval_source", "plan_artifact_sha256"):
+    for field in (
+        "plan_workflow_id",
+        "plan_artifact_path",
+        "approved_by",
+        "approval_source",
+        "plan_artifact_sha256",
+        "plan_prompt_path",
+        "plan_prompt_sha256",
+        "plan_rendered_prompt_sha256",
+    ):
         if durable_plan.get(field) != plan.get(field):
             raise RuntimeError(f"repo_pr_workflow implementation_plan does not match durable plan workflow field: {field}")
 
@@ -240,80 +269,21 @@ async def run_pr_verification(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def write_implementation_plan(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def write_implementation_plan(ctx, inputs: Dict[str, Any], rendered_plan: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     plan_path = Path(inputs.get("plan_artifact_path") or repo / ".hermes" / "pr-workflows" / f"{ctx.workflow_id}-implementation-plan.md")
     plan_path = plan_path.expanduser().resolve()
     plan_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def bullets(items: List[str]) -> str:
-        return "\n".join(f"- {item}" for item in items)
-
-    goal = inputs["goal"]
-    non_goals = inputs.get("non_goals") or [
-        "Do not implement before this plan is explicitly approved.",
-        "Do not treat plan approval as merge or deployment approval.",
-        "Do not broaden the slice beyond the named repo workflow change.",
-    ]
-    proposed_changes = inputs.get("proposed_changes") or [
-        "Write or update targeted tests first.",
-        "Implement the smallest code change required by the approved plan.",
-        "Document approval provenance in PR/status evidence.",
-    ]
-    api_changes = inputs.get("api_or_event_changes") or [
-        "Approval signal key: approve_implementation_plan.",
-        "Approval source must be human:skylar with external provenance.",
-    ]
-    verification = inputs.get("verification_commands") or DEFAULT_VERIFICATION_COMMANDS
-    open_questions = inputs.get("open_questions") or ["None for this slice after plan approval."]
-
-    contents = f"""# Implementation plan: {goal}
-
-## Goal
-{goal}
-
-## Non-goals
-{bullets(non_goals)}
-
-## Current baseline / state
-- Repo: `{repo}`
-- Workflow id: `{ctx.workflow_id}`
-- This plan must be approved before implementation work starts.
-
-## Proposed file/module changes
-{bullets(proposed_changes)}
-
-## API / schema / event changes
-{bullets(api_changes)}
-
-## Execution sequence
-1. Create this plan artifact.
-2. Wait for explicit human approval of this plan.
-3. Implement with TDD only after approval.
-4. Open/update PR and produce landing evidence.
-5. Wait for separate merge approval.
-
-## Approval gates
-- Plan approval: `approve_implementation_plan`, approver `human:skylar`, before implementation.
-- Landing approval: `approve_pr_landing`, approver `human:skylar`, before merge/landing.
-
-## Tests / verification
-{bullets([f"`{command}`" for command in verification])}
-
-## Side effects
-- After approval only: code changes, commit, branch push, PR creation/update, GitHub check watching, Kanban evidence.
-- No merge/deploy without a separate landing approval.
-
-## Risks / rollback
-- Risk: plan approval is confused with merge approval. Mitigation: separate keys and report sections.
-- Risk: missing provenance. Mitigation: require human source plus channel/message provenance.
-- Rollback: stop before implementation, or close/supersede the PR if the approved slice proves wrong.
-
-## Open questions / decision points
-{bullets(open_questions)}
-"""
+    contents = rendered_plan["rendered_prompt"]
     plan_path.write_text(contents)
-    return {"plan_artifact_path": str(plan_path), "bytes": len(contents.encode("utf-8"))}
+    return {
+        "plan_artifact_path": str(plan_path),
+        "bytes": len(contents.encode("utf-8")),
+        "plan_prompt_path": rendered_plan["prompt_path"],
+        "plan_prompt_sha256": rendered_plan["prompt_sha256"],
+        "plan_rendered_prompt_sha256": rendered_plan["rendered_prompt_sha256"],
+    }
 
 
 @step
@@ -372,6 +342,9 @@ async def write_pr_body(
 - Plan workflow: `{implementation_plan['plan_workflow_id']}`
 - Plan artifact: `{implementation_plan['plan_artifact_path']}`
 - Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`
+- Plan prompt: `{implementation_plan.get('plan_prompt_path', 'not recorded')}`
+- Plan prompt SHA-256: `{implementation_plan.get('plan_prompt_sha256', 'not recorded')}`
+- Plan rendered prompt SHA-256: `{implementation_plan.get('plan_rendered_prompt_sha256', 'not recorded')}`
 - Approved by: {_implementation_plan_line(implementation_plan)}
 
 ## Verification
@@ -534,6 +507,9 @@ async def write_pr_status_report(
 - Plan workflow: `{implementation_plan['plan_workflow_id']}`
 - Plan artifact: `{implementation_plan['plan_artifact_path']}`
 - Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`
+- Plan prompt: `{implementation_plan.get('plan_prompt_path', 'not recorded')}`
+- Plan prompt SHA-256: `{implementation_plan.get('plan_prompt_sha256', 'not recorded')}`
+- Plan rendered prompt SHA-256: `{implementation_plan.get('plan_rendered_prompt_sha256', 'not recorded')}`
 - Landing approval: {_approval_source_line(landing_decision)}
 - Merge: not attempted by v0 status workflow
 
@@ -574,7 +550,21 @@ async def write_pr_status_report(
 
 @workflow
 async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
-    plan = await write_implementation_plan(ctx, inputs)
+    repo = Path(inputs["repo_path"]).expanduser().resolve()
+    verification = inputs.get("verification_commands") or DEFAULT_VERIFICATION_COMMANDS
+    plan_prompt_path = Path(inputs.get("plan_prompt_path") or DEFAULT_PLAN_PROMPT_PATH)
+    rendered_plan = await AgentPrompt(
+        plan_prompt_path,
+        goal=inputs["goal"],
+        repo_path=str(repo),
+        workflow_id=ctx.workflow_id,
+        non_goals=_bullets(inputs.get("non_goals") or DEFAULT_NON_GOALS),
+        proposed_changes=_bullets(inputs.get("proposed_changes") or DEFAULT_PROPOSED_CHANGES),
+        api_or_event_changes=_bullets(inputs.get("api_or_event_changes") or DEFAULT_API_CHANGES),
+        verification_commands=_bullets([f"`{command}`" for command in verification]),
+        open_questions=_bullets(inputs.get("open_questions") or DEFAULT_OPEN_QUESTIONS),
+    )(ctx)
+    plan = await write_implementation_plan(ctx, inputs, rendered_plan)
     decision = await ctx.approval.request(
         f"Approve implementation plan for: {inputs['goal']}?",
         key="approve_implementation_plan",
@@ -594,6 +584,9 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
         "remote_name": inputs.get("remote_name", "origin"),
         "plan_artifact_path": plan["plan_artifact_path"],
         "plan_artifact_sha256": _sha256_file(Path(plan["plan_artifact_path"]).expanduser().resolve()),
+        "plan_prompt_path": plan["plan_prompt_path"],
+        "plan_prompt_sha256": plan["plan_prompt_sha256"],
+        "plan_rendered_prompt_sha256": plan["plan_rendered_prompt_sha256"],
         "approved_by": decision.get("by"),
         "approval_source": decision.get("source"),
     }

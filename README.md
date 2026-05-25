@@ -151,11 +151,11 @@ The prompt content is snapshotted into the `StepRequested` event when the durabl
 
 ## Workflow-backed PR path
 
-`examples.repo_pr_workflow` is the first repo PR operating path. It is intentionally explicit instead of magical, and it now hard-requires pre-implementation plan approval.
+`examples.repo_pr_workflow` is the first repo PR operating path. It is intentionally explicit instead of magical, and it now hard-requires pre-implementation plan approval. The plan workflow dogfoods `AgentPrompt`: the editable implementation-plan template lives at `examples/prompts/repo_change_plan.md`, while workflow control flow and approval semantics stay in Python.
 
 The expected sequence is:
 
-1. run `repo_change_plan_workflow` to write a concrete implementation plan artifact
+1. run `repo_change_plan_workflow` to render an `AgentPrompt`-backed implementation plan artifact from `examples/prompts/repo_change_plan.md`
 2. pause on `approve_implementation_plan` and record human approval provenance
 3. pass that approved `implementation_plan` result into `repo_pr_workflow`
 4. gather git evidence from the branch against `origin/main`
@@ -166,7 +166,7 @@ The expected sequence is:
 9. pause on `approve_pr_landing` so the human approval/merge provenance is recorded before status is finalized
 10. write a reviewable status/landing packet under `.hermes/pr-workflows/` before approval, then overwrite it with final approval provenance after a human signal
 
-`repo_pr_workflow` fails closed if `implementation_plan` is missing, not marked `ready_for_implementation`, missing the plan artifact/workflow id/SHA-256, or missing human Skylar approval provenance. It does not trust the caller-supplied dict by itself: the referenced workflow must exist in the same workflow DB as a completed `repo_change_plan_workflow`, the durable result must match the supplied plan fields, the workflow event log must contain the matching human approval signal, and the plan artifact must still exist, be non-empty, and match the approved SHA-256.
+`repo_pr_workflow` fails closed if `implementation_plan` is missing, not marked `ready_for_implementation`, missing the plan artifact/workflow id/SHA-256, or missing human Skylar approval provenance. It does not trust the caller-supplied dict by itself: the referenced workflow must exist in the same workflow DB as a completed `repo_change_plan_workflow`, the durable result must match the supplied plan fields, the workflow event log must contain the matching human approval signal, and the plan artifact must still exist, be non-empty, and match the approved SHA-256. New plan workflow results also carry prompt provenance (`plan_prompt_path`, prompt SHA-256, and rendered prompt SHA-256) so landing packets show which prompt file rendered the reviewed plan.
 
 For a real self-dogfood run, start with the plan workflow:
 
@@ -178,14 +178,14 @@ PYTHONPATH=src:. python -m hermes_workflows run \
   --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","verification_commands":["pytest -q","python -m compileall -q src tests examples"]}'
 ```
 
-After the plan artifact is reviewed, resume with a human-sourced approval signal. The completed durable result, including `plan_artifact_sha256`, becomes the `implementation_plan` input for the PR workflow; do not fabricate this object by hand or copy it from chat without checking workflow status:
+After the plan artifact is reviewed, resume with a human-sourced approval signal. The completed durable result, including `plan_artifact_sha256` and AgentPrompt provenance (`plan_prompt_path`, `plan_prompt_sha256`, `plan_rendered_prompt_sha256`), becomes the `implementation_plan` input for the PR workflow; do not fabricate this object by hand or copy it from chat without checking workflow status:
 
 ```bash
 PYTHONPATH=src:. python -m hermes_workflows run \
   examples.repo_pr_workflow:repo_pr_workflow \
   --db .hermes/pr-workflows/repo-pr.sqlite \
   --id wf_repo_pr_<slug> \
-  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","implementation_plan":{"ready_for_implementation":true,"plan_workflow_id":"wf_repo_pr_<slug>_plan","plan_artifact_path":".hermes/pr-workflows/wf_repo_pr_<slug>_plan-implementation-plan.md","plan_artifact_sha256":"<sha256-from-completed-plan-workflow-status>","approved_by":"skylar","approval_source":{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://..."}},"verification_commands":["pytest -q","python -m compileall -q src tests examples"],"create_pr":true,"push_branch":true,"watch_checks":true,"gh_home":"/Users/skylarpayne"}'
+  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","implementation_plan":{"ready_for_implementation":true,"plan_workflow_id":"wf_repo_pr_<slug>_plan","plan_artifact_path":".hermes/pr-workflows/wf_repo_pr_<slug>_plan-implementation-plan.md","plan_artifact_sha256":"<sha256-from-completed-plan-workflow-status>","plan_prompt_path":"examples/prompts/repo_change_plan.md","plan_prompt_sha256":"<sha256-from-completed-plan-workflow-status>","plan_rendered_prompt_sha256":"<sha256-from-completed-plan-workflow-status>","approved_by":"skylar","approval_source":{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://..."}},"verification_commands":["pytest -q","python -m compileall -q src tests examples"],"create_pr":true,"push_branch":true,"watch_checks":true,"gh_home":"/Users/skylarpayne"}'
 ```
 
 The PR workflow should end waiting on `signal:approval.decision:approve_pr_landing`. That is the separate landing gate: review the PR/status packet, then send a human-sourced approval signal if merge/landing should proceed. Plan approval is not merge approval.
@@ -266,5 +266,5 @@ pytest -q
 Expected now:
 
 ```text
-41 passed
+42 passed
 ```
