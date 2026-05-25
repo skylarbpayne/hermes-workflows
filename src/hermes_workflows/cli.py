@@ -63,9 +63,17 @@ def main(argv: list[str] | None = None) -> int:
     signal.add_argument("--source-json")
     signal.add_argument("--idempotency-key")
 
+    status = sub.add_parser("status", help="Inspect one workflow instance without replaying it")
+    status.add_argument("--db", required=True, type=Path)
+    status.add_argument("--id", required=True, dest="workflow_id")
+    status.add_argument("--recent-events", type=int, default=20)
+
+    list_cmd = sub.add_parser("list", help="List workflow instances in a workflow DB")
+    list_cmd.add_argument("--db", required=True, type=Path)
+
     args = parser.parse_args(argv)
     engine = WorkflowEngine(args.db)
-    workflow = load_workflow(args.workflow_ref)
+    workflow = load_workflow(args.workflow_ref) if hasattr(args, "workflow_ref") else None
 
     if args.command == "start":
         result = engine.start(
@@ -73,12 +81,14 @@ def main(argv: list[str] | None = None) -> int:
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
         )
+        print(json.dumps(result_payload(result), sort_keys=True))
     elif args.command == "run":
         result = engine.run_until_idle(
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
         )
+        print(json.dumps(result_payload(result), sort_keys=True))
     elif args.command == "worker":
         if args.once:
             result = engine.worker_once(
@@ -93,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                 lease_seconds=args.lease_seconds,
                 max_commands=args.max_commands,
             )
+        print(json.dumps(result_payload(result), sort_keys=True))
     elif args.command == "signal":
         result = engine.signal(
             args.workflow_id,
@@ -102,8 +113,12 @@ def main(argv: list[str] | None = None) -> int:
             source=json.loads(args.source_json) if args.source_json else None,
             idempotency_key=args.idempotency_key,
         )
+        print(json.dumps(result_payload(result), sort_keys=True))
+    elif args.command == "status":
+        print(json.dumps(engine.workflow_status(args.workflow_id, recent_events=args.recent_events), sort_keys=True))
+    elif args.command == "list":
+        print(json.dumps({"workflows": engine.list_workflows()}, sort_keys=True))
     else:  # pragma: no cover - argparse prevents this.
         raise SystemExit(f"unknown command: {args.command}")
 
-    print(json.dumps(result_payload(result), sort_keys=True))
     return 0

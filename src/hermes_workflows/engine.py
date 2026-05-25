@@ -272,6 +272,67 @@ class WorkflowEngine:
             for row in rows
         ]
 
+    def list_workflows(self) -> List[Dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT id, workflow_name, status, waiting_on
+                FROM workflow_instances
+                ORDER BY updated_at DESC, created_at DESC, id ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "workflow_id": row["id"],
+                "workflow_name": row["workflow_name"],
+                "status": row["status"],
+                "waiting_on": row["waiting_on"],
+            }
+            for row in rows
+        ]
+
+    def workflow_status(self, workflow_id: str, *, recent_events: int = 20) -> Dict[str, Any]:
+        row = self._instance(workflow_id)
+        events = self.events(workflow_id)
+        return {
+            "workflow_id": row["id"],
+            "workflow_name": row["workflow_name"],
+            "status": row["status"],
+            "waiting_on": row["waiting_on"],
+            "result": JsonCodec.loads(row["result_json"]),
+            "error": _format_error(JsonCodec.loads(row["error_json"])),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "event_count": len(events),
+            "events": events[-recent_events:],
+            "pending_commands": self._active_commands(workflow_id),
+        }
+
+    def _active_commands(self, workflow_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT type, key, payload_json, status, claimed_by, attempts, lease_expires_at, last_error_json
+                FROM workflow_commands_outbox
+                WHERE workflow_id = ? AND status IN ('pending', 'running')
+                ORDER BY id ASC
+                """,
+                (workflow_id,),
+            ).fetchall()
+        return [
+            {
+                "type": row["type"],
+                "key": row["key"],
+                "payload": JsonCodec.loads(row["payload_json"]),
+                "status": row["status"],
+                "claimed_by": row["claimed_by"],
+                "attempts": row["attempts"],
+                "lease_expires_at": row["lease_expires_at"],
+                "last_error": JsonCodec.loads(row["last_error_json"]),
+            }
+            for row in rows
+        ]
+
     def _run_decider(self, workflow_id: str, workflow_fn: Callable[..., Any]) -> RunResult:
         instance = self._instance(workflow_id)
         ctx = WorkflowContext(self, workflow_id)

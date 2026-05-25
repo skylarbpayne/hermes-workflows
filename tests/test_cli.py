@@ -90,3 +90,43 @@ def test_cli_can_run_and_signal_workflow_across_processes(tmp_path):
         "result": {"plan": {"summary": "Plan for NYC"}, "approved_by": "skylar"},
         "error": None,
     }
+
+
+def test_cli_status_and_list_expose_inspectable_workflow_state(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_cli",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    status_result = run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli")
+    status_payload = json.loads(status_result.stdout)
+    assert status_payload["workflow_id"] == "wf_cli"
+    assert status_payload["workflow_name"] == "demo_workflow"
+    assert status_payload["status"] == "waiting"
+    assert status_payload["waiting_on"] == "signal:approval.decision:approve_plan"
+    assert status_payload["event_count"] >= 1
+    assert [command["key"] for command in status_payload["pending_commands"]] == ["approval:approve_plan"]
+    assert status_payload["events"][-1]["type"] == "WaitRequested"
+
+    list_result = run_cli(tmp_path, "list", "--db", str(db))
+    list_payload = json.loads(list_result.stdout)
+    assert list_payload == {
+        "workflows": [
+            {
+                "workflow_id": "wf_cli",
+                "workflow_name": "demo_workflow",
+                "status": "waiting",
+                "waiting_on": "signal:approval.decision:approve_plan",
+            }
+        ]
+    }

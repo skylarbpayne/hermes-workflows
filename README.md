@@ -15,7 +15,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
 - manual `signal()` resume API
-- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal`
+- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list`
 
 ## The core runtime idea
 
@@ -165,6 +165,13 @@ PYTHONPATH=src:. python -m hermes_workflows signal \
   --payload-json '{"action":"approve","by":"skylar"}' \
   --source-json '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://..."}' \
   --idempotency-key manual-approval-1
+
+PYTHONPATH=src:. python -m hermes_workflows status \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip
+
+PYTHONPATH=src:. python -m hermes_workflows list \
+  --db /tmp/hermes-workflows.sqlite
 ```
 
 ## Current limitations
