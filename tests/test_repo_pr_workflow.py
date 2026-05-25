@@ -1,7 +1,9 @@
+import asyncio
 import subprocess
 from pathlib import Path
 
 from hermes_workflows import WorkflowEngine
+from examples import repo_pr_workflow as pr_module
 from examples.repo_pr_workflow import repo_pr_workflow
 
 

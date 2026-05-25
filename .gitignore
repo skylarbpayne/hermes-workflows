@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 *.sqlite
 *.db
+.hermes/pr-workflows/
 .env
 .venv/
 dist/
