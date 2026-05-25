@@ -15,7 +15,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
 - manual `signal()` resume API
-- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal`
+- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|list|status|events|outbox`
 
 ## The core runtime idea
 
@@ -140,7 +140,7 @@ The decision returned to workflow code includes the validated `source` so final 
 
 ## Minimal CLI
 
-The CLI is intentionally boring and requires the workflow module path so a fresh process can import/register the decider and steps:
+The CLI is intentionally boring. Runtime commands require the workflow module path so a fresh process can import/register the decider and steps. Inspection commands only need the SQLite DB path, so Palmer can answer "what is stuck and why?" without importing arbitrary workflow code.
 
 ```bash
 PYTHONPATH=src:. python -m hermes_workflows start \
@@ -167,6 +167,17 @@ PYTHONPATH=src:. python -m hermes_workflows signal \
   --idempotency-key manual-approval-1
 ```
 
+Inspection commands emit stable JSON:
+
+```bash
+PYTHONPATH=src:. python -m hermes_workflows list --db /tmp/hermes-workflows.sqlite
+PYTHONPATH=src:. python -m hermes_workflows status --db /tmp/hermes-workflows.sqlite --id wf_first_real_trip
+PYTHONPATH=src:. python -m hermes_workflows events --db /tmp/hermes-workflows.sqlite --id wf_first_real_trip --limit 20
+PYTHONPATH=src:. python -m hermes_workflows outbox --db /tmp/hermes-workflows.sqlite --id wf_first_real_trip --status pending
+```
+
+`status` includes the instance state, result/error, recent events, pending outbox commands, and approval summaries with artifacts/decisions/provenance.
+
 ## Current limitations
 
 V0 is a spike, not production runtime:
@@ -191,5 +202,5 @@ pytest -q
 Expected now:
 
 ```text
-26 passed
+27 passed
 ```

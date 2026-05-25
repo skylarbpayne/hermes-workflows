@@ -53,6 +53,25 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--once", action="store_true", help="Execute at most one command")
     worker.add_argument("--max-commands", type=int)
 
+    list_cmd = sub.add_parser("list", help="List workflow instances in a database")
+    list_cmd.add_argument("--db", required=True, type=Path)
+    list_cmd.add_argument("--status", help="Only show workflow instances with this status")
+
+    status = sub.add_parser("status", help="Show an inspectable status report for one workflow instance")
+    status.add_argument("--db", required=True, type=Path)
+    status.add_argument("--id", required=True, dest="workflow_id")
+    status.add_argument("--recent-events", type=int, default=20)
+
+    events = sub.add_parser("events", help="Show workflow event log entries")
+    events.add_argument("--db", required=True, type=Path)
+    events.add_argument("--id", required=True, dest="workflow_id")
+    events.add_argument("--limit", type=int)
+
+    outbox = sub.add_parser("outbox", help="Show workflow command outbox entries")
+    outbox.add_argument("--db", required=True, type=Path)
+    outbox.add_argument("--id", dest="workflow_id")
+    outbox.add_argument("--status", help="Only show commands with this status")
+
     signal = sub.add_parser("signal", help="Send a signal to a workflow and drain runnable steps")
     signal.add_argument("workflow_ref", help="module:function; imported so the decider is registered")
     signal.add_argument("--db", required=True, type=Path)
@@ -65,7 +84,39 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     engine = WorkflowEngine(args.db)
-    workflow = load_workflow(args.workflow_ref)
+    workflow = (
+        load_workflow(args.workflow_ref)
+        if args.command in {"start", "run", "worker", "signal"}
+        else None
+    )
+
+    if args.command == "list":
+        print(json.dumps({"workflows": engine.list_workflows(status=args.status)}, sort_keys=True))
+        return 0
+    if args.command == "status":
+        print(
+            json.dumps(
+                engine.workflow_status(args.workflow_id, recent_events=args.recent_events),
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "events":
+        workflow_events = engine.events(args.workflow_id)
+        if args.limit is not None:
+            workflow_events = workflow_events[-args.limit :]
+        print(json.dumps({"events": workflow_events}, sort_keys=True))
+        return 0
+    if args.command == "outbox":
+        print(
+            json.dumps(
+                {"commands": engine.outbox_commands(workflow_id=args.workflow_id, status=args.status)},
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    assert workflow is not None
 
     if args.command == "start":
         result = engine.start(

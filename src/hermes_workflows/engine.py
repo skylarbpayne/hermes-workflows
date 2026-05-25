@@ -165,6 +165,78 @@ class WorkflowEngine:
             for row in rows
         ]
 
+    def list_workflows(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = """
+            SELECT id, workflow_name, status, waiting_on, updated_at
+            FROM workflow_instances
+        """
+        params: Tuple[Any, ...] = ()
+        if status is not None:
+            sql += " WHERE status = ?"
+            params = (status,)
+        sql += " ORDER BY updated_at DESC, created_at DESC, id ASC"
+        with self._connect() as con:
+            rows = con.execute(sql, params).fetchall()
+        return [
+            {
+                "workflow_id": row["id"],
+                "workflow_name": row["workflow_name"],
+                "status": row["status"],
+                "waiting_on": row["waiting_on"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def workflow_status(self, workflow_id: str, *, recent_events: int = 20) -> Dict[str, Any]:
+        row = self._instance(workflow_id)
+        events = self.events(workflow_id)
+        pending_outbox = [
+            command
+            for command in self.outbox_commands(workflow_id=workflow_id)
+            if command["status"] != "completed"
+        ]
+        return {
+            "workflow_id": row["id"],
+            "workflow_name": row["workflow_name"],
+            "status": row["status"],
+            "waiting_on": row["waiting_on"],
+            "result": JsonCodec.loads(row["result_json"]),
+            "error": _format_error(JsonCodec.loads(row["error_json"])),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "event_count": len(events),
+            "recent_events": events[-recent_events:],
+            "pending_outbox": pending_outbox,
+            "approvals": _approval_summaries(events),
+        }
+
+    def outbox_commands(
+        self,
+        *,
+        workflow_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+
+        sql = """
+            SELECT *
+            FROM workflow_commands_outbox
+        """
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY workflow_id ASC, id ASC"
+        with self._connect() as con:
+            rows = con.execute(sql, tuple(params)).fetchall()
+        return [_inspectable_command(row, include_workflow_id=workflow_id is None) for row in rows]
+
     def claim_command(
         self,
         workflow_id: str,
@@ -730,6 +802,61 @@ class StepExecutionContext:
     engine: WorkflowEngine
     workflow_id: str
     step_key: str
+
+
+def _inspectable_command(row: sqlite3.Row, *, include_workflow_id: bool) -> Dict[str, Any]:
+    command = {
+        "id": row["id"],
+        "type": row["type"],
+        "key": row["key"],
+        "status": row["status"],
+        "attempts": row["attempts"],
+        "claimed_by": row["claimed_by"],
+        "lease_expires_at": row["lease_expires_at"],
+        "last_error": JsonCodec.loads(row["last_error_json"]),
+        "payload": JsonCodec.loads(row["payload_json"]),
+    }
+    if include_workflow_id:
+        command = {"workflow_id": row["workflow_id"], **command}
+    return command
+
+
+def _approval_summaries(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    decisions = {
+        event["key"].split(":")[-1]: event["payload"]
+        for event in events
+        if event["type"] == "SignalReceived" and event["key"].startswith("signal:approval.decision:")
+    }
+    approvals = []
+    for event in events:
+        if event["type"] != "ApprovalRequested":
+            continue
+        payload = event["payload"]
+        key = payload["key"]
+        decision_event = decisions.get(key)
+        decision = decision_event.get("payload") if decision_event else None
+        source = decision_event.get("source") if decision_event else None
+        action = decision.get("action") if isinstance(decision, dict) else None
+        approvals.append(
+            {
+                "key": key,
+                "status": _approval_status(action),
+                "approver": payload.get("approver"),
+                "prompt": payload.get("prompt"),
+                "artifact": payload.get("artifact"),
+                "decision": decision,
+                "source": source,
+            }
+        )
+    return approvals
+
+
+def _approval_status(action: Optional[str]) -> str:
+    if action == "approve":
+        return "approved"
+    if action == "reject":
+        return "rejected"
+    return action or "waiting"
 
 
 def _format_error(error: Any) -> Optional[str]:
