@@ -73,6 +73,7 @@ def main() -> None:
             "approval.decision",
             key="approve_trip_plan",
             payload={"action": "approve", "by": "skylar"},
+            source={"kind": "human", "id": "skylar", "channel": "demo", "event_id": "demo-approval-message-1"},
             idempotency_key="demo-approval-message-1",
         )
         print("after approval signal", result)
