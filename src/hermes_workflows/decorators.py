@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 from functools import wraps
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Generator
 
 _STEP_REGISTRY: Dict[str, Callable[..., Any]] = {}
+
+
+class DurableStepCall:
+    """Awaitable placeholder for a durable step invocation.
+
+    Direct `await step(ctx, ...)` still works, while `ctx.gather(...)` can inspect
+    multiple calls and enqueue all missing steps before the workflow exits.
+    """
+
+    __durable_step_call__ = True
+
+    def __init__(self, ctx: Any, step_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]):
+        self.ctx = ctx
+        self.step_name = step_name
+        self.args = args
+        self.kwargs = kwargs
+
+    def __await__(self) -> Generator[Any, None, Any]:
+        return self.ctx.run_step(self.step_name, self.args, self.kwargs).__await__()
 
 
 def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -15,7 +34,7 @@ def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]
     return register_workflow(fn)
 
 
-def step(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+def step(fn: Callable[..., Awaitable[Any]]) -> Callable[..., DurableStepCall]:
     """Wrap an async function so workflow calls become durable step awaits.
 
     The decider never runs the step body inline. It records a StepRequested
@@ -26,8 +45,8 @@ def step(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     _STEP_REGISTRY[fn.__name__] = fn
 
     @wraps(fn)
-    async def wrapper(ctx: Any, *args: Any, **kwargs: Any) -> Any:
-        return await ctx.run_step(fn.__name__, args, kwargs)
+    def wrapper(ctx: Any, *args: Any, **kwargs: Any) -> DurableStepCall:
+        return DurableStepCall(ctx, fn.__name__, args, kwargs)
 
     setattr(wrapper, "__step_name__", fn.__name__)
     setattr(wrapper, "__step_body__", fn)

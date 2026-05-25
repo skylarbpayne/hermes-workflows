@@ -17,6 +17,11 @@ class WorkflowWaiting(Exception):
 
 
 @dataclass(frozen=True)
+class PendingStep:
+    key: str
+
+
+@dataclass(frozen=True)
 class RunResult:
     workflow_id: str
     status: str
@@ -404,9 +409,10 @@ class WorkflowContext:
         self.engine = engine
         self.workflow_id = workflow_id
         self._step_call_counts: Dict[str, int] = {}
+        self._gather_call_count = 0
         self.approval = ApprovalClient(self)
 
-    async def run_step(self, step_name: str, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+    async def run_step(self, step_name: str, args: Tuple[Any, ...], kwargs: Dict[str, Any], *, block: bool = True) -> Any:
         call_index = self._step_call_counts.get(step_name, 0)
         self._step_call_counts[step_name] = call_index + 1
         key = f"step:{step_name}:{call_index}"
@@ -430,7 +436,49 @@ class WorkflowContext:
             if inserted:
                 self.engine._insert_command(self.workflow_id, "run_step", key, payload)
 
-        raise WorkflowWaiting(key)
+        if block:
+            raise WorkflowWaiting(key)
+        return PendingStep(key)
+
+    async def gather(self, *calls: Any) -> List[Any]:
+        """Durably fan out multiple step calls before exiting.
+
+        `ctx.gather(step_a(ctx), step_b(ctx))` enqueues every missing step in the
+        group on the same decider pass, then exits on a synthetic gather wait.
+        Once all children have StepCompleted events, results resolve in argument
+        order without re-running completed steps.
+        """
+
+        gather_index = self._gather_call_count
+        self._gather_call_count += 1
+        gather_key = f"gather:{gather_index}"
+        results: List[Any] = []
+        pending: List[str] = []
+
+        for call in calls:
+            if not getattr(call, "__durable_step_call__", False):
+                raise TypeError("ctx.gather only supports @step calls in this spike")
+            result = await self.run_step(call.step_name, call.args, call.kwargs, block=False)
+            if isinstance(result, PendingStep):
+                pending.append(result.key)
+                results.append(None)
+            else:
+                results.append(result)
+
+        if pending:
+            with self.engine._connect() as con:
+                self.engine._append_event(
+                    con,
+                    self.workflow_id,
+                    "GatherWaiting",
+                    key=gather_key,
+                    payload={"pending": pending},
+                    idempotency_key=f"gather-waiting:{gather_key}",
+                    ignore_duplicate=True,
+                )
+            raise WorkflowWaiting(gather_key)
+
+        return results
 
     async def wait_for(self, signal_type: str, *, key: str) -> Any:
         wait_key = f"signal:{signal_type}:{key}"

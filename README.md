@@ -11,6 +11,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - graceful exit when a step/signal is pending
 - local step worker execution through `run_until_idle()` / `drain()`
 - approval request primitive through `ctx.approval.request(...)`
+- durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
 - manual `signal()` resume API
 - tiny cross-process CLI: `python -m hermes_workflows run|signal`
 
@@ -77,6 +78,22 @@ print(engine.signal(
     idempotency_key="discord-message-1",
 ))
 ```
+
+## Durable gather
+
+`ctx.gather(...)` is the first fan-out/fan-in primitive. It only accepts `@step` calls in this spike:
+
+```python
+@workflow
+async def research_brief(ctx, inputs):
+    competitors, pricing = await ctx.gather(
+        research_competitors(ctx, inputs),
+        research_pricing(ctx, inputs),
+    )
+    return {"competitors": competitors, "pricing": pricing}
+```
+
+On the first decider pass it records `StepRequested` for every missing child and exits on `gather:0`. When workers complete the children, replay resolves the gathered results in argument order without re-running completed steps.
 
 ## Minimal CLI
 
