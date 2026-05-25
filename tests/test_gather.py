@@ -56,6 +56,30 @@ def test_gather_drain_executes_all_steps_and_resolves_in_order(tmp_path):
     }
     assert RUNS == [("left", 1), ("right", 2)]
 
+
+def test_gather_does_not_rerun_completed_children_after_restart(tmp_path):
+    RUNS.clear()
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite")
+    result = engine.run_until_idle(fanout_workflow, {"left": 1, "right": 2}, workflow_id="wf_gather")
+    assert result.status == "completed"
+    assert RUNS == [("left", 1), ("right", 2)]
+
     restarted = WorkflowEngine(tmp_path / "workflow.sqlite")
     assert restarted.run_until_idle(fanout_workflow, {"left": 1, "right": 2}, workflow_id="wf_gather").result == result.result
     assert RUNS == [("left", 1), ("right", 2)]
+
+
+def test_gather_rejects_non_step_inputs(tmp_path):
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite")
+
+    @workflow
+    async def bad_gather_workflow(ctx, inputs):
+        async def plain_coroutine():
+            return "not durable"
+
+        return await ctx.gather(plain_coroutine())
+
+    result = engine.run_until_idle(bad_gather_workflow, {}, workflow_id="wf_bad_gather")
+
+    assert result.status == "failed"
+    assert "ctx.gather only supports @step calls" in result.error

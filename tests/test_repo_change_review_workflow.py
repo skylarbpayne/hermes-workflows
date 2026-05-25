@@ -54,6 +54,7 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
         "approval.decision",
         key="approve_change_plan",
         payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/10"},
         idempotency_key="plan-approval",
     )
     assert after_plan.status == "waiting"
@@ -77,6 +78,7 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
         "approval.decision",
         key="approve_change_landing",
         payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/10"},
         idempotency_key="landing-approval",
     )
     assert landing.status == "completed"
@@ -86,7 +88,10 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
     report = report_path.read_text()
     assert "# Repo change review: Change README" in report
     assert "Plan approved by: skylar" in report
+    assert "Plan approval source: discord discord://thread/1/message/10" in report
+    assert "Implementation signaled by: palmer" in report
     assert "Landing approved by: skylar" in report
+    assert "Landing approval source: discord discord://thread/1/message/10" in report
     assert "## Plan" in report
     assert "Goal: Change README" in report
     assert "Verification commands" in report
@@ -94,3 +99,52 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
     assert "Workflow does not bypass human landing approval" in report
     assert "Tests: pass" in report
     assert "NEW.md" in report
+
+
+def test_repo_change_review_rejects_landing_when_approver_is_implementer(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    engine.run_until_idle(
+        repo_change_review_workflow,
+        {
+            "repo_path": str(repo),
+            "goal": "Change README",
+            "verification_commands": ["pytest -q"],
+            "report_path": str(tmp_path / "report.md"),
+            "commit": False,
+            "push": False,
+        },
+        workflow_id="wf_change",
+    )
+    WorkflowEngine(db).signal(
+        "wf_change",
+        "approval.decision",
+        key="approve_change_plan",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/10"},
+        idempotency_key="plan-approval",
+    )
+    (repo / "README.md").write_text("# Demo\n\nChanged.\n")
+    WorkflowEngine(db).signal(
+        "wf_change",
+        "implementation.ready",
+        key="change_ready",
+        payload={"by": "skylar", "summary": "README changed"},
+        idempotency_key="implementation-ready",
+    )
+
+    landing = WorkflowEngine(db).signal(
+        "wf_change",
+        "approval.decision",
+        key="approve_change_landing",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/11"},
+        idempotency_key="landing-approval",
+    )
+
+    assert landing.status == "failed"
+    assert "landing approver must be different from implementer" in landing.error

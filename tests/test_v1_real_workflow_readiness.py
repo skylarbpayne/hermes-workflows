@@ -96,6 +96,7 @@ def test_signal_approval_resumes_and_drains_downstream_steps(tmp_path):
         "approval.decision",
         key="approve_trip_plan",
         payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/30"},
         idempotency_key="discord-approval-1",
     )
 
@@ -115,6 +116,7 @@ def test_signal_approval_resumes_and_drains_downstream_steps(tmp_path):
         "approval.decision",
         key="approve_trip_plan",
         payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/30"},
         idempotency_key="discord-approval-1",
     )
     assert duplicate.status == "completed"

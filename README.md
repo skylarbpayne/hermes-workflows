@@ -75,6 +75,7 @@ print(engine.signal(
     "approval.decision",
     key="approve_trip_plan",
     payload={"action": "approve", "by": "skylar"},
+    source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
     idempotency_key="discord-message-1",
 ))
 ```
@@ -95,6 +96,22 @@ async def research_brief(ctx, inputs):
 
 On the first decider pass it records `StepRequested` for every missing child and exits on `gather:0`. When workers complete the children, replay resolves the gathered results in argument order without re-running completed steps.
 
+## Human approval provenance
+
+`ctx.approval.request(..., approver="human:...")` now requires `approval.decision` signals to include human provenance. Agent-authored or missing-source approval signals fail closed instead of quietly advancing the workflow.
+
+```python
+engine.signal(
+    "wf_trip",
+    "approval.decision",
+    key="approve_trip_plan",
+    payload={"action": "approve", "by": "skylar"},
+    source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+)
+```
+
+The decision returned to workflow code includes the validated `source` so final reports can show who approved, where, and with what provenance.
+
 ## Minimal CLI
 
 The CLI is intentionally boring and requires the workflow module path on both run and signal so a fresh process can import/register the decider and steps:
@@ -113,6 +130,7 @@ PYTHONPATH=src:. python -m hermes_workflows signal \
   --type approval.decision \
   --key approve_trip_plan \
   --payload-json '{"action":"approve","by":"skylar"}' \
+  --source-json '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://..."}' \
   --idempotency-key manual-approval-1
 ```
 
@@ -122,8 +140,8 @@ V0 is a spike, not production runtime:
 
 - no external/distributed worker process yet; only the local in-process worker loop exists
 - no command claiming/locking/backoff yet
-- no parallel `ctx.gather` yet
-- no full approval policy engine yet, only approval request + signal mechanics
+- `ctx.gather` fan-out enqueues child steps together, but the local v0 drain loop still executes runnable commands serially
+- no full approval policy engine yet, only approval request + source-provenance validation
 - no feedback/rerun invalidation yet
 - no Kanban/artifact adapters yet
 - no workflow versioning/determinism guard yet
@@ -140,5 +158,5 @@ pytest -q
 Expected now:
 
 ```text
-2 passed
+17 passed
 ```

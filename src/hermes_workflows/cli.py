@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.add_argument("--type", required=True, dest="signal_type")
     signal.add_argument("--key", required=True)
     signal.add_argument("--payload-json", required=True)
+    signal.add_argument("--source-json")
     signal.add_argument("--idempotency-key")
 
     args = parser.parse_args(argv)
@@ -63,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             args.signal_type,
             key=args.key,
             payload=json.loads(args.payload_json),
+            source=json.loads(args.source_json) if args.source_json else None,
             idempotency_key=args.idempotency_key,
         )
     else:  # pragma: no cover - argparse prevents this.
