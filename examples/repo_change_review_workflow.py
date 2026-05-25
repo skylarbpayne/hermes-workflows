@@ -139,6 +139,10 @@ async def write_change_review_report(
     verification_lines = []
     for result in packet["verification"]["results"]:
         verification_lines.append(f"### `{result['command']}`\n\n```text\n{result['output']}\n```")
+    plan = packet["plan"]
+    verification_commands = chr(10).join(f"- `{command}`" for command in plan["verification_commands"])
+    risk_notes = chr(10).join(f"- {note}" for note in plan["risk_notes"])
+    approval_gates = chr(10).join(f"- `{gate}`" for gate in plan["approval_gates"])
     contents = f"""# Repo change review: {packet['goal']}
 
 Plan approved by: {plan_decision.get('by', 'unknown')}
@@ -150,6 +154,26 @@ Recommendation: {packet['recommendation']}
 - Path: `{packet['plan']['repo']['repo_path']}`
 - Branch: `{packet['plan']['repo']['branch']}`
 - Baseline HEAD: `{packet['plan']['repo']['head']}`
+
+## Plan
+
+Goal: {plan['goal']}
+
+### Approval gates
+
+{approval_gates}
+
+### Verification commands
+
+{verification_commands}
+
+### Implementation boundary
+
+{plan['implementation_boundary']}
+
+### Risk notes
+
+{risk_notes}
 
 ## Verification
 

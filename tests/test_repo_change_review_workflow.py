@@ -87,5 +87,10 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
     assert "# Repo change review: Change README" in report
     assert "Plan approved by: skylar" in report
     assert "Landing approved by: skylar" in report
+    assert "## Plan" in report
+    assert "Goal: Change README" in report
+    assert "Verification commands" in report
+    assert "Implementation boundary" in report
+    assert "Workflow does not bypass human landing approval" in report
     assert "Tests: pass" in report
     assert "NEW.md" in report
