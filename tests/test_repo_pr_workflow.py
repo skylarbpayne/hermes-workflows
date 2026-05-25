@@ -4,7 +4,7 @@ from pathlib import Path
 
 from hermes_workflows import WorkflowEngine
 from examples import repo_pr_workflow as pr_module
-from examples.repo_pr_workflow import repo_pr_workflow
+from examples.repo_pr_workflow import repo_change_plan_workflow, repo_pr_workflow
 
 
 def run(command, cwd):
@@ -52,7 +52,25 @@ def init_repo(path: Path) -> None:
     )
 
 
-def workflow_inputs(repo: Path, tmp_path: Path):
+def approved_plan(tmp_path: Path):
+    return {
+        "ready_for_implementation": True,
+        "plan_artifact_path": str(tmp_path / "implementation-plan.md"),
+        "plan_workflow_id": "wf_plan",
+        "approved_by": "skylar",
+        "approval_source": {
+            "kind": "human",
+            "id": "skylar",
+            "channel": "discord",
+            "message_url": "discord://thread/plan-approved",
+        },
+    }
+
+
+_UNSET = object()
+
+
+def workflow_inputs(repo: Path, tmp_path: Path, *, implementation_plan=_UNSET):
     return {
         "repo_path": str(repo),
         "goal": "Add workflow-backed PR path",
@@ -60,10 +78,78 @@ def workflow_inputs(repo: Path, tmp_path: Path):
         "verification_commands": ["pytest -q"],
         "pr_body_path": str(tmp_path / "pr-body.md"),
         "status_report_path": str(tmp_path / "pr-status.md"),
+        "plan_artifact_path": str(tmp_path / "implementation-plan.md"),
         "create_pr": False,
         "watch_checks": False,
         "merge": False,
+        "implementation_plan": approved_plan(tmp_path) if implementation_plan is _UNSET else implementation_plan,
     }
+
+
+def test_repo_change_plan_workflow_writes_plan_then_waits_for_approval(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+
+    first = WorkflowEngine(db).run_until_idle(
+        repo_change_plan_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=None),
+        workflow_id="wf_plan",
+    )
+
+    assert first.status == "waiting"
+    assert first.waiting_on == "signal:approval.decision:approve_implementation_plan"
+    plan = (tmp_path / "implementation-plan.md").read_text()
+    assert "# Implementation plan: Add workflow-backed PR path" in plan
+    assert "## Goal" in plan
+    assert "## Non-goals" in plan
+    assert "## Proposed file/module changes" in plan
+    assert "## Approval gates" in plan
+    assert "## Tests / verification" in plan
+    assert "## Risks / rollback" in plan
+
+
+def test_repo_change_plan_workflow_records_human_plan_approval(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        repo_change_plan_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=None),
+        workflow_id="wf_plan",
+    )
+
+    result = WorkflowEngine(db).signal(
+        "wf_plan",
+        "approval.decision",
+        key="approve_implementation_plan",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/plan-approved"},
+        idempotency_key="plan-approval",
+    )
+
+    assert result.status == "completed"
+    assert result.result["ready_for_implementation"] is True
+    assert result.result["plan_workflow_id"] == "wf_plan"
+    assert result.result["approval_source"]["message_url"] == "discord://thread/plan-approved"
+
+
+def test_repo_pr_workflow_hard_requires_plan_approval_before_pr_work(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+
+    result = WorkflowEngine(tmp_path / "workflow.sqlite").run_until_idle(
+        repo_pr_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=None),
+        workflow_id="wf_pr",
+    )
+
+    assert result.status == "failed"
+    assert "requires approved implementation_plan" in (result.error or "")
+    assert not (tmp_path / "pr-body.md").exists()
 
 
 def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_approval(tmp_path):
@@ -84,10 +170,13 @@ def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_appro
     assert "## Workflow-backed PR evidence" in body
     assert "Branch: `feat/pr-path`" in body
     assert "pytest -q" in body
-    assert "README.md" in body
+    assert "## Implementation plan approval" in body
+    assert "Plan workflow: `wf_plan`" in body
+    assert "Approved by: skylar via discord discord://thread/plan-approved" in body
     pending_report = (tmp_path / "pr-status.md").read_text()
     assert "Landing approval: not requested" in pending_report
     assert "PR: create_pr disabled" in pending_report
+    assert "Implementation plan: skylar via discord discord://thread/plan-approved" in pending_report
 
     approval = WorkflowEngine(db).signal(
         "wf_pr",

@@ -100,27 +100,44 @@ On the first decider pass it records `StepRequested` for every missing child and
 
 ## Workflow-backed PR path
 
-`examples.repo_pr_workflow` is the first repo PR operating path. It is intentionally explicit instead of magical:
+`examples.repo_pr_workflow` is the first repo PR operating path. It is intentionally explicit instead of magical, and it now hard-requires pre-implementation plan approval.
 
-1. gather git evidence from the branch against `origin/main`
-2. run verification commands such as `pytest -q`
-3. write a PR body with commits, changed files, diff stat, tests, and approval/merge placeholders
-4. optionally push/open the GitHub PR with `gh pr create` or refresh an existing branch PR body/title
-5. optionally watch GitHub checks with `gh pr checks --watch`, retrying briefly while GitHub attaches checks to a newly pushed branch
-6. pause on `approve_pr_landing` so the human approval/merge provenance is recorded before status is finalized
-7. write a reviewable status/landing packet under `.hermes/pr-workflows/` before approval, then overwrite it with final approval provenance after a human signal
+The expected sequence is:
 
-For a real self-dogfood run from a feature branch:
+1. run `repo_change_plan_workflow` to write a concrete implementation plan artifact
+2. pause on `approve_implementation_plan` and record human approval provenance
+3. pass that approved `implementation_plan` result into `repo_pr_workflow`
+4. gather git evidence from the branch against `origin/main`
+5. run verification commands such as `pytest -q`
+6. write a PR body with commits, changed files, diff stat, tests, implementation-plan provenance, and approval/merge placeholders
+7. optionally push/open the GitHub PR with `gh pr create` or refresh an existing branch PR body/title
+8. optionally watch GitHub checks with `gh pr checks --watch`, retrying briefly while GitHub attaches checks to a newly pushed branch
+9. pause on `approve_pr_landing` so the human approval/merge provenance is recorded before status is finalized
+10. write a reviewable status/landing packet under `.hermes/pr-workflows/` before approval, then overwrite it with final approval provenance after a human signal
+
+`repo_pr_workflow` fails closed if `implementation_plan` is missing, not marked `ready_for_implementation`, missing the plan artifact/workflow id, or missing human Skylar approval provenance.
+
+For a real self-dogfood run, start with the plan workflow:
+
+```bash
+PYTHONPATH=src:. python -m hermes_workflows run \
+  examples.repo_pr_workflow:repo_change_plan_workflow \
+  --db .hermes/pr-workflows/repo-pr.sqlite \
+  --id wf_repo_pr_<slug>_plan \
+  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","verification_commands":["pytest -q","python -m compileall -q src tests examples"]}'
+```
+
+After the plan artifact is reviewed, resume with a human-sourced approval signal. The completed result becomes the `implementation_plan` input for the PR workflow:
 
 ```bash
 PYTHONPATH=src:. python -m hermes_workflows run \
   examples.repo_pr_workflow:repo_pr_workflow \
   --db .hermes/pr-workflows/repo-pr.sqlite \
   --id wf_repo_pr_<slug> \
-  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","verification_commands":["pytest -q","python -m compileall -q src tests examples"],"create_pr":true,"push_branch":true,"watch_checks":true,"gh_home":"/Users/skylarpayne"}'
+  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","implementation_plan":{"ready_for_implementation":true,"plan_workflow_id":"wf_repo_pr_<slug>_plan","plan_artifact_path":".hermes/pr-workflows/wf_repo_pr_<slug>_plan-implementation-plan.md","approved_by":"skylar","approval_source":{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://..."}},"verification_commands":["pytest -q","python -m compileall -q src tests examples"],"create_pr":true,"push_branch":true,"watch_checks":true,"gh_home":"/Users/skylarpayne"}'
 ```
 
-The run should end waiting on `signal:approval.decision:approve_pr_landing`. That is the landing gate: review the PR/status packet, then send a human-sourced approval signal if merge/landing should proceed. Do not treat the agent opening the PR as merge approval.
+The PR workflow should end waiting on `signal:approval.decision:approve_pr_landing`. That is the separate landing gate: review the PR/status packet, then send a human-sourced approval signal if merge/landing should proceed. Plan approval is not merge approval.
 
 ## Human approval provenance
 
@@ -198,5 +215,5 @@ pytest -q
 Expected now:
 
 ```text
-26 passed
+30 passed
 ```
