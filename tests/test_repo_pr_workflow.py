@@ -85,6 +85,9 @@ def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_appro
     assert "Branch: `feat/pr-path`" in body
     assert "pytest -q" in body
     assert "README.md" in body
+    pending_report = (tmp_path / "pr-status.md").read_text()
+    assert "Landing approval: not requested" in pending_report
+    assert "PR: create_pr disabled" in pending_report
 
     approval = WorkflowEngine(db).signal(
         "wf_pr",

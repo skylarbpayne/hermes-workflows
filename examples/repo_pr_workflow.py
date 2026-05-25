@@ -299,7 +299,7 @@ async def write_pr_status_report(
     body: Dict[str, Any],
     pr: Dict[str, Any],
     checks: Dict[str, Any],
-    landing_decision: Dict[str, Any],
+    landing_decision: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     report_path = Path(inputs.get("status_report_path") or repo / ".hermes" / "pr-workflows" / f"{ctx.workflow_id}-status.md")
@@ -355,7 +355,8 @@ async def write_pr_status_report(
         "pr_url": pr_url,
         "verification_ok": verification["ok"],
         "checks_ok": checks.get("ok"),
-        "landing_approval_source": landing_decision.get("source"),
+        "approval_pending": landing_decision is None,
+        "landing_approval_source": (landing_decision or {}).get("source"),
     }
 
 
@@ -368,6 +369,7 @@ async def repo_pr_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
     body = await write_pr_body(ctx, inputs, evidence, verification)
     pr = await open_pull_request(ctx, inputs, evidence, verification, body)
     checks = await watch_pull_request_checks(ctx, inputs, pr)
+    landing_packet = await write_pr_status_report(ctx, inputs, evidence, verification, body, pr, checks)
     landing_decision = await ctx.approval.request(
         f"Approve PR landing packet for: {inputs['goal']}?",
         key="approve_pr_landing",
@@ -378,6 +380,7 @@ async def repo_pr_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
             "pr": pr,
             "checks": checks,
             "body": body,
+            "landing_packet": landing_packet,
         },
         approver="human:skylar",
         allowed=["approve", "reject", "edit", "rerun"],
