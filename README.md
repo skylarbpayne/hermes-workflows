@@ -12,7 +12,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - local step worker execution through `run_until_idle()` / `drain()`
 - approval request primitive through `ctx.approval.request(...)`
 - manual `signal()` resume API
-- idempotent signal handling
+- tiny cross-process CLI: `python -m hermes_workflows run|signal`
 
 ## The core runtime idea
 
@@ -76,6 +76,27 @@ print(engine.signal(
     payload={"action": "approve", "by": "skylar"},
     idempotency_key="discord-message-1",
 ))
+```
+
+## Minimal CLI
+
+The CLI is intentionally boring and requires the workflow module path on both run and signal so a fresh process can import/register the decider and steps:
+
+```bash
+PYTHONPATH=src:. python -m hermes_workflows run \
+  examples.first_real_trip_workflow:first_real_trip_workflow \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --input-json '{"destination":"NYC"}'
+
+PYTHONPATH=src:. python -m hermes_workflows signal \
+  examples.first_real_trip_workflow:first_real_trip_workflow \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --type approval.decision \
+  --key approve_trip_plan \
+  --payload-json '{"action":"approve","by":"skylar"}' \
+  --idempotency-key manual-approval-1
 ```
 
 ## Current limitations
