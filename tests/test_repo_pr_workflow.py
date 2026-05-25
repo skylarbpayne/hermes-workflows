@@ -86,6 +86,24 @@ def workflow_inputs(repo: Path, tmp_path: Path, *, implementation_plan=_UNSET):
     }
 
 
+def approve_plan_workflow(engine: WorkflowEngine, repo: Path, tmp_path: Path):
+    engine.run_until_idle(
+        repo_change_plan_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=None),
+        workflow_id="wf_plan",
+    )
+    result = engine.signal(
+        "wf_plan",
+        "approval.decision",
+        key="approve_implementation_plan",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/plan-approved"},
+        idempotency_key="plan-approval",
+    )
+    assert result.status == "completed"
+    return result.result
+
+
 def test_repo_change_plan_workflow_writes_plan_then_waits_for_approval(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -134,6 +152,32 @@ def test_repo_change_plan_workflow_records_human_plan_approval(tmp_path):
     assert result.result["ready_for_implementation"] is True
     assert result.result["plan_workflow_id"] == "wf_plan"
     assert result.result["approval_source"]["message_url"] == "discord://thread/plan-approved"
+    assert result.result["plan_artifact_sha256"]
+
+
+def test_repo_change_plan_workflow_rejects_agent_plan_approval(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        repo_change_plan_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=None),
+        workflow_id="wf_plan",
+    )
+
+    result = engine.signal(
+        "wf_plan",
+        "approval.decision",
+        key="approve_implementation_plan",
+        payload={"action": "approve", "by": "palmer"},
+        source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
+        idempotency_key="bad-plan-approval",
+    )
+
+    assert result.status == "failed"
+    assert "requires human approval source" in (result.error or "")
 
 
 def test_repo_pr_workflow_hard_requires_plan_approval_before_pr_work(tmp_path):
@@ -152,15 +196,74 @@ def test_repo_pr_workflow_hard_requires_plan_approval_before_pr_work(tmp_path):
     assert not (tmp_path / "pr-body.md").exists()
 
 
+def test_repo_pr_workflow_rejects_fabricated_plan_without_durable_workflow(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (tmp_path / "implementation-plan.md").write_text("# fake plan\n")
+
+    result = WorkflowEngine(tmp_path / "workflow.sqlite").run_until_idle(
+        repo_pr_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=approved_plan(tmp_path)),
+        workflow_id="wf_pr",
+    )
+
+    assert result.status == "failed"
+    assert "requires completed implementation plan workflow" in (result.error or "")
+    assert not (tmp_path / "pr-body.md").exists()
+
+
+def test_repo_pr_workflow_rejects_missing_plan_artifact_after_approval(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    implementation_plan = approve_plan_workflow(engine, repo, tmp_path)
+    Path(implementation_plan["plan_artifact_path"]).unlink()
+
+    result = engine.run_until_idle(
+        repo_pr_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=implementation_plan),
+        workflow_id="wf_pr",
+    )
+
+    assert result.status == "failed"
+    assert "plan artifact does not exist" in (result.error or "")
+    assert not (tmp_path / "pr-body.md").exists()
+
+
+def test_repo_pr_workflow_rejects_tampered_plan_artifact_after_approval(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    implementation_plan = approve_plan_workflow(engine, repo, tmp_path)
+    Path(implementation_plan["plan_artifact_path"]).write_text("# changed after approval\n")
+
+    result = engine.run_until_idle(
+        repo_pr_workflow,
+        workflow_inputs(repo, tmp_path, implementation_plan=implementation_plan),
+        workflow_id="wf_pr",
+    )
+
+    assert result.status == "failed"
+    assert "plan artifact hash does not match" in (result.error or "")
+    assert not (tmp_path / "pr-body.md").exists()
+
+
 def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_approval(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
     db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    implementation_plan = approve_plan_workflow(engine, repo, tmp_path)
 
-    first = WorkflowEngine(db).run_until_idle(
+    first = engine.run_until_idle(
         repo_pr_workflow,
-        workflow_inputs(repo, tmp_path),
+        workflow_inputs(repo, tmp_path, implementation_plan=implementation_plan),
         workflow_id="wf_pr",
     )
 
@@ -172,13 +275,15 @@ def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_appro
     assert "pytest -q" in body
     assert "## Implementation plan approval" in body
     assert "Plan workflow: `wf_plan`" in body
+    assert f"Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`" in body
     assert "Approved by: skylar via discord discord://thread/plan-approved" in body
     pending_report = (tmp_path / "pr-status.md").read_text()
     assert "Landing approval: not requested" in pending_report
     assert "PR: create_pr disabled" in pending_report
     assert "Implementation plan: skylar via discord discord://thread/plan-approved" in pending_report
+    assert f"Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`" in pending_report
 
-    approval = WorkflowEngine(db).signal(
+    approval = engine.signal(
         "wf_pr",
         "approval.decision",
         key="approve_pr_landing",
@@ -201,9 +306,11 @@ def test_repo_pr_workflow_rejects_agent_or_missing_landing_provenance(tmp_path):
     repo.mkdir()
     init_repo(repo)
     db = tmp_path / "workflow.sqlite"
-    WorkflowEngine(db).run_until_idle(repo_pr_workflow, workflow_inputs(repo, tmp_path), workflow_id="wf_pr")
+    engine = WorkflowEngine(db)
+    implementation_plan = approve_plan_workflow(engine, repo, tmp_path)
+    engine.run_until_idle(repo_pr_workflow, workflow_inputs(repo, tmp_path, implementation_plan=implementation_plan), workflow_id="wf_pr")
 
-    result = WorkflowEngine(db).signal(
+    result = engine.signal(
         "wf_pr",
         "approval.decision",
         key="approve_pr_landing",

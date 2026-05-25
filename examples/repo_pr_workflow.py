@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import time
@@ -81,7 +82,30 @@ def _implementation_plan_line(plan: Dict[str, Any]) -> str:
     return f"{plan.get('approved_by', 'unknown')} via {source.get('channel', 'unknown')} {provenance}"
 
 
-def _require_approved_implementation_plan(inputs: Dict[str, Any]) -> Dict[str, Any]:
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _has_matching_plan_approval_event(events: List[Dict[str, Any]], durable_plan: Dict[str, Any]) -> bool:
+    for event in events:
+        if event.get("type") != "SignalReceived" or event.get("key") != "signal:approval.decision:approve_implementation_plan":
+            continue
+        payload = event.get("payload") or {}
+        decision = payload.get("payload") or {}
+        source = payload.get("source") or {}
+        if (
+            decision.get("action") == "approve"
+            and decision.get("by") == durable_plan.get("approved_by") == "skylar"
+            and source == durable_plan.get("approval_source")
+            and source.get("kind") == "human"
+            and source.get("id") == "skylar"
+            and _source_has_provenance(source)
+        ):
+            return True
+    return False
+
+
+def _require_approved_implementation_plan(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
     plan = inputs.get("implementation_plan")
     if not isinstance(plan, dict) or plan.get("ready_for_implementation") is not True:
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan before PR work")
@@ -92,7 +116,46 @@ def _require_approved_implementation_plan(inputs: Dict[str, Any]) -> Dict[str, A
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan with external approval provenance")
     if not plan.get("plan_artifact_path") or not plan.get("plan_workflow_id"):
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan with plan artifact and workflow id")
-    return plan
+
+    try:
+        plan_status = ctx.engine.workflow_status(str(plan["plan_workflow_id"]), recent_events=100)
+    except KeyError as exc:
+        raise RuntimeError(f"repo_pr_workflow requires completed implementation plan workflow: {plan['plan_workflow_id']}") from exc
+
+    if plan_status.get("workflow_name") != "repo_change_plan_workflow" or plan_status.get("status") != "completed":
+        raise RuntimeError(f"repo_pr_workflow requires completed implementation plan workflow: {plan['plan_workflow_id']}")
+    durable_plan = plan_status.get("result")
+    if not isinstance(durable_plan, dict) or durable_plan.get("ready_for_implementation") is not True:
+        raise RuntimeError("repo_pr_workflow requires implementation plan workflow result ready_for_implementation=true")
+    durable_source = durable_plan.get("approval_source")
+    if durable_plan.get("approved_by") != "skylar" or not isinstance(durable_source, dict) or durable_source.get("kind") != "human" or durable_source.get("id") != "skylar":
+        raise RuntimeError("repo_pr_workflow requires durable implementation plan approval from human:skylar")
+    if not _source_has_provenance(durable_source) or not _has_matching_plan_approval_event(plan_status.get("events") or [], durable_plan):
+        raise RuntimeError("repo_pr_workflow requires durable implementation plan approval event with external provenance")
+
+    for field in ("plan_workflow_id", "plan_artifact_path", "approved_by", "approval_source", "plan_artifact_sha256"):
+        if durable_plan.get(field) != plan.get(field):
+            raise RuntimeError(f"repo_pr_workflow implementation_plan does not match durable plan workflow field: {field}")
+
+    expected_scope = {
+        "repo_path": str(Path(inputs["repo_path"]).expanduser().resolve()),
+        "goal": inputs["goal"],
+        "base_branch": inputs.get("base_branch", "main"),
+        "remote_name": inputs.get("remote_name", "origin"),
+    }
+    for field, expected in expected_scope.items():
+        if durable_plan.get(field) != expected:
+            raise RuntimeError(f"repo_pr_workflow implementation_plan does not match current PR workflow field: {field}")
+
+    artifact_path = Path(durable_plan["plan_artifact_path"]).expanduser().resolve()
+    if not artifact_path.is_file():
+        raise RuntimeError(f"repo_pr_workflow plan artifact does not exist: {artifact_path}")
+    artifact_bytes = artifact_path.read_bytes()
+    if not artifact_bytes.strip():
+        raise RuntimeError(f"repo_pr_workflow plan artifact is empty: {artifact_path}")
+    if _sha256_file(artifact_path) != durable_plan.get("plan_artifact_sha256"):
+        raise RuntimeError(f"repo_pr_workflow plan artifact hash does not match approved plan workflow: {artifact_path}")
+    return durable_plan
 
 
 def _owner_repo(remote_url: str) -> str:
@@ -308,6 +371,7 @@ async def write_pr_body(
 ## Implementation plan approval
 - Plan workflow: `{implementation_plan['plan_workflow_id']}`
 - Plan artifact: `{implementation_plan['plan_artifact_path']}`
+- Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`
 - Approved by: {_implementation_plan_line(implementation_plan)}
 
 ## Verification
@@ -469,6 +533,7 @@ async def write_pr_status_report(
 - Implementation plan: {_implementation_plan_line(implementation_plan)}
 - Plan workflow: `{implementation_plan['plan_workflow_id']}`
 - Plan artifact: `{implementation_plan['plan_artifact_path']}`
+- Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`
 - Landing approval: {_approval_source_line(landing_decision)}
 - Merge: not attempted by v0 status workflow
 
@@ -523,7 +588,12 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
     return {
         "ready_for_implementation": True,
         "plan_workflow_id": ctx.workflow_id,
+        "repo_path": str(Path(inputs["repo_path"]).expanduser().resolve()),
+        "goal": inputs["goal"],
+        "base_branch": inputs.get("base_branch", "main"),
+        "remote_name": inputs.get("remote_name", "origin"),
         "plan_artifact_path": plan["plan_artifact_path"],
+        "plan_artifact_sha256": _sha256_file(Path(plan["plan_artifact_path"]).expanduser().resolve()),
         "approved_by": decision.get("by"),
         "approval_source": decision.get("source"),
     }
@@ -531,7 +601,7 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
 
 @workflow
 async def repo_pr_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
-    implementation_plan = _require_approved_implementation_plan(inputs)
+    implementation_plan = _require_approved_implementation_plan(ctx, inputs)
     evidence, verification = await ctx.gather(
         gather_pr_evidence(ctx, inputs),
         run_pr_verification(ctx, inputs),
