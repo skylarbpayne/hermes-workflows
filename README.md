@@ -9,6 +9,8 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - SQLite append-only-ish event log
 - step memoization across process restarts
 - graceful exit when a step/signal is pending
+- local step worker execution through `run_until_idle()` / `drain()`
+- approval request primitive through `ctx.approval.request(...)`
 - manual `signal()` resume API
 - idempotent signal handling
 
@@ -62,22 +64,16 @@ async def trip_planning(ctx, inputs):
 
 engine = WorkflowEngine("workflow.sqlite")
 
-# Start: emits StepRequested + run_step outbox command, then exits waiting.
-print(engine.start(trip_planning, {"destination": "NYC"}, workflow_id="wf_trip"))
+# Start and drain local step commands until approval is needed.
+print(engine.run_until_idle(trip_planning, {"destination": "NYC"}, workflow_id="wf_trip"))
 
-# Simulate worker completion after a process restart.
+# Manual signal resumes the decider after a process restart and drains downstream steps.
 engine = WorkflowEngine("workflow.sqlite")
-print(engine.complete_step("wf_trip", "step:collect_constraints:0", {"hard": ["no red eyes"]}))
-
-# Simulate next worker completion; workflow now waits for approval signal.
-print(engine.complete_step("wf_trip", "step:draft_options:0", {"summary": "NYC plan"}))
-
-# Manual signal resumes and completes the workflow.
 print(engine.signal(
     "wf_trip",
-    "approval.granted",
+    "approval.decision",
     key="approve_trip_plan",
-    payload={"by": "skylar", "decision": "approved"},
+    payload={"action": "approve", "by": "skylar"},
     idempotency_key="discord-message-1",
 ))
 ```
@@ -86,10 +82,10 @@ print(engine.signal(
 
 V0 is a spike, not production runtime:
 
-- no worker loop yet
+- no external/distributed worker process yet; only the local in-process worker loop exists
 - no command claiming/locking/backoff yet
 - no parallel `ctx.gather` yet
-- no approval policy engine yet
+- no full approval policy engine yet, only approval request + signal mechanics
 - no feedback/rerun invalidation yet
 - no Kanban/artifact adapters yet
 - no workflow versioning/determinism guard yet

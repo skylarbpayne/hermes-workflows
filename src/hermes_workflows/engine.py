@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import sqlite3
 import time
@@ -64,6 +66,31 @@ class WorkflowEngine:
                 )
         return self._run_decider(workflow_id, workflow_fn)
 
+    def run_until_idle(self, workflow_fn: Callable[..., Any], inputs: Any, *, workflow_id: str) -> RunResult:
+        """Start a workflow and execute local run_step commands until blocked.
+
+        This is the first practical test-drive runner: it proves real step bodies
+        can run out-of-band while the workflow decider still exits cleanly at
+        durable waits.
+        """
+
+        result = self.start(workflow_fn, inputs, workflow_id=workflow_id)
+        return self.drain(workflow_id, initial=result)
+
+    def drain(self, workflow_id: str, *, initial: Optional[RunResult] = None) -> RunResult:
+        """Execute pending local run_step commands until no runnable command remains."""
+
+        result = initial or self._result_from_instance(workflow_id)
+        while True:
+            command = self._next_pending_command(workflow_id, command_type="run_step")
+            if command is None:
+                return self._result_from_instance(workflow_id) if result is None else self._result_from_instance(workflow_id)
+            result = self._execute_run_step_command(workflow_id, command)
+            if result.status in {"failed", "completed"}:
+                # There might still be historical pending commands from a corrupt
+                # test DB, but v0 stops on terminal status.
+                return result
+
     def complete_step(self, workflow_id: str, step_key: str, output: Any) -> RunResult:
         workflow_fn = _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]]
         with self._connect() as con:
@@ -75,6 +102,10 @@ class WorkflowEngine:
                 payload={"output": output},
                 idempotency_key=f"completed:{step_key}",
                 ignore_duplicate=True,
+            )
+            con.execute(
+                "UPDATE workflow_commands_outbox SET status = 'completed' WHERE workflow_id = ? AND key = ? AND type = 'run_step'",
+                (workflow_id, step_key),
             )
             con.execute(
                 "UPDATE workflow_instances SET status = 'running', updated_at = ? WHERE id = ?",
@@ -93,8 +124,9 @@ class WorkflowEngine:
     ) -> RunResult:
         workflow_fn = _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]]
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
+        inserted = False
         with self._connect() as con:
-            self._append_event(
+            inserted = self._append_event(
                 con,
                 workflow_id,
                 "SignalReceived",
@@ -103,11 +135,13 @@ class WorkflowEngine:
                 idempotency_key=dedupe,
                 ignore_duplicate=True,
             )
-            con.execute(
-                "UPDATE workflow_instances SET status = 'running', updated_at = ? WHERE id = ?",
-                (_now(), workflow_id),
-            )
-        return self._run_decider(workflow_id, workflow_fn)
+            if inserted:
+                con.execute(
+                    "UPDATE workflow_instances SET status = 'running', updated_at = ? WHERE id = ?",
+                    (_now(), workflow_id),
+                )
+        result = self._run_decider(workflow_id, workflow_fn) if inserted else self._result_from_instance(workflow_id)
+        return self.drain(workflow_id, initial=result)
 
     def pending_commands(self, workflow_id: str) -> List[Dict[str, Any]]:
         with self._connect() as con:
@@ -152,7 +186,7 @@ class WorkflowEngine:
         instance = self._instance(workflow_id)
         ctx = WorkflowContext(self, workflow_id)
         try:
-            result = _run_async(workflow_fn(ctx, JsonCodec.loads(instance["input_json"])))
+            result = _run_maybe_async(workflow_fn(ctx, JsonCodec.loads(instance["input_json"])))
         except WorkflowWaiting as waiting:
             with self._connect() as con:
                 con.execute(
@@ -164,7 +198,7 @@ class WorkflowEngine:
                     (waiting.waiting_on, _now(), workflow_id),
                 )
             return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=waiting.waiting_on)
-        except Exception as exc:  # v0: fail closed and keep the error inspectable.
+        except Exception as exc:  # v0/v1: fail closed and keep the error inspectable.
             with self._connect() as con:
                 con.execute(
                     """
@@ -195,6 +229,77 @@ class WorkflowEngine:
                 ignore_duplicate=True,
             )
         return RunResult(workflow_id=workflow_id, status="completed", result=result)
+
+    def _result_from_instance(self, workflow_id: str) -> RunResult:
+        row = self._instance(workflow_id)
+        return RunResult(
+            workflow_id=workflow_id,
+            status=row["status"],
+            waiting_on=row["waiting_on"],
+            result=JsonCodec.loads(row["result_json"]),
+            error=JsonCodec.dumps(JsonCodec.loads(row["error_json"])) if row["error_json"] else None,
+        )
+
+    def _execute_run_step_command(self, workflow_id: str, command: sqlite3.Row) -> RunResult:
+        from .decorators import get_step_body
+
+        key = command["key"]
+        payload = JsonCodec.loads(command["payload_json"])
+        step_name = payload["step_name"]
+        args = payload.get("args", [])
+        kwargs = payload.get("kwargs", {})
+        body = get_step_body(step_name)
+
+        with self._connect() as con:
+            con.execute(
+                "UPDATE workflow_commands_outbox SET status = 'running' WHERE id = ? AND status = 'pending'",
+                (command["id"],),
+            )
+
+        try:
+            output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
+        except Exception as exc:
+            with self._connect() as con:
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "StepFailed",
+                    key=key,
+                    payload={"error": {"type": type(exc).__name__, "message": str(exc)}},
+                    idempotency_key=f"failed:{key}:{command['id']}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    "UPDATE workflow_commands_outbox SET status = 'failed' WHERE id = ?",
+                    (command["id"],),
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'failed', error_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (JsonCodec.dumps({"type": type(exc).__name__, "message": str(exc)}), _now(), workflow_id),
+                )
+            return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
+
+        with self._connect() as con:
+            con.execute(
+                "UPDATE workflow_commands_outbox SET status = 'completed' WHERE id = ?",
+                (command["id"],),
+            )
+        return self.complete_step(workflow_id, key, output)
+
+    def _next_pending_command(self, workflow_id: str, *, command_type: str) -> Optional[sqlite3.Row]:
+        with self._connect() as con:
+            return con.execute(
+                """
+                SELECT * FROM workflow_commands_outbox
+                WHERE workflow_id = ? AND type = ? AND status = 'pending'
+                ORDER BY id ASC LIMIT 1
+                """,
+                (workflow_id, command_type),
+            ).fetchone()
 
     def _instance(self, workflow_id: str) -> sqlite3.Row:
         with self._connect() as con:
@@ -299,6 +404,7 @@ class WorkflowContext:
         self.engine = engine
         self.workflow_id = workflow_id
         self._step_call_counts: Dict[str, int] = {}
+        self.approval = ApprovalClient(self)
 
     async def run_step(self, step_name: str, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         call_index = self._step_call_counts.get(step_name, 0)
@@ -362,19 +468,65 @@ class WorkflowContext:
         return JsonCodec.loads(row["payload_json"])
 
 
+class ApprovalClient:
+    def __init__(self, ctx: WorkflowContext):
+        self.ctx = ctx
+
+    async def request(
+        self,
+        prompt: str,
+        *,
+        key: str,
+        artifact: Any = None,
+        approver: str = "human",
+        allowed: Optional[List[str]] = None,
+        authority: Optional[List[str]] = None,
+        timeout: Optional[str] = None,
+    ) -> Any:
+        event_key = f"approval:{key}"
+        if self.ctx._last_event("ApprovalRequested", event_key) is None:
+            payload = {
+                "prompt": prompt,
+                "key": key,
+                "artifact": artifact,
+                "approver": approver,
+                "allowed": allowed or ["approve", "reject"],
+                "authority": authority or [],
+                "timeout": timeout,
+            }
+            with self.ctx.engine._connect() as con:
+                inserted = self.ctx.engine._append_event(
+                    con,
+                    self.ctx.workflow_id,
+                    "ApprovalRequested",
+                    key=event_key,
+                    payload=payload,
+                    idempotency_key=f"approval-requested:{key}",
+                    ignore_duplicate=True,
+                )
+            if inserted:
+                self.ctx.engine._insert_command(self.ctx.workflow_id, "notify_approval", event_key, payload)
+        return await self.ctx.wait_for("approval.decision", key=key)
+
+
+@dataclass(frozen=True)
+class StepExecutionContext:
+    engine: WorkflowEngine
+    workflow_id: str
+    step_key: str
+
+
 def _now() -> int:
     return int(time.time())
 
 
-def _run_async(awaitable: Any) -> Any:
-    try:
-        import asyncio
-
-        return asyncio.run(awaitable)
-    except RuntimeError as exc:
-        # This tiny v0 is intentionally synchronous from the caller's point of
-        # view. A future async engine can remove this guard.
-        raise RuntimeError("WorkflowEngine v0 must be called outside an active event loop") from exc
+def _run_maybe_async(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        try:
+            return asyncio.run(value)
+        except RuntimeError as exc:
+            raise RuntimeError("WorkflowEngine v0/v1 must be called outside an active event loop") from exc
+    return value
 
 
 _WORKFLOW_REGISTRY: Dict[str, Callable[..., Any]] = {}
