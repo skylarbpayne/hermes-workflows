@@ -13,6 +13,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - command claiming/leasing for external worker processes
 - approval request primitive through `ctx.approval.request(...)`
 - durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
+- workflow-backed repository PR path through `examples.repo_pr_workflow`
 - manual `signal()` resume API
 - tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal`
 
@@ -97,6 +98,30 @@ async def research_brief(ctx, inputs):
 
 On the first decider pass it records `StepRequested` for every missing child and exits on `gather:0`. When workers complete the children, replay resolves the gathered results in argument order without re-running completed steps.
 
+## Workflow-backed PR path
+
+`examples.repo_pr_workflow` is the first repo PR operating path. It is intentionally explicit instead of magical:
+
+1. gather git evidence from the branch against `origin/main`
+2. run verification commands such as `pytest -q`
+3. write a PR body with commits, changed files, diff stat, tests, and approval/merge placeholders
+4. optionally push/open the GitHub PR with `gh pr create` or refresh an existing branch PR body/title
+5. optionally watch GitHub checks with `gh pr checks --watch`, retrying briefly while GitHub attaches checks to a newly pushed branch
+6. pause on `approve_pr_landing` so the human approval/merge provenance is recorded before status is finalized
+7. write a reviewable status/landing packet under `.hermes/pr-workflows/` before approval, then overwrite it with final approval provenance after a human signal
+
+For a real self-dogfood run from a feature branch:
+
+```bash
+PYTHONPATH=src:. python -m hermes_workflows run \
+  examples.repo_pr_workflow:repo_pr_workflow \
+  --db .hermes/pr-workflows/repo-pr.sqlite \
+  --id wf_repo_pr_<slug> \
+  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","goal":"Add workflow-backed PR operating path","verification_commands":["pytest -q","python -m compileall -q src tests examples"],"create_pr":true,"push_branch":true,"watch_checks":true,"gh_home":"/Users/skylarpayne"}'
+```
+
+The run should end waiting on `signal:approval.decision:approve_pr_landing`. That is the landing gate: review the PR/status packet, then send a human-sourced approval signal if merge/landing should proceed. Do not treat the agent opening the PR as merge approval.
+
 ## Human approval provenance
 
 `ctx.approval.request(..., approver="human:...")` now requires `approval.decision` signals to include human provenance. Agent-authored or missing-source approval signals fail closed instead of quietly advancing the workflow.
@@ -166,5 +191,5 @@ pytest -q
 Expected now:
 
 ```text
-22 passed
+26 passed
 ```

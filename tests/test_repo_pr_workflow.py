@@ -1,0 +1,163 @@
+import asyncio
+import subprocess
+from pathlib import Path
+
+from hermes_workflows import WorkflowEngine
+from examples import repo_pr_workflow as pr_module
+from examples.repo_pr_workflow import repo_pr_workflow
+
+
+def run(command, cwd):
+    return subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+
+
+def init_repo(path: Path) -> None:
+    (path / "README.md").write_text("# Demo\n")
+    (path / "tests").mkdir()
+    (path / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n")
+    run(["git", "init", "-b", "main"], path)
+    run(["git", "add", "."], path)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+        env={
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+    run(["git", "remote", "add", "origin", str(path)], path)
+    run(["git", "fetch", "origin", "main:refs/remotes/origin/main"], path)
+    run(["git", "checkout", "-b", "feat/pr-path"], path)
+    (path / "README.md").write_text("# Demo\n\nWorkflow-backed PR path.\n")
+    run(["git", "add", "."], path)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add workflow-backed PR path"],
+        cwd=path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+        env={
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+
+
+def workflow_inputs(repo: Path, tmp_path: Path):
+    return {
+        "repo_path": str(repo),
+        "goal": "Add workflow-backed PR path",
+        "summary": ["Adds durable PR evidence, verification, status, and approval provenance."],
+        "verification_commands": ["pytest -q"],
+        "pr_body_path": str(tmp_path / "pr-body.md"),
+        "status_report_path": str(tmp_path / "pr-status.md"),
+        "create_pr": False,
+        "watch_checks": False,
+        "merge": False,
+    }
+
+
+def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_approval(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+
+    first = WorkflowEngine(db).run_until_idle(
+        repo_pr_workflow,
+        workflow_inputs(repo, tmp_path),
+        workflow_id="wf_pr",
+    )
+
+    assert first.status == "waiting"
+    assert first.waiting_on == "signal:approval.decision:approve_pr_landing"
+    body = (tmp_path / "pr-body.md").read_text()
+    assert "## Workflow-backed PR evidence" in body
+    assert "Branch: `feat/pr-path`" in body
+    assert "pytest -q" in body
+    assert "README.md" in body
+    pending_report = (tmp_path / "pr-status.md").read_text()
+    assert "Landing approval: not requested" in pending_report
+    assert "PR: create_pr disabled" in pending_report
+
+    approval = WorkflowEngine(db).signal(
+        "wf_pr",
+        "approval.decision",
+        key="approve_pr_landing",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "kanban", "message_url": "kanban://t_5fc570b1/comment/1"},
+        idempotency_key="landing-approval",
+    )
+
+    assert approval.status == "completed"
+    assert approval.result["ready"] is True
+    assert approval.result["verification_ok"] is True
+    assert approval.result["pr_url"] == ""
+    report = (tmp_path / "pr-status.md").read_text()
+    assert "Landing approval: skylar via kanban kanban://t_5fc570b1/comment/1" in report
+    assert "PR: create_pr disabled" in report
+
+
+def test_repo_pr_workflow_rejects_agent_or_missing_landing_provenance(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(repo_pr_workflow, workflow_inputs(repo, tmp_path), workflow_id="wf_pr")
+
+    result = WorkflowEngine(db).signal(
+        "wf_pr",
+        "approval.decision",
+        key="approve_pr_landing",
+        payload={"action": "approve", "by": "palmer"},
+        source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
+        idempotency_key="bad-approval",
+    )
+
+    assert result.status == "failed"
+    assert "requires human approval source" in (result.error or "")
+
+
+def test_check_watcher_waits_for_github_to_report_new_branch_checks(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, *, cwd, env=None, timeout=300):
+        calls.append(command)
+        output = "pytest\tpass\t0\thttps://github.com/example/actions/runs/1"
+        ok = True
+        if command == ["gh", "pr", "checks"] and len([c for c in calls if c == command]) == 1:
+            output = "no checks reported on the 'feat/pr-path' branch"
+            ok = False
+        if "--watch" in command and len([c for c in calls if "--watch" in c]) == 1:
+            output = "no checks reported on the 'feat/pr-path' branch"
+            ok = False
+        return {"command": " ".join(command), "returncode": 0 if ok else 1, "ok": ok, "output": output}
+
+    monkeypatch.setattr(pr_module, "_run", fake_run)
+
+    step_body = getattr(pr_module.watch_pull_request_checks, "__step_body__")
+    result = asyncio.run(
+        step_body(
+            None,
+            {
+                "repo_path": str(tmp_path),
+                "watch_checks": True,
+                "check_interval_seconds": 0,
+                "check_appearance_attempts": 3,
+            },
+            {"opened": True},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["attempts"] == 2
+    assert result["final"]["output"].startswith("pytest")
