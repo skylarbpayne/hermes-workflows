@@ -104,13 +104,14 @@ def approve_plan_workflow(engine: WorkflowEngine, repo: Path, tmp_path: Path):
     return result.result
 
 
-def test_repo_change_plan_workflow_writes_plan_then_waits_for_approval(tmp_path):
+def test_repo_change_plan_workflow_writes_agent_prompt_plan_then_waits_for_approval(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
     db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
 
-    first = WorkflowEngine(db).run_until_idle(
+    first = engine.run_until_idle(
         repo_change_plan_workflow,
         workflow_inputs(repo, tmp_path, implementation_plan=None),
         workflow_id="wf_plan",
@@ -118,14 +119,79 @@ def test_repo_change_plan_workflow_writes_plan_then_waits_for_approval(tmp_path)
 
     assert first.status == "waiting"
     assert first.waiting_on == "signal:approval.decision:approve_implementation_plan"
+    events = engine.events("wf_plan")
+    requested_steps = [event for event in events if event["type"] == "StepRequested"]
+    assert [event["key"] for event in requested_steps] == ["step:agent_prompt:0", "step:write_implementation_plan:0"]
+    prompt_request = requested_steps[0]["payload"]["args"][0]
+    assert prompt_request["kind"] == "agent_prompt.request.v1"
+    assert prompt_request["prompt_path"].endswith("examples/prompts/repo_change_plan.md")
+    assert prompt_request["variables"]["workflow_id"] == "wf_plan"
+    assert "# Implementation plan: Add workflow-backed PR path" in prompt_request["rendered_prompt"]
+    write_request = requested_steps[1]["payload"]
+    assert write_request["step_name"] == "write_implementation_plan"
+    assert write_request["args"][1]["rendered_prompt_sha256"] == prompt_request["rendered_prompt_sha256"]
     plan = (tmp_path / "implementation-plan.md").read_text()
-    assert "# Implementation plan: Add workflow-backed PR path" in plan
+    assert plan == prompt_request["rendered_prompt"]
     assert "## Goal" in plan
     assert "## Non-goals" in plan
     assert "## Proposed file/module changes" in plan
     assert "## Approval gates" in plan
     assert "## Tests / verification" in plan
     assert "## Risks / rollback" in plan
+
+
+def test_repo_change_plan_workflow_renders_plan_from_agentprompt_template(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    prompt = tmp_path / "plan-template.md"
+    prompt.write_text(
+        "# Custom plan for {{goal}}\n\n"
+        "Repo: {{repo_path}}\n\n"
+        "Workflow: {{workflow_id}}\n\n"
+        "Commands:\n{{verification_commands}}\n"
+    )
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    inputs = workflow_inputs(repo, tmp_path, implementation_plan=None)
+    inputs["plan_prompt_path"] = str(prompt)
+    inputs["verification_commands"] = ["pytest -q", "git diff --check"]
+
+    first = engine.run_until_idle(repo_change_plan_workflow, inputs, workflow_id="wf_plan")
+
+    assert first.status == "waiting"
+    events = engine.workflow_status("wf_plan", recent_events=50)["events"]
+    prompt_requests = [
+        event
+        for event in events
+        if event["type"] == "StepRequested" and event["payload"].get("step_name") == "agent_prompt"
+    ]
+    assert prompt_requests
+    prompt_payload = prompt_requests[0]["payload"]["args"][0]
+    assert prompt_payload["prompt_path"] == str(prompt)
+    assert prompt_payload["prompt_text"].startswith("# Custom plan")
+    assert prompt_payload["variables"]["workflow_id"] == "wf_plan"
+
+    plan_text = (tmp_path / "implementation-plan.md").read_text()
+    assert "# Custom plan for Add workflow-backed PR path" in plan_text
+    assert f"Repo: {repo.resolve()}" in plan_text
+    assert "Workflow: wf_plan" in plan_text
+    assert "- `pytest -q`" in plan_text
+    assert "- `git diff --check`" in plan_text
+
+    result = engine.signal(
+        "wf_plan",
+        "approval.decision",
+        key="approve_implementation_plan",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/plan-approved"},
+        idempotency_key="plan-approval",
+    )
+
+    assert result.status == "completed"
+    assert result.result["plan_prompt_path"] == str(prompt)
+    assert len(result.result["plan_prompt_sha256"]) == 64
+    assert len(result.result["plan_rendered_prompt_sha256"]) == 64
 
 
 def test_repo_change_plan_workflow_records_human_plan_approval(tmp_path):
@@ -276,12 +342,16 @@ def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_appro
     assert "## Implementation plan approval" in body
     assert "Plan workflow: `wf_plan`" in body
     assert f"Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`" in body
+    assert f"Plan prompt: `{implementation_plan['plan_prompt_path']}`" in body
+    assert f"Plan prompt SHA-256: `{implementation_plan['plan_prompt_sha256']}`" in body
     assert "Approved by: skylar via discord discord://thread/plan-approved" in body
     pending_report = (tmp_path / "pr-status.md").read_text()
     assert "Landing approval: not requested" in pending_report
     assert "PR: create_pr disabled" in pending_report
     assert "Implementation plan: skylar via discord discord://thread/plan-approved" in pending_report
     assert f"Plan artifact SHA-256: `{implementation_plan['plan_artifact_sha256']}`" in pending_report
+    assert f"Plan prompt: `{implementation_plan['plan_prompt_path']}`" in pending_report
+    assert f"Plan prompt SHA-256: `{implementation_plan['plan_prompt_sha256']}`" in pending_report
 
     approval = engine.signal(
         "wf_pr",
