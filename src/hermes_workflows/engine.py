@@ -87,7 +87,7 @@ class WorkflowEngine:
 
         result = initial or self._result_from_instance(workflow_id)
         while True:
-            command = self._next_pending_command(workflow_id, command_type="run_step")
+            command = self.claim_command(workflow_id, worker_id="local-drain", lease_seconds=30)
             if command is None:
                 return self._result_from_instance(workflow_id) if result is None else self._result_from_instance(workflow_id)
             result = self._execute_run_step_command(workflow_id, command)
@@ -164,6 +164,90 @@ class WorkflowEngine:
             {"type": row["type"], "key": row["key"], "payload": JsonCodec.loads(row["payload_json"])}
             for row in rows
         ]
+
+    def claim_command(
+        self,
+        workflow_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 30,
+        command_type: str = "run_step",
+    ) -> Optional[Dict[str, Any]]:
+        """Claim one pending or lease-expired command for a worker."""
+
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                """
+                SELECT * FROM workflow_commands_outbox
+                WHERE workflow_id = ?
+                  AND type = ?
+                  AND (
+                    status = 'pending'
+                    OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?)
+                  )
+                ORDER BY id ASC LIMIT 1
+                """,
+                (workflow_id, command_type, now),
+            ).fetchone()
+            if row is None:
+                return None
+
+            attempts = int(row["attempts"] or 0) + 1
+            lease_expires_at = now + lease_seconds
+            con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'running', claimed_by = ?, lease_expires_at = ?, attempts = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (worker_id, lease_expires_at, attempts, now, row["id"]),
+            )
+            self._append_event(
+                con,
+                workflow_id,
+                "CommandClaimed",
+                key=row["key"],
+                payload={
+                    "command_id": row["id"],
+                    "command_type": row["type"],
+                    "worker_id": worker_id,
+                    "attempt": attempts,
+                    "lease_expires_at": lease_expires_at,
+                },
+                idempotency_key=f"claimed:{row['id']}:{attempts}",
+                ignore_duplicate=True,
+            )
+            claimed = con.execute("SELECT * FROM workflow_commands_outbox WHERE id = ?", (row["id"],)).fetchone()
+
+        return self._command_payload(claimed)
+
+    def worker_once(self, workflow_id: str, *, worker_id: str, lease_seconds: int = 30) -> RunResult:
+        command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds)
+        if command is None:
+            return self._result_from_instance(workflow_id)
+        return self._execute_run_step_command(workflow_id, command)
+
+    def worker_until_idle(
+        self,
+        workflow_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 30,
+        max_commands: Optional[int] = None,
+    ) -> RunResult:
+        result = self._result_from_instance(workflow_id)
+        executed = 0
+        while max_commands is None or executed < max_commands:
+            command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds)
+            if command is None:
+                return self._result_from_instance(workflow_id)
+            result = self._execute_run_step_command(workflow_id, command)
+            executed += 1
+            if result.status in {"completed", "failed"}:
+                return result
+        return result
 
     def events(self, workflow_id: str) -> List[Dict[str, Any]]:
         with self._connect() as con:
@@ -243,24 +327,18 @@ class WorkflowEngine:
             status=row["status"],
             waiting_on=row["waiting_on"],
             result=JsonCodec.loads(row["result_json"]),
-            error=JsonCodec.dumps(JsonCodec.loads(row["error_json"])) if row["error_json"] else None,
+            error=_format_error(JsonCodec.loads(row["error_json"])),
         )
 
-    def _execute_run_step_command(self, workflow_id: str, command: sqlite3.Row) -> RunResult:
+    def _execute_run_step_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         from .decorators import get_step_body
 
         key = command["key"]
-        payload = JsonCodec.loads(command["payload_json"])
+        payload = command["payload"] if isinstance(command, dict) else JsonCodec.loads(command["payload_json"])
         step_name = payload["step_name"]
         args = payload.get("args", [])
         kwargs = payload.get("kwargs", {})
         body = get_step_body(step_name)
-
-        with self._connect() as con:
-            con.execute(
-                "UPDATE workflow_commands_outbox SET status = 'running' WHERE id = ? AND status = 'pending'",
-                (command["id"],),
-            )
 
         try:
             output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
@@ -276,8 +354,12 @@ class WorkflowEngine:
                     ignore_duplicate=True,
                 )
                 con.execute(
-                    "UPDATE workflow_commands_outbox SET status = 'failed' WHERE id = ?",
-                    (command["id"],),
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'failed', last_error_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (JsonCodec.dumps({"type": type(exc).__name__, "message": str(exc)}), _now(), command["id"]),
                 )
                 con.execute(
                     """
@@ -291,8 +373,12 @@ class WorkflowEngine:
 
         with self._connect() as con:
             con.execute(
-                "UPDATE workflow_commands_outbox SET status = 'completed' WHERE id = ?",
-                (command["id"],),
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (_now(), command["id"]),
             )
         return self.complete_step(workflow_id, key, output)
 
@@ -350,11 +436,17 @@ class WorkflowEngine:
                   key TEXT NOT NULL,
                   payload_json TEXT NOT NULL,
                   status TEXT NOT NULL DEFAULT 'pending',
+                  claimed_by TEXT,
+                  lease_expires_at INTEGER,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  last_error_json TEXT,
                   created_at INTEGER NOT NULL,
+                  updated_at INTEGER,
                   UNIQUE(workflow_id, key)
                 );
                 """
             )
+            self._ensure_command_columns(con)
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path)
@@ -395,14 +487,42 @@ class WorkflowEngine:
             try:
                 con.execute(
                     """
-                    INSERT INTO workflow_commands_outbox(workflow_id, type, key, payload_json, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO workflow_commands_outbox(workflow_id, type, key, payload_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (workflow_id, command_type, key, JsonCodec.dumps(payload), _now()),
+                    (workflow_id, command_type, key, JsonCodec.dumps(payload), _now(), _now()),
                 )
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+
+    def _ensure_command_columns(self, con: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in con.execute("PRAGMA table_info(workflow_commands_outbox)").fetchall()}
+        migrations = {
+            "claimed_by": "ALTER TABLE workflow_commands_outbox ADD COLUMN claimed_by TEXT",
+            "lease_expires_at": "ALTER TABLE workflow_commands_outbox ADD COLUMN lease_expires_at INTEGER",
+            "attempts": "ALTER TABLE workflow_commands_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+            "last_error_json": "ALTER TABLE workflow_commands_outbox ADD COLUMN last_error_json TEXT",
+            "updated_at": "ALTER TABLE workflow_commands_outbox ADD COLUMN updated_at INTEGER",
+        }
+        for column, sql in migrations.items():
+            if column not in existing:
+                con.execute(sql)
+
+    def _command_payload(self, row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": row["id"],
+            "workflow_id": row["workflow_id"],
+            "type": row["type"],
+            "key": row["key"],
+            "payload": JsonCodec.loads(row["payload_json"]),
+            "status": row["status"],
+            "claimed_by": row["claimed_by"],
+            "lease_expires_at": row["lease_expires_at"],
+            "attempts": row["attempts"],
+            "last_error": JsonCodec.loads(row["last_error_json"]),
+        }
 
 
 class WorkflowContext:
@@ -601,6 +721,17 @@ class StepExecutionContext:
     step_key: str
 
 
+def _format_error(error: Any) -> Optional[str]:
+    if error is None:
+        return None
+    if isinstance(error, dict):
+        error_type = error.get("type")
+        message = error.get("message")
+        if error_type and message:
+            return f"{error_type}: {message}"
+    return JsonCodec.dumps(error)
+
+
 def _now() -> int:
     return int(time.time())
 
@@ -610,7 +741,9 @@ def _run_maybe_async(value: Any) -> Any:
         try:
             return asyncio.run(value)
         except RuntimeError as exc:
-            raise RuntimeError("WorkflowEngine v0/v1 must be called outside an active event loop") from exc
+            if "asyncio.run() cannot be called from a running event loop" in str(exc):
+                raise RuntimeError("WorkflowEngine v0/v1 must be called outside an active event loop") from exc
+            raise
     return value
 
 

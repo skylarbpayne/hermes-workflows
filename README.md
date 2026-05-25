@@ -10,10 +10,11 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - step memoization across process restarts
 - graceful exit when a step/signal is pending
 - local step worker execution through `run_until_idle()` / `drain()`
+- command claiming/leasing for external worker processes
 - approval request primitive through `ctx.approval.request(...)`
 - durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
 - manual `signal()` resume API
-- tiny cross-process CLI: `python -m hermes_workflows run|signal`
+- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal`
 
 ## The core runtime idea
 
@@ -114,14 +115,21 @@ The decision returned to workflow code includes the validated `source` so final 
 
 ## Minimal CLI
 
-The CLI is intentionally boring and requires the workflow module path on both run and signal so a fresh process can import/register the decider and steps:
+The CLI is intentionally boring and requires the workflow module path so a fresh process can import/register the decider and steps:
 
 ```bash
-PYTHONPATH=src:. python -m hermes_workflows run \
+PYTHONPATH=src:. python -m hermes_workflows start \
   examples.first_real_trip_workflow:first_real_trip_workflow \
   --db /tmp/hermes-workflows.sqlite \
   --id wf_first_real_trip \
   --input-json '{"destination":"NYC"}'
+
+PYTHONPATH=src:. python -m hermes_workflows worker \
+  examples.first_real_trip_workflow:first_real_trip_workflow \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --worker-id worker-1 \
+  --once
 
 PYTHONPATH=src:. python -m hermes_workflows signal \
   examples.first_real_trip_workflow:first_real_trip_workflow \
@@ -138,8 +146,8 @@ PYTHONPATH=src:. python -m hermes_workflows signal \
 
 V0 is a spike, not production runtime:
 
-- no external/distributed worker process yet; only the local in-process worker loop exists
-- no command claiming/locking/backoff yet
+- external worker process exists, but it is intentionally small and workflow-specific
+- command claiming/leasing exists, but no backoff policy yet
 - `ctx.gather` fan-out enqueues child steps together, but the local v0 drain loop still executes runnable commands serially
 - no full approval policy engine yet, only approval request + source-provenance validation
 - no feedback/rerun invalidation yet
@@ -158,5 +166,5 @@ pytest -q
 Expected now:
 
 ```text
-17 passed
+22 passed
 ```
