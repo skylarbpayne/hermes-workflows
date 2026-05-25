@@ -106,7 +106,7 @@ On the first decider pass it records `StepRequested` for every missing child and
 2. run verification commands such as `pytest -q`
 3. write a PR body with commits, changed files, diff stat, tests, and approval/merge placeholders
 4. optionally push/open the GitHub PR with `gh pr create`
-5. optionally watch GitHub checks with `gh pr checks --watch`
+5. optionally watch GitHub checks with `gh pr checks --watch`, retrying briefly while GitHub attaches checks to a newly pushed branch
 6. pause on `approve_pr_landing` so the human approval/merge provenance is recorded before status is finalized
 7. write a status report under `.hermes/pr-workflows/` unless an explicit path is supplied
 
@@ -191,5 +191,5 @@ pytest -q
 Expected now:
 
 ```text
-25 passed
+26 passed
 ```

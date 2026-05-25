@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +80,25 @@ def _owner_repo(remote_url: str) -> str:
     else:
         return ""
     return value.split()[0].removesuffix(".git")
+
+
+def _checks_not_reported(result: Dict[str, Any]) -> bool:
+    return "no checks reported" in result.get("output", "").lower()
+
+
+def _pr_url_from_output(output: str) -> str:
+    if not output:
+        return ""
+    try:
+        parsed = json.loads(output)
+        if isinstance(parsed, dict):
+            return str(parsed.get("url") or "")
+    except json.JSONDecodeError:
+        pass
+    for line in output.splitlines():
+        if line.startswith("https://github.com/"):
+            return line.strip()
+    return output.strip()
 
 
 @step
@@ -245,9 +266,28 @@ async def watch_pull_request_checks(ctx, inputs: Dict[str, Any], pr: Dict[str, A
 
     env = _gh_env(inputs)
     interval = str(inputs.get("check_interval_seconds", 10))
-    watch = _run(["gh", "pr", "checks", "--watch", "--interval", interval], cwd=repo, env=env, timeout=int(inputs.get("check_timeout_seconds", 900)))
-    final = _run(["gh", "pr", "checks"], cwd=repo, env=env, timeout=120)
-    return {"watched": True, "ok": watch["ok"] and final["ok"], "watch": watch, "final": final}
+    attempts = int(inputs.get("check_appearance_attempts", 6))
+    watch = {"ok": False, "output": "not run", "returncode": 1}
+    final = {"ok": False, "output": "not run", "returncode": 1}
+    for attempt in range(1, attempts + 1):
+        watch = _run(
+            ["gh", "pr", "checks", "--watch", "--interval", interval],
+            cwd=repo,
+            env=env,
+            timeout=int(inputs.get("check_timeout_seconds", 900)),
+        )
+        final = _run(["gh", "pr", "checks"], cwd=repo, env=env, timeout=120)
+        if final["ok"] or not _checks_not_reported(final):
+            return {
+                "watched": True,
+                "ok": final["ok"] and (watch["ok"] or _checks_not_reported(watch)),
+                "watch": watch,
+                "final": final,
+                "attempts": attempt,
+            }
+        if attempt < attempts:
+            time.sleep(float(interval))
+    return {"watched": True, "ok": False, "watch": watch, "final": final, "attempts": attempts}
 
 
 @step
@@ -269,9 +309,9 @@ async def write_pr_status_report(
     check_status = "pass" if checks.get("ok") else "skipped" if checks.get("skipped") else "fail"
     pr_url = ""
     if pr.get("view", {}).get("output"):
-        pr_url = pr["view"]["output"]
+        pr_url = _pr_url_from_output(pr["view"]["output"])
     elif pr.get("created", {}).get("output"):
-        pr_url = pr["created"]["output"]
+        pr_url = _pr_url_from_output(pr["created"]["output"])
     contents = f"""# Workflow-backed PR status: {inputs['goal']}
 
 - Workflow id: `{ctx.workflow_id}`

@@ -122,3 +122,39 @@ def test_repo_pr_workflow_rejects_agent_or_missing_landing_provenance(tmp_path):
 
     assert result.status == "failed"
     assert "requires human approval source" in (result.error or "")
+
+
+def test_check_watcher_waits_for_github_to_report_new_branch_checks(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, *, cwd, env=None, timeout=300):
+        calls.append(command)
+        output = "pytest\tpass\t0\thttps://github.com/example/actions/runs/1"
+        ok = True
+        if command == ["gh", "pr", "checks"] and len([c for c in calls if c == command]) == 1:
+            output = "no checks reported on the 'feat/pr-path' branch"
+            ok = False
+        if "--watch" in command and len([c for c in calls if "--watch" in c]) == 1:
+            output = "no checks reported on the 'feat/pr-path' branch"
+            ok = False
+        return {"command": " ".join(command), "returncode": 0 if ok else 1, "ok": ok, "output": output}
+
+    monkeypatch.setattr(pr_module, "_run", fake_run)
+
+    step_body = getattr(pr_module.watch_pull_request_checks, "__step_body__")
+    result = asyncio.run(
+        step_body(
+            None,
+            {
+                "repo_path": str(tmp_path),
+                "watch_checks": True,
+                "check_interval_seconds": 0,
+                "check_appearance_attempts": 3,
+            },
+            {"opened": True},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["attempts"] == 2
+    assert result["final"]["output"].startswith("pytest")
