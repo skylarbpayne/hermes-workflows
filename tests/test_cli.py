@@ -77,6 +77,8 @@ def test_cli_can_run_and_signal_workflow_across_processes(tmp_path):
         "approve_plan",
         "--payload-json",
         '{"action":"approve","by":"skylar"}',
+        "--source-json",
+        '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://thread/1/message/2"}',
         "--idempotency-key",
         "cli-approval-1",
     )

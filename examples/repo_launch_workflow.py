@@ -24,6 +24,12 @@ def _run(command: list[str], *, cwd: Path, timeout: int = 120) -> Dict[str, Any]
     }
 
 
+def _format_approval_source(decision: Dict[str, Any]) -> str:
+    source = decision.get("source") or {}
+    provenance = source.get("message_url") or source.get("message_id") or source.get("event_id") or "unknown"
+    return f"{source.get('channel', 'unknown')} {provenance}"
+
+
 @step
 async def inspect_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
@@ -78,6 +84,7 @@ async def write_launch_report(ctx, packet: Dict[str, Any], decision: Dict[str, A
     contents = f"""# Repo launch packet: {packet['project']}
 
 Approved by: {decision.get('by', 'unknown')}
+Approval source: {_format_approval_source(decision)}
 Decision: {decision.get('action')}
 
 ## Status

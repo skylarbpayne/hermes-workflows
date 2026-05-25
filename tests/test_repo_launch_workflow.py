@@ -57,6 +57,7 @@ def test_repo_launch_workflow_runs_tests_waits_for_approval_then_writes_report(t
         "approval.decision",
         key="approve_repo_launch",
         payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/20"},
         idempotency_key="test-approval-1",
     )
 
@@ -66,4 +67,5 @@ def test_repo_launch_workflow_runs_tests_waits_for_approval_then_writes_report(t
     contents = report.read_text()
     assert "# Repo launch packet: tiny repo" in contents
     assert "Approved by: skylar" in contents
+    assert "Approval source: discord discord://thread/1/message/20" in contents
     assert "Tests: pass" in contents

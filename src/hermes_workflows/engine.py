@@ -125,6 +125,7 @@ class WorkflowEngine:
         *,
         key: str,
         payload: Any,
+        source: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> RunResult:
         workflow_fn = _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]]
@@ -136,7 +137,7 @@ class WorkflowEngine:
                 workflow_id,
                 "SignalReceived",
                 key=f"signal:{signal_type}:{key}",
-                payload={"signal_type": signal_type, "key": key, "payload": payload},
+                payload={"signal_type": signal_type, "key": key, "payload": payload, "source": source},
                 idempotency_key=dedupe,
                 ignore_duplicate=True,
             )
@@ -457,6 +458,8 @@ class WorkflowContext:
 
         for call in calls:
             if not getattr(call, "__durable_step_call__", False):
+                if inspect.iscoroutine(call):
+                    call.close()
                 raise TypeError("ctx.gather only supports @step calls in this spike")
             result = await self.run_step(call.step_name, call.args, call.kwargs, block=False)
             if isinstance(result, PendingStep):
@@ -554,7 +557,41 @@ class ApprovalClient:
                 )
             if inserted:
                 self.ctx.engine._insert_command(self.ctx.workflow_id, "notify_approval", event_key, payload)
-        return await self.ctx.wait_for("approval.decision", key=key)
+
+        decision_event = self.ctx._last_event("SignalReceived", f"signal:approval.decision:{key}")
+        if decision_event is None:
+            return await self.ctx.wait_for("approval.decision", key=key)
+
+        decision = decision_event["payload"]
+        if decision.get("action") not in (allowed or ["approve", "reject"]):
+            raise ValueError(f"approval {key} action is not allowed: {decision.get('action')}")
+
+        source = _validate_approval_source(key, approver, decision, decision_event.get("source"))
+        return {**decision, "source": source}
+
+
+def _validate_approval_source(
+    key: str,
+    approver: str,
+    decision: Dict[str, Any],
+    source: Any,
+) -> Optional[Dict[str, Any]]:
+    if not approver.startswith("human"):
+        return source if isinstance(source, dict) else None
+
+    if not isinstance(source, dict) or source.get("kind") != "human":
+        raise ValueError(f"approval {key} requires human approval source")
+
+    expected_id = approver.split(":", 1)[1] if ":" in approver else None
+    if expected_id and source.get("id") != expected_id:
+        raise ValueError(f"approval {key} requires approval from {approver}")
+    if expected_id and decision.get("by") != expected_id:
+        raise ValueError(f"approval {key} decision.by must match {approver}")
+
+    if not source.get("channel") or not any(source.get(field) for field in ("message_url", "message_id", "event_id")):
+        raise ValueError(f"approval {key} requires external approval provenance")
+
+    return source
 
 
 @dataclass(frozen=True)

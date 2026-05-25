@@ -43,6 +43,19 @@ def _run_git(args: List[str], *, cwd: Path, check: bool = False) -> Dict[str, An
     }
 
 
+def _format_approval_source(decision: Dict[str, Any]) -> str:
+    source = decision.get("source") or {}
+    provenance = source.get("message_url") or source.get("message_id") or source.get("event_id") or "unknown"
+    return f"{source.get('channel', 'unknown')} {provenance}"
+
+
+def _assert_landing_approver_is_not_implementer(implementation_signal: Dict[str, Any], landing_decision: Dict[str, Any]) -> None:
+    implementer = implementation_signal.get("by")
+    approver = (landing_decision.get("source") or {}).get("id") or landing_decision.get("by")
+    if implementer and approver and implementer == approver:
+        raise ValueError("landing approver must be different from implementer")
+
+
 @step
 async def inspect_change_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
@@ -146,7 +159,10 @@ async def write_change_review_report(
     contents = f"""# Repo change review: {packet['goal']}
 
 Plan approved by: {plan_decision.get('by', 'unknown')}
+Plan approval source: {_format_approval_source(plan_decision)}
+Implementation signaled by: {packet['implementation_signal'].get('by', 'unknown')}
 Landing approved by: {landing_decision.get('by', 'unknown')}
+Landing approval source: {_format_approval_source(landing_decision)}
 Recommendation: {packet['recommendation']}
 
 ## Repo
@@ -270,6 +286,7 @@ async def repo_change_review_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, 
     )
     if landing_decision.get("action") != "approve":
         return {"ready": False, "stage": "landing_rejected", "packet": packet, "decision": landing_decision}
+    _assert_landing_approver_is_not_implementer(implementation_signal, landing_decision)
 
     report = await write_change_review_report(ctx, inputs, plan_decision, landing_decision, packet)
     landing = await land_change(ctx, inputs, packet, report)
