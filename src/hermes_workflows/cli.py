@@ -28,6 +28,13 @@ def result_payload(result: RunResult) -> dict[str, Any]:
     }
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -70,6 +77,17 @@ def main(argv: list[str] | None = None) -> int:
 
     list_cmd = sub.add_parser("list", help="List workflow instances in a workflow DB")
     list_cmd.add_argument("--db", required=True, type=Path)
+    list_cmd.add_argument("--status", help="Only include workflow instances with this status")
+
+    events = sub.add_parser("events", help="Inspect one workflow instance's event log without replaying it")
+    events.add_argument("--db", required=True, type=Path)
+    events.add_argument("--id", required=True, dest="workflow_id")
+    events.add_argument("--limit", type=positive_int, help="Return only the most recent N events")
+
+    outbox = sub.add_parser("outbox", help="Inspect workflow command outbox rows without replaying workflows")
+    outbox.add_argument("--db", required=True, type=Path)
+    outbox.add_argument("--id", dest="workflow_id", help="Only include commands for this workflow id")
+    outbox.add_argument("--status", help="Only include commands with this status")
 
     args = parser.parse_args(argv)
     engine = WorkflowEngine(args.db)
@@ -117,7 +135,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "status":
         print(json.dumps(engine.workflow_status(args.workflow_id, recent_events=args.recent_events), sort_keys=True))
     elif args.command == "list":
-        print(json.dumps({"workflows": engine.list_workflows()}, sort_keys=True))
+        print(json.dumps({"workflows": engine.list_workflows(status=args.status)}, sort_keys=True))
+    elif args.command == "events":
+        print(json.dumps({"events": engine.events(args.workflow_id, limit=args.limit)}, sort_keys=True))
+    elif args.command == "outbox":
+        print(
+            json.dumps(
+                {"commands": engine.outbox_commands(workflow_id=args.workflow_id, status=args.status)},
+                sort_keys=True,
+            )
+        )
     else:  # pragma: no cover - argparse prevents this.
         raise SystemExit(f"unknown command: {args.command}")
 
