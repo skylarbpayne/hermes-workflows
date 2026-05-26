@@ -16,7 +16,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - render-only prompt-file steps through `AgentPrompt("prompt.md", **vars)`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
 - manual `signal()` resume API
-- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list`
+- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list|events|outbox`
 
 ## Architecture boundary
 
@@ -244,8 +244,19 @@ PYTHONPATH=src:. python -m hermes_workflows status \
   --db /tmp/hermes-workflows.sqlite \
   --id wf_first_real_trip
 
+PYTHONPATH=src:. python -m hermes_workflows events \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --limit 20
+
+PYTHONPATH=src:. python -m hermes_workflows outbox \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --status pending
+
 PYTHONPATH=src:. python -m hermes_workflows list \
-  --db /tmp/hermes-workflows.sqlite
+  --db /tmp/hermes-workflows.sqlite \
+  --status waiting
 ```
 
 ## Current limitations
@@ -272,5 +283,5 @@ pytest -q
 Expected now:
 
 ```text
-42 passed
+46 passed
 ```

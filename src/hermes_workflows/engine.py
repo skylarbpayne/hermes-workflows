@@ -146,6 +146,15 @@ class WorkflowEngine:
                     "UPDATE workflow_instances SET status = 'running', updated_at = ? WHERE id = ?",
                     (_now(), workflow_id),
                 )
+                if signal_type == "approval.decision":
+                    con.execute(
+                        """
+                        UPDATE workflow_commands_outbox
+                        SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                        WHERE workflow_id = ? AND type = 'notify_approval' AND key = ?
+                        """,
+                        (_now(), workflow_id, f"approval:{key}"),
+                    )
         result = self._run_decider(workflow_id, workflow_fn) if inserted else self._result_from_instance(workflow_id)
         return self.drain(workflow_id, initial=result)
 
@@ -249,17 +258,23 @@ class WorkflowEngine:
                 return result
         return result
 
-    def events(self, workflow_id: str) -> List[Dict[str, Any]]:
+    def events(self, workflow_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        self._instance(workflow_id)
+        query = """
+            SELECT seq, type, key, payload_json, idempotency_key, created_at
+            FROM workflow_events
+            WHERE workflow_id = ?
+        """
+        params: list[Any] = [workflow_id]
+        if limit is not None:
+            query += " ORDER BY seq DESC LIMIT ?"
+            params.append(limit)
+        else:
+            query += " ORDER BY seq ASC"
         with self._connect() as con:
-            rows = con.execute(
-                """
-                SELECT seq, type, key, payload_json, idempotency_key, created_at
-                FROM workflow_events
-                WHERE workflow_id = ?
-                ORDER BY seq ASC
-                """,
-                (workflow_id,),
-            ).fetchall()
+            rows = con.execute(query, params).fetchall()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [
             {
                 "seq": row["seq"],
@@ -272,15 +287,19 @@ class WorkflowEngine:
             for row in rows
         ]
 
-    def list_workflows(self) -> List[Dict[str, Any]]:
+    def list_workflows(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = """
+            SELECT id, workflow_name, status, waiting_on
+            FROM workflow_instances
+        """
+        params: list[Any] = []
+        if status is not None:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC, created_at DESC, id ASC"
+
         with self._connect() as con:
-            rows = con.execute(
-                """
-                SELECT id, workflow_name, status, waiting_on
-                FROM workflow_instances
-                ORDER BY updated_at DESC, created_at DESC, id ASC
-                """
-            ).fetchall()
+            rows = con.execute(query, params).fetchall()
         return [
             {
                 "workflow_id": row["id"],
@@ -290,6 +309,29 @@ class WorkflowEngine:
             }
             for row in rows
         ]
+
+    def outbox_commands(
+        self,
+        *,
+        workflow_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM workflow_commands_outbox"
+        clauses = []
+        params: list[Any] = []
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY workflow_id ASC, id ASC"
+
+        with self._connect() as con:
+            rows = con.execute(query, params).fetchall()
+        return [self._command_payload(row) for row in rows]
 
     def workflow_status(self, workflow_id: str, *, recent_events: int = 20) -> Dict[str, Any]:
         row = self._instance(workflow_id)
@@ -306,7 +348,39 @@ class WorkflowEngine:
             "event_count": len(events),
             "events": events[-recent_events:],
             "pending_commands": self._active_commands(workflow_id),
+            "approvals": self._approval_summaries(events),
         }
+
+    def _approval_summaries(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        decisions: dict[str, Dict[str, Any]] = {}
+        for event in events:
+            if event["type"] != "SignalReceived":
+                continue
+            payload = event["payload"] or {}
+            if payload.get("signal_type") != "approval.decision":
+                continue
+            decisions[payload.get("key")] = payload
+
+        approvals: list[Dict[str, Any]] = []
+        for event in events:
+            if event["type"] != "ApprovalRequested":
+                continue
+            payload = event["payload"] or {}
+            key = payload.get("key")
+            decision_event = decisions.get(key)
+            decision = decision_event.get("payload") if decision_event else None
+            approvals.append(
+                {
+                    "key": key,
+                    "status": (decision or {}).get("action", "waiting"),
+                    "approver": payload.get("approver"),
+                    "prompt": payload.get("prompt"),
+                    "artifact": payload.get("artifact"),
+                    "decision": decision,
+                    "source": decision_event.get("source") if decision_event else None,
+                }
+            )
+        return approvals
 
     def _active_commands(self, workflow_id: str) -> List[Dict[str, Any]]:
         with self._connect() as con:
