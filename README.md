@@ -18,6 +18,12 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - manual `signal()` resume API
 - tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list`
 
+## Architecture boundary
+
+`hermes-workflows` should stay a boring durable runtime: event history, replay, worker leases, approval provenance, memoized steps, inspectability, and reviewable artifact/PR packets. Planning taste, TDD discipline, milestone review, artifact quality, and model-specific prompts belong in skills, Codex `/goal`, and subagent review loops.
+
+See [`docs/architecture/runtime-vs-skills-subagents.md`](docs/architecture/runtime-vs-skills-subagents.md) for the accepted boundary.
+
 ## The core runtime idea
 
 A workflow function is a **decider**, not a daemon.
