@@ -82,6 +82,12 @@ def test_gather_resumes_after_each_worker_child_completes(tmp_path):
     assert RUNS == [("left", 1), ("right", 2)]
 
     events = engine.events("wf_gather")
+    assert [(event["type"], event["key"]) for event in events[:4]] == [
+        ("WorkflowStarted", "workflow:start"),
+        ("StepRequested", "step:gather_left:0"),
+        ("StepRequested", "step:gather_right:0"),
+        ("GatherWaiting", "gather:0"),
+    ]
     assert [event["key"] for event in events if event["type"] == "StepRequested"] == [
         "step:gather_left:0",
         "step:gather_right:0",
