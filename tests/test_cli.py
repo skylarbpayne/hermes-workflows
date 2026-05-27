@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -249,3 +250,104 @@ def test_cli_events_rejects_missing_workflow_and_invalid_limit(tmp_path):
 
     with pytest.raises(subprocess.CalledProcessError):
         run_cli(tmp_path, "events", "--db", str(db), "--id", "wf_waiting", "--limit", "0")
+
+
+def test_cli_outbox_marks_active_approval_waits_with_read_only_diagnostics(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_waiting",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    outbox_payload = json.loads(
+        run_cli(tmp_path, "outbox", "--db", str(db), "--id", "wf_waiting", "--status", "pending").stdout
+    )
+    command = outbox_payload["commands"][0]
+    assert command["key"] == "approval:approve_plan"
+    assert command["workflow_status"] == "waiting"
+    assert command["waiting_on"] == "signal:approval.decision:approve_plan"
+    assert command["diagnostic_label"] == "active_wait"
+    assert command["diagnostic_labels"] == ["active_wait"]
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_waiting").stdout)
+    assert status_payload["pending_commands"][0]["diagnostic_label"] == "active_wait"
+    assert status_payload["diagnostics"] == [
+        {
+            "command_key": "approval:approve_plan",
+            "command_type": "notify_approval",
+            "label": "active_wait",
+            "message": "Workflow is actively waiting on this approval signal.",
+            "severity": "info",
+        }
+    ]
+
+
+def test_cli_outbox_flags_stale_completed_workflow_approval_rows_without_mutating_them(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_done",
+        "--input-json",
+        '{"destination":"LA"}',
+    )
+    run_cli(
+        tmp_path,
+        "signal",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_done",
+        "--type",
+        "approval.decision",
+        "--key",
+        "approve_plan",
+        "--payload-json",
+        '{"action":"approve","by":"skylar"}',
+        "--source-json",
+        '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://thread/1/message/4"}',
+    )
+
+    with sqlite3.connect(db) as con:
+        con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET status = 'pending', updated_at = updated_at + 1
+            WHERE workflow_id = 'wf_done' AND key = 'approval:approve_plan'
+            """
+        )
+
+    outbox_payload = json.loads(
+        run_cli(tmp_path, "outbox", "--db", str(db), "--id", "wf_done", "--status", "pending").stdout
+    )
+    command = outbox_payload["commands"][0]
+    assert command["workflow_status"] == "completed"
+    assert command["waiting_on"] is None
+    assert command["diagnostic_label"] == "matching_signal_exists"
+    assert command["diagnostic_labels"] == ["matching_signal_exists", "terminal_workflow_has_pending_command"]
+
+    # Diagnostics are read-only: the stale pending row remains visible after inspection.
+    again = json.loads(run_cli(tmp_path, "outbox", "--db", str(db), "--id", "wf_done", "--status", "pending").stdout)
+    assert [command["key"] for command in again["commands"]] == ["approval:approve_plan"]
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_done").stdout)
+    assert [diagnostic["label"] for diagnostic in status_payload["diagnostics"]] == [
+        "matching_signal_exists",
+        "terminal_workflow_has_pending_command",
+    ]

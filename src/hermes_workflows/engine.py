@@ -331,11 +331,12 @@ class WorkflowEngine:
 
         with self._connect() as con:
             rows = con.execute(query, params).fetchall()
-        return [self._command_payload(row) for row in rows]
+        return self._enrich_command_payloads([self._command_payload(row) for row in rows])
 
     def workflow_status(self, workflow_id: str, *, recent_events: int = 20) -> Dict[str, Any]:
         row = self._instance(workflow_id)
         events = self.events(workflow_id)
+        pending_commands = self._active_commands(workflow_id)
         return {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
@@ -347,7 +348,8 @@ class WorkflowEngine:
             "updated_at": row["updated_at"],
             "event_count": len(events),
             "events": events[-recent_events:],
-            "pending_commands": self._active_commands(workflow_id),
+            "pending_commands": pending_commands,
+            "diagnostics": self._command_diagnostics(pending_commands),
             "approvals": self._approval_summaries(events),
         }
 
@@ -386,26 +388,93 @@ class WorkflowEngine:
         with self._connect() as con:
             rows = con.execute(
                 """
-                SELECT type, key, payload_json, status, claimed_by, attempts, lease_expires_at, last_error_json
+                SELECT *
                 FROM workflow_commands_outbox
                 WHERE workflow_id = ? AND status IN ('pending', 'running')
                 ORDER BY id ASC
                 """,
                 (workflow_id,),
             ).fetchall()
-        return [
-            {
-                "type": row["type"],
-                "key": row["key"],
-                "payload": JsonCodec.loads(row["payload_json"]),
-                "status": row["status"],
-                "claimed_by": row["claimed_by"],
-                "attempts": row["attempts"],
-                "lease_expires_at": row["lease_expires_at"],
-                "last_error": JsonCodec.loads(row["last_error_json"]),
-            }
-            for row in rows
-        ]
+        return self._enrich_command_payloads([self._command_payload(row) for row in rows])
+
+    def _enrich_command_payloads(self, commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not commands:
+            return []
+        workflow_ids = sorted({command["workflow_id"] for command in commands})
+        summaries = self._workflow_command_summaries(workflow_ids)
+        signal_keys = self._signal_keys_by_workflow(workflow_ids)
+        enriched: list[Dict[str, Any]] = []
+        for command in commands:
+            summary = summaries.get(command["workflow_id"], {})
+            labels = self._diagnostic_labels_for_command(command, summary, signal_keys.get(command["workflow_id"], set()))
+            item = dict(command)
+            item["workflow_status"] = summary.get("status")
+            item["waiting_on"] = summary.get("waiting_on")
+            item["diagnostic_labels"] = labels
+            item["diagnostic_label"] = labels[0] if labels else None
+            enriched.append(item)
+        return enriched
+
+    def _workflow_command_summaries(self, workflow_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        placeholders = ",".join("?" for _ in workflow_ids)
+        with self._connect() as con:
+            rows = con.execute(
+                f"SELECT id, status, waiting_on FROM workflow_instances WHERE id IN ({placeholders})",
+                workflow_ids,
+            ).fetchall()
+        return {row["id"]: {"status": row["status"], "waiting_on": row["waiting_on"]} for row in rows}
+
+    def _signal_keys_by_workflow(self, workflow_ids: List[str]) -> Dict[str, set[str]]:
+        placeholders = ",".join("?" for _ in workflow_ids)
+        with self._connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT workflow_id, key
+                FROM workflow_events
+                WHERE workflow_id IN ({placeholders}) AND type = 'SignalReceived'
+                """,
+                workflow_ids,
+            ).fetchall()
+        signals: Dict[str, set[str]] = {workflow_id: set() for workflow_id in workflow_ids}
+        for row in rows:
+            signals.setdefault(row["workflow_id"], set()).add(row["key"])
+        return signals
+
+    def _diagnostic_labels_for_command(
+        self,
+        command: Dict[str, Any],
+        summary: Dict[str, Any],
+        signal_keys: set[str],
+    ) -> List[str]:
+        if command.get("status") not in {"pending", "running"}:
+            return []
+
+        labels: list[str] = []
+        expected_wait = _expected_wait_for_command(command)
+        if command.get("type") == "notify_approval" and expected_wait in signal_keys:
+            labels.append("matching_signal_exists")
+        if summary.get("status") in {"completed", "failed"}:
+            labels.append("terminal_workflow_has_pending_command")
+        if summary.get("status") == "waiting" and summary.get("waiting_on") == expected_wait:
+            labels.append("active_wait")
+        if not labels:
+            labels.append("orphaned_or_inconsistent")
+        return labels
+
+    def _command_diagnostics(self, commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        diagnostics: list[Dict[str, Any]] = []
+        for command in commands:
+            for label in command.get("diagnostic_labels", []):
+                diagnostics.append(
+                    {
+                        "command_key": command["key"],
+                        "command_type": command["type"],
+                        "label": label,
+                        "message": _diagnostic_message(label),
+                        "severity": "info" if label == "active_wait" else "warning",
+                    }
+                )
+        return diagnostics
 
     def _run_decider(self, workflow_id: str, workflow_fn: Callable[..., Any]) -> RunResult:
         instance = self._instance(workflow_id)
@@ -884,6 +953,24 @@ class StepExecutionContext:
     engine: WorkflowEngine
     workflow_id: str
     step_key: str
+
+
+def _expected_wait_for_command(command: Dict[str, Any]) -> str:
+    key = str(command.get("key") or "")
+    if command.get("type") == "notify_approval" and key.startswith("approval:"):
+        approval_key = key.split(":", 1)[1]
+        return f"signal:approval.decision:{approval_key}"
+    return key
+
+
+def _diagnostic_message(label: str) -> str:
+    messages = {
+        "active_wait": "Workflow is actively waiting on this approval signal.",
+        "matching_signal_exists": "A matching approval signal already exists; this notification is historical/stale.",
+        "terminal_workflow_has_pending_command": "Workflow is terminal but this command is still pending or running.",
+        "orphaned_or_inconsistent": "Command is pending or running but does not match the workflow's current wait state.",
+    }
+    return messages.get(label, "Command has an unknown diagnostic state.")
 
 
 def _format_error(error: Any) -> Optional[str]:

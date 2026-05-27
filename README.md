@@ -259,6 +259,15 @@ PYTHONPATH=src:. python -m hermes_workflows list \
   --status waiting
 ```
 
+`status` and `outbox` include read-only diagnostics for pending/running command rows. This makes stale approval notifications visible without mutating the database:
+
+- `active_wait` means the workflow is currently waiting on that command/signal.
+- `matching_signal_exists` means a matching approval signal is already in the event log, so the notification row is historical/stale.
+- `terminal_workflow_has_pending_command` means the workflow is completed/failed while the command row still says pending/running.
+- `orphaned_or_inconsistent` means the row does not match the workflow's current wait state.
+
+These labels are advisory only. They do not delete commands, rewrite history, or resume workflows.
+
 ## Current limitations
 
 V0 is a spike, not production runtime:
@@ -283,5 +292,5 @@ pytest -q
 Expected now:
 
 ```text
-46 passed
+49 passed, 1 skipped
 ```
