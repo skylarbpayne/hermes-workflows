@@ -6,12 +6,12 @@ import re
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from .decorators import DurableStepCall, step
 
 _PLACEHOLDER = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}")
-PromptPath = str | PathLike[str]
+PromptPath = Union[str, PathLike[str]]
 
 
 @dataclass(frozen=True, init=False)
