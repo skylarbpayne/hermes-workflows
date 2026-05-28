@@ -70,6 +70,13 @@ def main(argv: list[str] | None = None) -> int:
     signal.add_argument("--source-json")
     signal.add_argument("--idempotency-key")
 
+    cancel = sub.add_parser("cancel", help="Cancel a workflow instance while preserving audit history")
+    cancel.add_argument("--db", required=True, type=Path)
+    cancel.add_argument("--id", required=True, dest="workflow_id")
+    cancel.add_argument("--reason", required=True)
+    cancel.add_argument("--source-json")
+    cancel.add_argument("--superseded-by")
+
     status = sub.add_parser("status", help="Inspect one workflow instance without replaying it")
     status.add_argument("--db", required=True, type=Path)
     status.add_argument("--id", required=True, dest="workflow_id")
@@ -130,6 +137,14 @@ def main(argv: list[str] | None = None) -> int:
             payload=json.loads(args.payload_json),
             source=json.loads(args.source_json) if args.source_json else None,
             idempotency_key=args.idempotency_key,
+        )
+        print(json.dumps(result_payload(result), sort_keys=True))
+    elif args.command == "cancel":
+        result = engine.cancel_workflow(
+            args.workflow_id,
+            reason=args.reason,
+            source=json.loads(args.source_json) if args.source_json else None,
+            superseded_by=args.superseded_by,
         )
         print(json.dumps(result_payload(result), sort_keys=True))
     elif args.command == "status":

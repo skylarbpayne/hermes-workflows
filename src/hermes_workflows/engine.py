@@ -16,6 +16,10 @@ class WorkflowWaiting(Exception):
         self.waiting_on = waiting_on
 
 
+class WorkflowCancelled(Exception):
+    """Internal control-flow signal: stop decider work after cancellation."""
+
+
 @dataclass(frozen=True)
 class PendingStep:
     key: str
@@ -97,8 +101,19 @@ class WorkflowEngine:
                 return result
 
     def complete_step(self, workflow_id: str, step_key: str, output: Any) -> RunResult:
-        workflow_fn = _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]]
+        instance = self._instance(workflow_id)
+        if instance["status"] == "cancelled":
+            return self._result_from_instance(workflow_id)
+
+        workflow_fn = _WORKFLOW_REGISTRY[instance["workflow_name"]]
         with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            if row["status"] == "cancelled":
+                return self._result_from_row(row)
+
             self._append_event(
                 con,
                 workflow_id,
@@ -109,11 +124,19 @@ class WorkflowEngine:
                 ignore_duplicate=True,
             )
             con.execute(
-                "UPDATE workflow_commands_outbox SET status = 'completed' WHERE workflow_id = ? AND key = ? AND type = 'run_step'",
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'completed'
+                WHERE workflow_id = ? AND key = ? AND type = 'run_step' AND status != 'cancelled'
+                """,
                 (workflow_id, step_key),
             )
             con.execute(
-                "UPDATE workflow_instances SET status = 'running', updated_at = ? WHERE id = ?",
+                """
+                UPDATE workflow_instances
+                SET status = 'running', updated_at = ?
+                WHERE id = ? AND status != 'cancelled'
+                """,
                 (_now(), workflow_id),
             )
         return self._run_decider(workflow_id, workflow_fn)
@@ -128,10 +151,21 @@ class WorkflowEngine:
         source: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> RunResult:
-        workflow_fn = _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]]
+        instance = self._instance(workflow_id)
+        if instance["status"] == "cancelled":
+            return self._result_from_instance(workflow_id)
+
+        workflow_fn = _WORKFLOW_REGISTRY[instance["workflow_name"]]
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
         inserted = False
         with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            if row["status"] == "cancelled":
+                return self._result_from_row(row)
+
             inserted = self._append_event(
                 con,
                 workflow_id,
@@ -143,7 +177,11 @@ class WorkflowEngine:
             )
             if inserted:
                 con.execute(
-                    "UPDATE workflow_instances SET status = 'running', updated_at = ? WHERE id = ?",
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'running', updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
                     (_now(), workflow_id),
                 )
                 if signal_type == "approval.decision":
@@ -151,12 +189,65 @@ class WorkflowEngine:
                         """
                         UPDATE workflow_commands_outbox
                         SET status = 'completed', lease_expires_at = NULL, updated_at = ?
-                        WHERE workflow_id = ? AND type = 'notify_approval' AND key = ?
+                        WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
                         """,
                         (_now(), workflow_id, f"approval:{key}"),
                     )
         result = self._run_decider(workflow_id, workflow_fn) if inserted else self._result_from_instance(workflow_id)
         return self.drain(workflow_id, initial=result)
+
+    def cancel_workflow(
+        self,
+        workflow_id: str,
+        *,
+        reason: str,
+        source: Optional[Dict[str, Any]] = None,
+        superseded_by: Optional[str] = None,
+    ) -> RunResult:
+        """Mark a workflow terminal-cancelled while preserving an audit event."""
+
+        payload = {
+            "type": "cancelled",
+            "reason": reason,
+            "source": source,
+            "superseded_by": superseded_by,
+        }
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT status FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            if row["status"] in {"completed", "failed", "cancelled"}:
+                full_row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                return self._result_from_row(full_row)
+
+            self._append_event(
+                con,
+                workflow_id,
+                "WorkflowCancelled",
+                key="workflow:cancelled",
+                payload=payload,
+                idempotency_key="workflow:cancelled",
+                ignore_duplicate=True,
+            )
+            con.execute(
+                """
+                UPDATE workflow_instances
+                SET status = 'cancelled', waiting_on = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, workflow_id),
+            )
+            con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'cancelled', lease_expires_at = NULL, updated_at = ?
+                WHERE workflow_id = ? AND status IN ('pending', 'running')
+                """,
+                (now, workflow_id),
+            )
+        return self._result_from_instance(workflow_id)
 
     def pending_commands(self, workflow_id: str) -> List[Dict[str, Any]]:
         with self._connect() as con:
@@ -189,14 +280,17 @@ class WorkflowEngine:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
                 """
-                SELECT * FROM workflow_commands_outbox
-                WHERE workflow_id = ?
-                  AND type = ?
+                SELECT c.*
+                FROM workflow_commands_outbox c
+                JOIN workflow_instances wi ON wi.id = c.workflow_id
+                WHERE c.workflow_id = ?
+                  AND c.type = ?
+                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
                   AND (
-                    status = 'pending'
-                    OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?)
+                    c.status = 'pending'
+                    OR (c.status = 'running' AND COALESCE(c.lease_expires_at, 0) <= ?)
                   )
-                ORDER BY id ASC LIMIT 1
+                ORDER BY c.id ASC LIMIT 1
                 """,
                 (workflow_id, command_type, now),
             ).fetchone()
@@ -301,14 +395,21 @@ class WorkflowEngine:
         with self._connect() as con:
             rows = con.execute(query, params).fetchall()
         return [
-            {
-                "workflow_id": row["id"],
-                "workflow_name": row["workflow_name"],
-                "status": row["status"],
-                "waiting_on": row["waiting_on"],
-            }
+            self._list_workflow_payload(row)
             for row in rows
         ]
+
+    def _list_workflow_payload(self, row: sqlite3.Row) -> Dict[str, Any]:
+        payload = {
+            "workflow_id": row["id"],
+            "workflow_name": row["workflow_name"],
+            "status": row["status"],
+            "waiting_on": row["waiting_on"],
+        }
+        terminal_reason = self._terminal_reason(row["id"])
+        if terminal_reason is not None:
+            payload["terminal_reason"] = terminal_reason
+        return payload
 
     def outbox_commands(
         self,
@@ -346,12 +447,29 @@ class WorkflowEngine:
             "error": _format_error(JsonCodec.loads(row["error_json"])),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "terminal_reason": self._terminal_reason(workflow_id),
             "event_count": len(events),
             "events": events[-recent_events:],
             "pending_commands": pending_commands,
             "diagnostics": self._command_diagnostics(pending_commands),
             "approvals": self._approval_summaries(events),
         }
+
+    def _terminal_reason(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT payload_json
+                FROM workflow_events
+                WHERE workflow_id = ? AND type = 'WorkflowCancelled'
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = JsonCodec.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
 
     def _approval_summaries(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         decisions: dict[str, Dict[str, Any]] = {}
@@ -453,7 +571,7 @@ class WorkflowEngine:
         expected_wait = _expected_wait_for_command(command)
         if command.get("type") == "notify_approval" and expected_wait in signal_keys:
             labels.append("matching_signal_exists")
-        if summary.get("status") in {"completed", "failed"}:
+        if summary.get("status") in {"completed", "failed", "cancelled"}:
             labels.append("terminal_workflow_has_pending_command")
         if summary.get("status") == "waiting" and summary.get("waiting_on") == expected_wait:
             labels.append("active_wait")
@@ -478,41 +596,74 @@ class WorkflowEngine:
 
     def _run_decider(self, workflow_id: str, workflow_fn: Callable[..., Any]) -> RunResult:
         instance = self._instance(workflow_id)
+        if instance["status"] == "cancelled":
+            return self._result_from_instance(workflow_id)
+
         ctx = WorkflowContext(self, workflow_id)
         try:
             result = _run_maybe_async(workflow_fn(ctx, JsonCodec.loads(instance["input_json"])))
+        except WorkflowCancelled:
+            return self._result_from_instance(workflow_id)
         except WorkflowWaiting as waiting:
             with self._connect() as con:
-                con.execute(
+                con.execute("BEGIN IMMEDIATE")
+                row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown workflow_id: {workflow_id}")
+                if row["status"] == "cancelled":
+                    return self._result_from_row(row)
+                changed = con.execute(
                     """
                     UPDATE workflow_instances
                     SET status = 'waiting', waiting_on = ?, updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status != 'cancelled'
                     """,
                     (waiting.waiting_on, _now(), workflow_id),
-                )
+                ).rowcount
+                if changed == 0:
+                    row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                    return self._result_from_row(row)
             return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=waiting.waiting_on)
         except Exception as exc:  # v0/v1: fail closed and keep the error inspectable.
+            error = {"type": type(exc).__name__, "message": str(exc)}
             with self._connect() as con:
-                con.execute(
+                con.execute("BEGIN IMMEDIATE")
+                row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown workflow_id: {workflow_id}")
+                if row["status"] == "cancelled":
+                    return self._result_from_row(row)
+                changed = con.execute(
                     """
                     UPDATE workflow_instances
                     SET status = 'failed', error_json = ?, updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status != 'cancelled'
                     """,
-                    (JsonCodec.dumps({"type": type(exc).__name__, "message": str(exc)}), _now(), workflow_id),
-                )
+                    (JsonCodec.dumps(error), _now(), workflow_id),
+                ).rowcount
+                if changed == 0:
+                    row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                    return self._result_from_row(row)
             return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
 
         with self._connect() as con:
-            con.execute(
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            if row["status"] == "cancelled":
+                return self._result_from_row(row)
+            changed = con.execute(
                 """
                 UPDATE workflow_instances
                 SET status = 'completed', waiting_on = NULL, result_json = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status != 'cancelled'
                 """,
                 (JsonCodec.dumps(result), _now(), workflow_id),
-            )
+            ).rowcount
+            if changed == 0:
+                row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                return self._result_from_row(row)
             self._append_event(
                 con,
                 workflow_id,
@@ -526,8 +677,11 @@ class WorkflowEngine:
 
     def _result_from_instance(self, workflow_id: str) -> RunResult:
         row = self._instance(workflow_id)
+        return self._result_from_row(row)
+
+    def _result_from_row(self, row: sqlite3.Row) -> RunResult:
         return RunResult(
-            workflow_id=workflow_id,
+            workflow_id=row["id"],
             status=row["status"],
             waiting_on=row["waiting_on"],
             result=JsonCodec.loads(row["result_json"]),
@@ -543,6 +697,23 @@ class WorkflowEngine:
         args = payload.get("args", [])
         kwargs = payload.get("kwargs", {})
         body = get_step_body(step_name)
+
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT c.id
+                FROM workflow_commands_outbox c
+                JOIN workflow_instances wi ON wi.id = c.workflow_id
+                WHERE c.id = ?
+                  AND c.status = 'running'
+                  AND c.claimed_by = ?
+                  AND c.attempts = ?
+                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
+                """,
+                (command["id"], command["claimed_by"], command["attempts"]),
+            ).fetchone()
+        if row is None:
+            return self._result_from_instance(workflow_id)
 
         try:
             output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
@@ -700,16 +871,26 @@ class WorkflowEngine:
     def _insert_command(self, workflow_id: str, command_type: str, key: str, payload: Any) -> bool:
         with self._connect() as con:
             try:
-                con.execute(
-                    """
-                    INSERT INTO workflow_commands_outbox(workflow_id, type, key, payload_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (workflow_id, command_type, key, JsonCodec.dumps(payload), _now(), _now()),
-                )
-                return True
+                return self._insert_command_row(con, workflow_id, command_type, key, payload)
             except sqlite3.IntegrityError:
                 return False
+
+    def _insert_command_row(
+        self,
+        con: sqlite3.Connection,
+        workflow_id: str,
+        command_type: str,
+        key: str,
+        payload: Any,
+    ) -> bool:
+        con.execute(
+            """
+            INSERT INTO workflow_commands_outbox(workflow_id, type, key, payload_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (workflow_id, command_type, key, JsonCodec.dumps(payload), _now(), _now()),
+        )
+        return True
 
 
     def _ensure_command_columns(self, con: sqlite3.Connection) -> None:
@@ -748,6 +929,17 @@ class WorkflowContext:
         self._gather_call_count = 0
         self.approval = ApprovalClient(self)
 
+    def _raise_if_cancelled(self) -> None:
+        if self.engine._instance(self.workflow_id)["status"] == "cancelled":
+            raise WorkflowCancelled()
+
+    def _raise_if_cancelled_in_connection(self, con: sqlite3.Connection) -> None:
+        row = con.execute("SELECT status FROM workflow_instances WHERE id = ?", (self.workflow_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"unknown workflow_id: {self.workflow_id}")
+        if row["status"] == "cancelled":
+            raise WorkflowCancelled()
+
     async def run_step(
         self,
         step_name: str,
@@ -757,6 +949,7 @@ class WorkflowContext:
         block: bool = True,
         payload_builder: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> Any:
+        self._raise_if_cancelled()
         call_index = self._step_call_counts.get(step_name, 0)
         self._step_call_counts[step_name] = call_index + 1
         key = f"step:{step_name}:{call_index}"
@@ -773,6 +966,8 @@ class WorkflowContext:
                 if payload.get("step_name") != step_name:
                     raise ValueError("payload_builder step_name must match durable step name")
             with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
                 inserted = self.engine._append_event(
                     con,
                     self.workflow_id,
@@ -782,8 +977,8 @@ class WorkflowContext:
                     idempotency_key=f"requested:{key}",
                     ignore_duplicate=True,
                 )
-            if inserted:
-                self.engine._insert_command(self.workflow_id, "run_step", key, payload)
+                if inserted:
+                    self.engine._insert_command_row(con, self.workflow_id, "run_step", key, payload)
 
         if block:
             raise WorkflowWaiting(key)
@@ -824,6 +1019,8 @@ class WorkflowContext:
 
         if pending:
             with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
                 self.engine._append_event(
                     con,
                     self.workflow_id,
@@ -838,6 +1035,7 @@ class WorkflowContext:
         return results
 
     async def wait_for(self, signal_type: str, *, key: str) -> Any:
+        self._raise_if_cancelled()
         wait_key = f"signal:{signal_type}:{key}"
         signal = self._last_event("SignalReceived", wait_key)
         if signal is not None:
@@ -846,6 +1044,8 @@ class WorkflowContext:
         request_key = f"wait:{signal_type}:{key}"
         if self._last_event("WaitRequested", request_key) is None:
             with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
                 self.engine._append_event(
                     con,
                     self.workflow_id,
@@ -888,6 +1088,7 @@ class ApprovalClient:
         authority: Optional[List[str]] = None,
         timeout: Optional[str] = None,
     ) -> Any:
+        self.ctx._raise_if_cancelled()
         event_key = f"approval:{key}"
         if self.ctx._last_event("ApprovalRequested", event_key) is None:
             payload = {
@@ -900,6 +1101,8 @@ class ApprovalClient:
                 "timeout": timeout,
             }
             with self.ctx.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self.ctx._raise_if_cancelled_in_connection(con)
                 inserted = self.ctx.engine._append_event(
                     con,
                     self.ctx.workflow_id,
@@ -909,8 +1112,8 @@ class ApprovalClient:
                     idempotency_key=f"approval-requested:{key}",
                     ignore_duplicate=True,
                 )
-            if inserted:
-                self.ctx.engine._insert_command(self.ctx.workflow_id, "notify_approval", event_key, payload)
+                if inserted:
+                    self.ctx.engine._insert_command_row(con, self.ctx.workflow_id, "notify_approval", event_key, payload)
 
         decision_event = self.ctx._last_event("SignalReceived", f"signal:approval.decision:{key}")
         if decision_event is None:

@@ -254,6 +254,13 @@ PYTHONPATH=src:. python -m hermes_workflows outbox \
   --id wf_first_real_trip \
   --status pending
 
+PYTHONPATH=src:. python -m hermes_workflows cancel \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --reason 'superseded by wf_next_trip' \
+  --source-json '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://..."}' \
+  --superseded-by wf_next_trip
+
 PYTHONPATH=src:. python -m hermes_workflows list \
   --db /tmp/hermes-workflows.sqlite \
   --status waiting
@@ -263,10 +270,12 @@ PYTHONPATH=src:. python -m hermes_workflows list \
 
 - `active_wait` means the workflow is currently waiting on that command/signal.
 - `matching_signal_exists` means a matching approval signal is already in the event log, so the notification row is historical/stale.
-- `terminal_workflow_has_pending_command` means the workflow is completed/failed while the command row still says pending/running.
+- `terminal_workflow_has_pending_command` means the workflow is completed/failed/cancelled while the command row still says pending/running.
 - `orphaned_or_inconsistent` means the row does not match the workflow's current wait state.
 
 These labels are advisory only. They do not delete commands, rewrite history, or resume workflows.
+
+`cancel` is the explicit mutation path for retiring stale or superseded workflows. It appends a `WorkflowCancelled` event, sets the instance to `status="cancelled"`, clears `waiting_on`, marks pending/running outbox rows `cancelled`, and exposes the audit payload as `terminal_reason` in `status`/`list`. It does not clean up real workflow DB rows unless you run it against that DB deliberately.
 
 ## Current limitations
 
@@ -292,5 +301,5 @@ pytest -q
 Expected now:
 
 ```text
-49 passed, 1 skipped
+58 passed, 1 skipped
 ```
