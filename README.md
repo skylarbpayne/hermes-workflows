@@ -24,6 +24,8 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 
 See [`docs/architecture/runtime-vs-skills-subagents.md`](docs/architecture/runtime-vs-skills-subagents.md) for the accepted boundary.
 
+Dynamic sub-workflow generation now uses Python as the workflow language: an `AgentStep` can return a typed `Workflow` value backed by generated Python source, and the parent can call or `ctx.map_workflow(...)` it as a durable child workflow. See [`docs/architecture/dynamic-sub-workflows.md`](docs/architecture/dynamic-sub-workflows.md) for the implemented first slice.
+
 ## The core runtime idea
 
 A workflow function is a **decider**, not a daemon.

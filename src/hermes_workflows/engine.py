@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from .workflow_values import Workflow
+
 
 class WorkflowWaiting(Exception):
     def __init__(self, waiting_on: str):
@@ -37,13 +39,13 @@ class RunResult:
 class JsonCodec:
     @staticmethod
     def dumps(value: Any) -> str:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return json.dumps(_to_jsonable(value), sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def loads(value: Optional[str]) -> Any:
         if value is None or value == "":
             return None
-        return json.loads(value)
+        return _from_jsonable(json.loads(value))
 
 
 class WorkflowEngine:
@@ -91,10 +93,10 @@ class WorkflowEngine:
 
         result = initial or self._result_from_instance(workflow_id)
         while True:
-            command = self.claim_command(workflow_id, worker_id="local-drain", lease_seconds=30)
+            command = self.claim_command(workflow_id, worker_id="local-drain", lease_seconds=30, command_type=None)
             if command is None:
                 return self._result_from_instance(workflow_id) if result is None else self._result_from_instance(workflow_id)
-            result = self._execute_run_step_command(workflow_id, command)
+            result = self._execute_command(workflow_id, command)
             if result.status in {"failed", "completed"}:
                 # There might still be historical pending commands from a corrupt
                 # test DB, but v0 stops on terminal status.
@@ -271,20 +273,25 @@ class WorkflowEngine:
         *,
         worker_id: str,
         lease_seconds: int = 30,
-        command_type: str = "run_step",
+        command_type: Optional[str] = "run_step",
     ) -> Optional[Dict[str, Any]]:
         """Claim one pending or lease-expired command for a worker."""
 
         now = _now()
+        type_clause = "AND c.type = ?" if command_type is not None else "AND c.type IN ('run_step', 'start_child_workflow')"
+        params: list[Any] = [workflow_id]
+        if command_type is not None:
+            params.append(command_type)
+        params.append(now)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
-                """
+                f"""
                 SELECT c.*
                 FROM workflow_commands_outbox c
                 JOIN workflow_instances wi ON wi.id = c.workflow_id
                 WHERE c.workflow_id = ?
-                  AND c.type = ?
+                  {type_clause}
                   AND wi.status NOT IN ('completed', 'failed', 'cancelled')
                   AND (
                     c.status = 'pending'
@@ -292,7 +299,7 @@ class WorkflowEngine:
                   )
                 ORDER BY c.id ASC LIMIT 1
                 """,
-                (workflow_id, command_type, now),
+                params,
             ).fetchone()
             if row is None:
                 return None
@@ -327,10 +334,10 @@ class WorkflowEngine:
         return self._command_payload(claimed)
 
     def worker_once(self, workflow_id: str, *, worker_id: str, lease_seconds: int = 30) -> RunResult:
-        command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds)
+        command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds, command_type=None)
         if command is None:
             return self._result_from_instance(workflow_id)
-        return self._execute_run_step_command(workflow_id, command)
+        return self._execute_command(workflow_id, command)
 
     def worker_until_idle(
         self,
@@ -343,10 +350,10 @@ class WorkflowEngine:
         result = self._result_from_instance(workflow_id)
         executed = 0
         while max_commands is None or executed < max_commands:
-            command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds)
+            command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds, command_type=None)
             if command is None:
                 return self._result_from_instance(workflow_id)
-            result = self._execute_run_step_command(workflow_id, command)
+            result = self._execute_command(workflow_id, command)
             executed += 1
             if result.status in {"completed", "failed"}:
                 return result
@@ -687,6 +694,110 @@ class WorkflowEngine:
             result=JsonCodec.loads(row["result_json"]),
             error=_format_error(JsonCodec.loads(row["error_json"])),
         )
+
+    def _execute_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
+        payload = command["payload"] if isinstance(command, dict) else JsonCodec.loads(command["payload_json"])
+        command_type = command["type"] if isinstance(command, dict) else command["type"]
+        if command_type == "run_step":
+            return self._execute_run_step_command(workflow_id, command)
+        if command_type == "start_child_workflow":
+            return self._execute_start_child_workflow_command(workflow_id, command, payload)
+        raise ValueError(f"unknown workflow command type: {command_type}")
+
+    def _execute_start_child_workflow_command(
+        self,
+        workflow_id: str,
+        command: Union[sqlite3.Row, Dict[str, Any]],
+        payload: Dict[str, Any],
+    ) -> RunResult:
+        key = command["key"]
+        workflow_ref = payload["workflow"]
+        if not isinstance(workflow_ref, Workflow):
+            raise TypeError("start_child_workflow command payload must include a Workflow value")
+        workflow_ref = workflow_ref.with_base_dir(self.db_path.parent)
+
+        child_id = payload["child_workflow_id"]
+        child_fn = workflow_ref.load()
+        child_result = self.run_until_idle(child_fn, payload["inputs"], workflow_id=child_id)
+
+        with self._connect() as con:
+            changed = con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                WHERE id = ?
+                  AND status = 'running'
+                  AND claimed_by = ?
+                  AND attempts = ?
+                """,
+                (_now(), command["id"], command["claimed_by"], command["attempts"]),
+            ).rowcount
+            if changed == 0:
+                return self._result_from_instance(workflow_id)
+
+            if child_result.status == "completed":
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "ChildWorkflowCompleted",
+                    key=key,
+                    payload={"child_workflow_id": child_id, "result": child_result.result},
+                    idempotency_key=f"child-completed:{key}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'running', updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (_now(), workflow_id),
+                )
+            elif child_result.status == "failed":
+                error = {"type": "ChildWorkflowFailed", "message": child_result.error or f"child failed: {child_id}"}
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "ChildWorkflowFailed",
+                    key=key,
+                    payload={"child_workflow_id": child_id, "error": error},
+                    idempotency_key=f"child-failed:{key}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'failed', error_json = ?, updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (JsonCodec.dumps(error), _now(), workflow_id),
+                )
+                return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
+            else:
+                error = {
+                    "type": "ChildWorkflowIncomplete",
+                    "message": f"child workflow {child_id} is {child_result.status}; waiting children are not supported in this slice",
+                }
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "ChildWorkflowFailed",
+                    key=key,
+                    payload={"child_workflow_id": child_id, "error": error},
+                    idempotency_key=f"child-incomplete:{key}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'failed', error_json = ?, updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (JsonCodec.dumps(error), _now(), workflow_id),
+                )
+                return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
+
+        return self._run_decider(workflow_id, _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]])
 
     def _execute_run_step_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         from .decorators import get_step_body
@@ -1034,6 +1145,117 @@ class WorkflowContext:
 
         return results
 
+    async def start_child(
+        self,
+        workflow_ref: Workflow,
+        inputs: Any,
+        *,
+        key: str | None = None,
+        group: str | None = None,
+        block: bool = True,
+    ) -> Any:
+        self._raise_if_cancelled()
+        if not isinstance(workflow_ref, Workflow):
+            raise TypeError("ctx.start_child expects a Workflow value")
+        workflow_ref = workflow_ref.with_base_dir(self.engine.db_path.parent)
+        workflow_ref.load()
+        child_group = _workflow_child_group(workflow_ref, group=group)
+        child_key_part = _safe_child_key(key if key is not None else str(self._child_call_count_for(child_group)))
+        event_key = f"child:{child_group}:{child_key_part}"
+
+        completed = self._last_event("ChildWorkflowCompleted", event_key)
+        if completed is not None:
+            return completed["result"]
+        failed = self._last_event("ChildWorkflowFailed", event_key)
+        if failed is not None:
+            raise RuntimeError(failed.get("error", {}).get("message") or f"child workflow failed: {event_key}")
+
+        child_workflow_id = f"{self.workflow_id}.child.{child_group}.{child_key_part}"
+        request_payload = {
+            "workflow": workflow_ref,
+            "workflow_name": workflow_ref.workflow_name,
+            "symbol": workflow_ref.symbol,
+            "source_sha256": workflow_ref.source_sha256,
+            "inputs": inputs,
+            "child_workflow_id": child_workflow_id,
+            "child_key": child_key_part,
+            "group": child_group,
+        }
+        if self._last_event("ChildWorkflowRequested", event_key) is None:
+            with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
+                inserted = self.engine._append_event(
+                    con,
+                    self.workflow_id,
+                    "ChildWorkflowRequested",
+                    key=event_key,
+                    payload=request_payload,
+                    idempotency_key=f"child-requested:{event_key}",
+                    ignore_duplicate=True,
+                )
+                if inserted:
+                    self.engine._insert_command_row(con, self.workflow_id, "start_child_workflow", event_key, request_payload)
+
+        if block:
+            raise WorkflowWaiting(event_key)
+        return PendingStep(event_key)
+
+    async def map_workflow(
+        self,
+        workflow_ref: Workflow,
+        items: List[Any],
+        *,
+        key_fn: Callable[[Any], str],
+        concurrency: int | None = None,
+    ) -> List[Any]:
+        map_index = self._gather_call_count
+        self._gather_call_count += 1
+        group = f"map:{map_index}"
+        results: List[Any] = []
+        pending: List[str] = []
+        seen_keys: set[str] = set()
+        for item in items:
+            raw_child_key = str(key_fn(item))
+            child_key = _safe_child_key(raw_child_key)
+            if child_key in seen_keys:
+                raise ValueError(f"duplicate child workflow key in map_workflow: {child_key}")
+            seen_keys.add(child_key)
+            result = await self.start_child(workflow_ref, item, key=raw_child_key, group=group, block=False)
+            if isinstance(result, PendingStep):
+                pending.append(result.key)
+                results.append(None)
+            else:
+                results.append(result)
+
+        if pending:
+            wait_key = f"child-gather:{group}"
+            with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
+                self.engine._append_event(
+                    con,
+                    self.workflow_id,
+                    "ChildWorkflowGatherWaiting",
+                    key=wait_key,
+                    payload={"pending": pending, "concurrency": concurrency},
+                    idempotency_key=f"child-gather-waiting:{wait_key}",
+                    ignore_duplicate=True,
+                )
+            raise WorkflowWaiting(wait_key)
+
+        return results
+
+    def _child_call_count_for(self, group: str) -> int:
+        attr = "_child_call_counts"
+        counts = getattr(self, attr, None)
+        if counts is None:
+            counts = {}
+            setattr(self, attr, counts)
+        call_index = counts.get(group, 0)
+        counts[group] = call_index + 1
+        return call_index
+
     async def wait_for(self, signal_type: str, *, key: str) -> Any:
         self._raise_if_cancelled()
         wait_key = f"signal:{signal_type}:{key}"
@@ -1174,6 +1396,51 @@ def _diagnostic_message(label: str) -> str:
         "orphaned_or_inconsistent": "Command is pending or running but does not match the workflow's current wait state.",
     }
     return messages.get(label, "Command has an unknown diagnostic state.")
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, Workflow):
+        return value.to_json()
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(item) for item in value]
+    return value
+
+
+def _from_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        if value.get("__hermes_type__") == "Workflow":
+            return Workflow.from_json(value)
+        return {key: _from_jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_from_jsonable(item) for item in value]
+    return value
+
+
+def _safe_child_key(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("child workflow key must be non-empty")
+    safe = "".join(char if char.isalnum() or char in "._-:" else "_" for char in text)
+    digest = _hash_text(text)[:12]
+    if safe == text and len(safe) <= 80:
+        return safe
+    prefix = safe[:80].strip("._-:") or "key"
+    return f"{prefix}-{digest}"
+
+
+def _workflow_child_group(workflow_ref: Workflow, *, group: str | None) -> str:
+    base = _safe_child_key(group or workflow_ref.symbol)
+    return f"{base}:{workflow_ref.source_sha256[:12]}"
+
+
+def _hash_text(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _format_error(error: Any) -> Optional[str]:
