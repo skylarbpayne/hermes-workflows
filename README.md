@@ -14,6 +14,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - approval request primitive through `ctx.approval.request(...)`
 - durable fan-out/fan-in through `ctx.gather(step_a(...), step_b(...))`
 - render-only prompt-file steps through `AgentPrompt("prompt.md", **vars)`
+- JSON-over-stdin subprocess agent runners through `SubprocessAgentRunner([...])`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
 - manual `signal()` resume API
 - tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list|events|outbox`
@@ -156,6 +157,66 @@ The prompt content is snapshotted into the `StepRequested` event when the durabl
 - `AgentPrompt` works inside `ctx.gather(...)` like other durable step calls
 
 `AgentPrompt` is not an approval bypass. Use normal `ctx.approval.request(...)` for human gates; prompt rendering is just another memoized step result.
+
+## Subprocess AgentStep runner
+
+`SubprocessAgentRunner` is the built-in bridge from durable `AgentStep` requests to a trusted external agent process. The runtime does not know about Hermes, Codex, Claude, or any vendor-specific model. It writes one JSON request to the configured command's stdin and expects one bounded JSON object on stdout.
+
+```python
+from hermes_workflows import AgentStep, SubprocessAgentRunner, WorkflowEngine, workflow
+
+
+@workflow
+async def summarize(ctx, inputs):
+    return await AgentStep(
+        "summarize_item",
+        prompt="Summarize {{item}}",
+        variables={"item": inputs["item"]},
+    )(ctx)
+
+engine = WorkflowEngine(
+    "workflow.sqlite",
+    agent_runner=SubprocessAgentRunner(
+        ["python", "scripts/my_agent_runner.py"],
+        timeout_seconds=120,
+        max_stdout_bytes=1_000_000,
+    ),
+)
+```
+
+The subprocess receives this contract on stdin:
+
+```json
+{
+  "kind": "agent_step.runner_request.v1",
+  "name": "summarize_item",
+  "prompt": "Summarize {{item}}",
+  "rendered_prompt": "Summarize alpha",
+  "variables": {"item": "alpha"},
+  "returns": "json",
+  "workflow_id": "wf_summary",
+  "step_key": "step:agent_step:0"
+}
+```
+
+It must return a JSON object with `output`; `provenance` is optional but strongly recommended and must not contain secrets:
+
+```json
+{
+  "output": {"summary": "ALPHA"},
+  "provenance": {"runner": "my-agent-runner", "model": "example-model", "request_id": "abc123"}
+}
+```
+
+The runner fails closed on non-zero exit, timeout, invalid JSON, missing `output`, non-object provenance, and stdout larger than `max_stdout_bytes`. Error details include command, duration, exit code, and bounded stdout/stderr tails where useful, but never dump the subprocess environment. Command selection is trusted local code; do not pass unreviewed shell strings. Generated Python returned via `AgentStep(..., returns=Workflow)` still requires the generated-workflow approval gate before import or child execution, and approval is not a sandbox.
+
+Try the deterministic local smoke path:
+
+```bash
+PYTHONPATH=src:. python examples/subprocess_agent_runner.py
+```
+
+Provider-specific wrappers belong outside the core runtime for now; they can be thin scripts that implement this JSON stdin/stdout contract.
 
 ## Workflow-backed PR path
 
@@ -303,5 +364,5 @@ pytest -q
 Expected now:
 
 ```text
-58 passed, 1 skipped
+81 passed, 1 skipped
 ```

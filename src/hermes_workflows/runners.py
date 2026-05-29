@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+
+class AgentRunnerError(RuntimeError):
+    """Raised when an external agent runner fails closed."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.details = details or {}
+
+
+class SubprocessAgentRunner:
+    """JSON-over-stdin adapter for trusted external AgentStep runner commands."""
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        timeout_seconds: float = 300,
+        cwd: str | Path | None = None,
+        env: Mapping[str, str] | None = None,
+        max_stdout_bytes: int = 1_000_000,
+        redact_env_keys: tuple[str, ...] = ("TOKEN", "KEY", "SECRET", "PASSWORD"),
+    ):
+        if isinstance(command, (str, bytes)):
+            raise TypeError("SubprocessAgentRunner command must be an argv sequence, not a shell string")
+        self.command = [str(part) for part in command]
+        if not self.command:
+            raise ValueError("SubprocessAgentRunner command must not be empty")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if max_stdout_bytes <= 0:
+            raise ValueError("max_stdout_bytes must be positive")
+        self.timeout_seconds = timeout_seconds
+        self.cwd = Path(cwd) if cwd is not None else None
+        self.env = {str(key): str(value) for key, value in (env or {}).items()}
+        self.max_stdout_bytes = max_stdout_bytes
+        self.redact_env_keys = tuple(redact_env_keys)
+
+    def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
+        started = time.monotonic()
+        request_bytes = self._encode_request(request)
+        try:
+            completed = subprocess.run(
+                self.command,
+                input=request_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self.cwd) if self.cwd is not None else None,
+                env=self._subprocess_env(),
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            duration_ms = self._duration_ms(started)
+            raise AgentRunnerError(
+                f"agent runner timed out after {self.timeout_seconds:g}s: {self._command_label()}",
+                details={
+                    "command": self.command,
+                    "timeout_seconds": self.timeout_seconds,
+                    "duration_ms": duration_ms,
+                    "stdout_tail": self._tail(exc.stdout or b""),
+                    "stderr_tail": self._tail(exc.stderr or b""),
+                },
+            ) from exc
+        except OSError as exc:
+            duration_ms = self._duration_ms(started)
+            raise AgentRunnerError(
+                f"agent runner could not start: {self._command_label()}: {exc}",
+                details={"command": self.command, "duration_ms": duration_ms, "error": str(exc)},
+            ) from exc
+
+        duration_ms = self._duration_ms(started)
+        stdout = completed.stdout or b""
+        stderr = completed.stderr or b""
+        if len(stdout) > self.max_stdout_bytes:
+            raise AgentRunnerError(
+                f"agent runner stdout exceeded {self.max_stdout_bytes} bytes: {self._command_label()}",
+                details={
+                    "command": self.command,
+                    "exit_code": completed.returncode,
+                    "duration_ms": duration_ms,
+                    "stdout_bytes": len(stdout),
+                    "stdout_tail": self._tail(stdout),
+                    "stderr_tail": self._tail(stderr),
+                },
+            )
+        if completed.returncode != 0:
+            raise AgentRunnerError(
+                f"agent runner exited with code {completed.returncode}: {self._command_label()}",
+                details={
+                    "command": self.command,
+                    "exit_code": completed.returncode,
+                    "duration_ms": duration_ms,
+                    "stdout_tail": self._tail(stdout),
+                    "stderr_tail": self._tail(stderr),
+                },
+            )
+
+        try:
+            response = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentRunnerError(
+                f"agent runner returned invalid JSON on stdout: {self._command_label()}",
+                details={
+                    "command": self.command,
+                    "duration_ms": duration_ms,
+                    "stdout_tail": self._tail(stdout),
+                    "stderr_tail": self._tail(stderr),
+                },
+            ) from exc
+
+        if not isinstance(response, dict):
+            raise AgentRunnerError(
+                "agent runner response must be a JSON object",
+                details={"command": self.command, "duration_ms": duration_ms, "response_type": type(response).__name__},
+            )
+        if "output" not in response:
+            raise AgentRunnerError(
+                "agent runner response must include an 'output' field",
+                details={"command": self.command, "duration_ms": duration_ms, "response_keys": sorted(response)},
+            )
+        if "provenance" in response and response["provenance"] is not None and not isinstance(response["provenance"], dict):
+            raise AgentRunnerError(
+                "agent runner provenance must be a JSON object when provided",
+                details={"command": self.command, "duration_ms": duration_ms},
+            )
+        if response.get("provenance") is None:
+            response["provenance"] = {
+                "runner": "subprocess",
+                "command": Path(self.command[0]).name,
+                "duration_ms": duration_ms,
+            }
+        return response
+
+    def _encode_request(self, request: dict[str, Any]) -> bytes:
+        try:
+            return json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise AgentRunnerError("agent runner request is not JSON serializable", details={"command": self.command}) from exc
+
+    def _subprocess_env(self) -> dict[str, str] | None:
+        if not self.env:
+            return None
+        merged = dict(os.environ)
+        merged.update(self.env)
+        return merged
+
+    def _duration_ms(self, started: float) -> int:
+        return int((time.monotonic() - started) * 1000)
+
+    def _command_label(self) -> str:
+        return " ".join(self.command)
+
+    def _tail(self, stream: bytes, *, limit: int = 4096) -> str:
+        return stream[-limit:].decode("utf-8", errors="replace")
