@@ -128,7 +128,7 @@ class WorkflowEngine:
         if instance["status"] == "cancelled":
             return self._result_from_instance(workflow_id)
 
-        workflow_fn = _WORKFLOW_REGISTRY[instance["workflow_name"]]
+        workflow_fn = self._workflow_fn_for_instance(instance)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
@@ -181,7 +181,7 @@ class WorkflowEngine:
         if instance["status"] == "cancelled":
             return self._result_from_instance(workflow_id)
 
-        workflow_fn = _WORKFLOW_REGISTRY[instance["workflow_name"]]
+        workflow_fn = self._workflow_fn_for_instance(instance)
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
         inserted = False
         with self._connect() as con:
@@ -411,6 +411,144 @@ class WorkflowEngine:
             }
             for row in rows
         ]
+
+    def pending_child_workflow_keys(self, workflow_id: str) -> list[str]:
+        self._instance(workflow_id)
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT type, key
+                FROM workflow_events
+                WHERE workflow_id = ?
+                  AND type IN ('ChildWorkflowRequested', 'ChildWorkflowCompleted', 'ChildWorkflowFailed')
+                ORDER BY seq ASC
+                """,
+                (workflow_id,),
+            ).fetchall()
+        requested: list[str] = []
+        terminal: set[str] = set()
+        for row in rows:
+            if row["type"] == "ChildWorkflowRequested" and row["key"] not in requested:
+                requested.append(row["key"])
+            elif row["type"] in {"ChildWorkflowCompleted", "ChildWorkflowFailed"}:
+                terminal.add(row["key"])
+        return [key for key in requested if key not in terminal]
+
+    def reconcile_children(self, workflow_id: str) -> RunResult:
+        pending = self.pending_child_workflow_keys(workflow_id)
+        result = self._result_from_instance(workflow_id)
+        for child_key in pending:
+            result = self.reconcile_child_result(workflow_id, child_key)
+            if result.status in {"failed", "cancelled"}:
+                return result
+        return result
+
+    def reconcile_child_result(self, workflow_id: str, child_key: str) -> RunResult:
+        requested = self._last_event_payload(workflow_id, "ChildWorkflowRequested", child_key)
+        if requested is None:
+            raise KeyError(f"no child workflow requested for key: {child_key}")
+        child_id = requested["child_workflow_id"]
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            parent = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if parent is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            if parent["status"] in {"completed", "failed", "cancelled"}:
+                return self._result_from_row(parent)
+            parent_wait_key = _parent_wait_key_for_child_wait(
+                parent_row=parent,
+                child_event_key=child_key,
+                child_group=requested.get("group"),
+            )
+
+        try:
+            child_result = self._result_from_instance(child_id)
+        except KeyError:
+            with self._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                parent = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                if parent is None:
+                    raise KeyError(f"unknown workflow_id: {workflow_id}")
+                if parent["status"] in {"completed", "failed", "cancelled"}:
+                    return self._result_from_row(parent)
+                self._record_child_waiting(
+                    con,
+                    parent_workflow_id=workflow_id,
+                    child_event_key=child_key,
+                    child_workflow_id=child_id,
+                    child_status="pending",
+                    child_waiting_on=None,
+                    parent_waiting_on=parent_wait_key,
+                )
+            return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=parent_wait_key)
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            parent = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if parent is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            if parent["status"] in {"completed", "failed", "cancelled"}:
+                return self._result_from_row(parent)
+            parent_wait_key = _parent_wait_key_for_child_wait(
+                parent_row=parent,
+                child_event_key=child_key,
+                child_group=requested.get("group"),
+            )
+
+            if child_result.status == "completed":
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "ChildWorkflowCompleted",
+                    key=child_key,
+                    payload={"child_workflow_id": child_id, "result": child_result.result},
+                    idempotency_key=f"child-completed:{child_key}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'running', waiting_on = NULL, updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (_now(), workflow_id),
+                )
+            elif child_result.status in {"failed", "cancelled"}:
+                error_type = "ChildWorkflowCancelled" if child_result.status == "cancelled" else "ChildWorkflowFailed"
+                error = {"type": error_type, "message": child_result.error or f"child {child_result.status}: {child_id}"}
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "ChildWorkflowFailed",
+                    key=child_key,
+                    payload={"child_workflow_id": child_id, "error": error},
+                    idempotency_key=f"child-failed:{child_key}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'failed', waiting_on = NULL, error_json = ?, updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (JsonCodec.dumps(error), _now(), workflow_id),
+                )
+                return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
+            else:
+                self._record_child_waiting(
+                    con,
+                    parent_workflow_id=workflow_id,
+                    child_event_key=child_key,
+                    child_workflow_id=child_id,
+                    child_status=child_result.status,
+                    child_waiting_on=child_result.waiting_on,
+                    parent_waiting_on=parent_wait_key,
+                )
+                return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=parent_wait_key)
+
+        parent = self._instance(workflow_id)
+        return self._run_decider(workflow_id, self._workflow_fn_for_instance(parent))
 
     def list_workflows(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
         query = """
@@ -729,6 +867,72 @@ class WorkflowEngine:
             error=_format_error(JsonCodec.loads(row["error_json"])),
         )
 
+    def _workflow_fn_for_instance(self, instance: sqlite3.Row) -> Callable[..., Any]:
+        workflow_name = instance["workflow_name"]
+        workflow_fn = _WORKFLOW_REGISTRY.get(workflow_name)
+        if workflow_fn is not None:
+            return workflow_fn
+
+        self._load_generated_child_workflow_from_parent_history(instance["id"], expected_workflow_name=workflow_name)
+        workflow_fn = _WORKFLOW_REGISTRY.get(workflow_name)
+        if workflow_fn is None:
+            raise KeyError(workflow_name)
+        return workflow_fn
+
+    def _load_generated_child_workflow_from_parent_history(self, child_workflow_id: str, *, expected_workflow_name: str) -> None:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT payload_json
+                FROM workflow_events
+                WHERE type = 'ChildWorkflowRequested'
+                ORDER BY workflow_id ASC, seq ASC
+                """
+            ).fetchall()
+        for row in rows:
+            payload = JsonCodec.loads(row["payload_json"])
+            if not isinstance(payload, dict) or payload.get("child_workflow_id") != child_workflow_id:
+                continue
+            workflow_ref = payload.get("workflow")
+            if not isinstance(workflow_ref, Workflow):
+                continue
+            workflow_ref.with_base_dir(self.db_path.parent).load(approved=True)
+            if expected_workflow_name in _WORKFLOW_REGISTRY:
+                return
+
+    def _record_child_waiting(
+        self,
+        con: sqlite3.Connection,
+        *,
+        parent_workflow_id: str,
+        child_event_key: str,
+        child_workflow_id: str,
+        child_status: str,
+        child_waiting_on: str | None,
+        parent_waiting_on: str,
+    ) -> None:
+        self._append_event(
+            con,
+            parent_workflow_id,
+            "ChildWorkflowWaiting",
+            key=child_event_key,
+            payload={
+                "child_workflow_id": child_workflow_id,
+                "status": child_status,
+                "waiting_on": child_waiting_on,
+            },
+            idempotency_key=f"child-waiting:{child_event_key}:{child_status}:{child_waiting_on or ''}",
+            ignore_duplicate=True,
+        )
+        con.execute(
+            """
+            UPDATE workflow_instances
+            SET status = 'waiting', waiting_on = ?, updated_at = ?
+            WHERE id = ? AND status != 'cancelled'
+            """,
+            (parent_waiting_on, _now(), parent_workflow_id),
+        )
+
     def _execute_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         payload = command["payload"] if isinstance(command, dict) else JsonCodec.loads(command["payload_json"])
         command_type = command["type"] if isinstance(command, dict) else command["type"]
@@ -808,30 +1012,25 @@ class WorkflowEngine:
                 )
                 return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
             else:
-                error = {
-                    "type": "ChildWorkflowIncomplete",
-                    "message": f"child workflow {child_id} is {child_result.status}; waiting children are not supported in this slice",
-                }
-                self._append_event(
+                parent_row = con.execute("SELECT waiting_on FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                parent_wait_key = _parent_wait_key_for_child_wait(
+                    parent_row=parent_row,
+                    child_event_key=key,
+                    child_group=payload.get("group"),
+                )
+                self._record_child_waiting(
                     con,
-                    workflow_id,
-                    "ChildWorkflowFailed",
-                    key=key,
-                    payload={"child_workflow_id": child_id, "error": error},
-                    idempotency_key=f"child-incomplete:{key}",
-                    ignore_duplicate=True,
+                    parent_workflow_id=workflow_id,
+                    child_event_key=key,
+                    child_workflow_id=child_id,
+                    child_status=child_result.status,
+                    child_waiting_on=child_result.waiting_on,
+                    parent_waiting_on=parent_wait_key,
                 )
-                con.execute(
-                    """
-                    UPDATE workflow_instances
-                    SET status = 'failed', error_json = ?, updated_at = ?
-                    WHERE id = ? AND status != 'cancelled'
-                    """,
-                    (JsonCodec.dumps(error), _now(), workflow_id),
-                )
-                return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
+                return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=parent_wait_key)
 
-        return self._run_decider(workflow_id, _WORKFLOW_REGISTRY[self._instance(workflow_id)["workflow_name"]])
+        parent = self._instance(workflow_id)
+        return self._run_decider(workflow_id, self._workflow_fn_for_instance(parent))
 
     def _execute_run_step_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         from .decorators import get_step_body
@@ -1027,6 +1226,21 @@ class WorkflowEngine:
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
         return con
+
+    def _last_event_payload(self, workflow_id: str, event_type: str, key: str) -> Any | None:
+        self._instance(workflow_id)
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT payload_json FROM workflow_events
+                WHERE workflow_id = ? AND type = ? AND key = ?
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (workflow_id, event_type, key),
+            ).fetchone()
+        if row is None:
+            return None
+        return JsonCodec.loads(row["payload_json"])
 
     def _append_event(
         self,
@@ -1491,6 +1705,24 @@ def _expected_wait_for_command(command: Dict[str, Any]) -> str:
         approval_key = key.split(":", 1)[1]
         return f"signal:approval.decision:{approval_key}"
     return key
+
+
+def _parent_wait_key_for_child_wait(
+    *,
+    parent_row: sqlite3.Row | None,
+    child_event_key: str,
+    child_group: Any,
+) -> str:
+    group = str(child_group or "")
+    existing_wait = parent_row["waiting_on"] if parent_row is not None and "waiting_on" in parent_row.keys() else None
+    if group.startswith("map:"):
+        map_parts = group.split(":", 2)
+        gather_group = ":".join(map_parts[:2]) if len(map_parts) >= 2 else group
+        gather_key = f"child-gather:{gather_group}"
+        if existing_wait == gather_key:
+            return str(existing_wait)
+        return gather_key
+    return child_event_key
 
 
 def _diagnostic_message(label: str) -> str:

@@ -74,6 +74,17 @@ def main(argv: list[str] | None = None) -> int:
     signal.add_argument("--source-json")
     signal.add_argument("--idempotency-key")
 
+    reconcile_child = sub.add_parser("reconcile-child", help="Reconcile one requested child workflow result into its parent")
+    reconcile_child.add_argument("workflow_ref", help="module:function; imported so the parent decider is registered")
+    reconcile_child.add_argument("--db", required=True, type=Path)
+    reconcile_child.add_argument("--id", required=True, dest="workflow_id")
+    reconcile_child.add_argument("--child-key", required=True)
+
+    reconcile_children = sub.add_parser("reconcile-children", help="Reconcile all pending child workflow results into a parent")
+    reconcile_children.add_argument("workflow_ref", help="module:function; imported so the parent decider is registered")
+    reconcile_children.add_argument("--db", required=True, type=Path)
+    reconcile_children.add_argument("--id", required=True, dest="workflow_id")
+
     cancel = sub.add_parser("cancel", help="Cancel a workflow instance while preserving audit history")
     cancel.add_argument("--db", required=True, type=Path)
     cancel.add_argument("--id", required=True, dest="workflow_id")
@@ -142,6 +153,12 @@ def main(argv: list[str] | None = None) -> int:
             source=json.loads(args.source_json) if args.source_json else None,
             idempotency_key=args.idempotency_key,
         )
+        print_json(result_payload(result))
+    elif args.command == "reconcile-child":
+        result = engine.reconcile_child_result(args.workflow_id, args.child_key)
+        print_json(result_payload(result))
+    elif args.command == "reconcile-children":
+        result = engine.reconcile_children(args.workflow_id)
         print_json(result_payload(result))
     elif args.command == "cancel":
         result = engine.cancel_workflow(

@@ -28,6 +28,55 @@ async def demo_workflow(ctx, inputs):
 '''
 
 
+CHILD_WORKFLOW_MODULE = '''
+from pathlib import Path
+from hermes_workflows import Workflow, workflow
+
+WAITING_SOURCE = """
+from hermes_workflows import workflow
+
+@workflow
+async def waiting_child(ctx, item):
+    payload = await ctx.wait_for(\"dynamic.ready\", key=item[\"id\"])
+    return {\"payload\": payload}
+"""
+
+CHILD = Workflow.from_source(
+    WAITING_SOURCE,
+    symbol="waiting_child",
+    base_dir=Path(__file__).parent,
+)
+
+@workflow
+async def parent_workflow(ctx, inputs):
+    return await CHILD(ctx, inputs["item"], key=inputs["item"]["id"])
+'''
+
+
+DYNAMIC_CHILD_WORKFLOW_MODULE = '''
+from hermes_workflows import AgentStep, Workflow, workflow
+
+WAITING_SOURCE = """
+from hermes_workflows import workflow
+
+@workflow
+async def waiting_child(ctx, item):
+    payload = await ctx.wait_for(\"dynamic.ready\", key=item[\"id\"])
+    return {\"payload\": payload}
+"""
+
+@workflow
+async def generated_parent_workflow(ctx, inputs):
+    child = await AgentStep(
+        "build_waiting_child",
+        prompt="Build a child workflow that waits for a signal.",
+        returns=Workflow,
+        mock_output={"source": WAITING_SOURCE, "symbol": "waiting_child"},
+    )(ctx)
+    return await child(ctx, inputs["item"], key=inputs["item"]["id"])
+'''
+
+
 def run_cli(tmp_path, *args):
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{Path.cwd() / 'src'}:{tmp_path}:{env.get('PYTHONPATH', '')}"
@@ -40,6 +89,143 @@ def run_cli(tmp_path, *args):
         stderr=subprocess.PIPE,
         check=True,
     )
+
+
+def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
+    (tmp_path / "child_wf.py").write_text(CHILD_WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    run_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "child_wf:parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_cli_child",
+            "--input-json",
+            '{"item":{"id":"cli-child"}}',
+        ).stdout
+    )
+    assert run_payload["status"] == "waiting"
+    assert run_payload["waiting_on"].startswith("child:")
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli_child").stdout)
+    child_requested = [event for event in status_payload["events"] if event["type"] == "ChildWorkflowRequested"][0]
+    child_key = child_requested["key"]
+    child_id = child_requested["payload"]["child_workflow_id"]
+
+    child_signal_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "signal",
+            "child_wf:parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            child_id,
+            "--type",
+            "dynamic.ready",
+            "--key",
+            "cli-child",
+            "--payload-json",
+            '{"ok":true}',
+        ).stdout
+    )
+    assert child_signal_payload["status"] == "completed"
+
+    reconcile_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "reconcile-children",
+            "child_wf:parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_cli_child",
+        ).stdout
+    )
+    assert reconcile_payload == {
+        "workflow_id": "wf_cli_child",
+        "status": "completed",
+        "waiting_on": None,
+        "result": {"payload": {"ok": True}},
+        "error": None,
+    }
+
+    reconcile_one_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "reconcile-child",
+            "child_wf:parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_cli_child",
+            "--child-key",
+            child_key,
+        ).stdout
+    )
+    assert reconcile_one_payload == reconcile_payload
+
+
+def test_cli_signal_can_resume_generated_child_loaded_from_parent_history(tmp_path):
+    (tmp_path / "dynamic_child_wf.py").write_text(DYNAMIC_CHILD_WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    run_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "dynamic_child_wf:generated_parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_cli_generated_child",
+            "--input-json",
+            '{"item":{"id":"generated-cli-child"}}',
+        ).stdout
+    )
+    assert run_payload["status"] == "waiting"
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli_generated_child").stdout)
+    child_requested = [event for event in status_payload["events"] if event["type"] == "ChildWorkflowRequested"][0]
+
+    child_signal_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "signal",
+            "dynamic_child_wf:generated_parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            child_requested["payload"]["child_workflow_id"],
+            "--type",
+            "dynamic.ready",
+            "--key",
+            "generated-cli-child",
+            "--payload-json",
+            '{"ok":true}',
+        ).stdout
+    )
+    assert child_signal_payload["status"] == "completed"
+
+    reconcile_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "reconcile-child",
+            "dynamic_child_wf:generated_parent_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_cli_generated_child",
+            "--child-key",
+            child_requested["key"],
+        ).stdout
+    )
+    assert reconcile_payload["status"] == "completed"
+    assert reconcile_payload["result"] == {"payload": {"ok": True}}
 
 
 def test_cli_can_run_and_signal_workflow_across_processes(tmp_path):

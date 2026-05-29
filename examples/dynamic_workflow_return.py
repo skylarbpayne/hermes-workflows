@@ -17,6 +17,16 @@ async def process_item(ctx, item):
 '''
 
 
+WAITING_CHILD_SOURCE = '''
+from hermes_workflows import workflow
+
+@workflow
+async def waiting_child(ctx, item):
+    payload = await ctx.wait_for("dynamic.ready", key=item["id"])
+    return {"payload": payload}
+'''
+
+
 @step
 async def agent_step_producing_items(ctx, inputs):
     return inputs["items"]
@@ -59,3 +69,15 @@ async def dynamic_item_map_example(ctx, inputs):
             concurrency=4,
         )
     }
+
+
+@workflow
+async def dynamic_waiting_child_pipeline(ctx, inputs):
+    child = await AgentStep(
+        "build_waiting_child",
+        prompt="Write executable Python defining a @workflow named waiting_child that waits for a signal.",
+        returns=Workflow,
+        mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
+    )(ctx)
+
+    return await child(ctx, inputs["item"], key=inputs["item"]["id"])
