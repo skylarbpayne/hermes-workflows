@@ -14,8 +14,17 @@ from hermes_workflows import AgentRunnerError, AgentStep, SubprocessAgentRunner,
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
 FAKE_AGENT = REPO_ROOT / "examples" / "runners" / "fake_json_cli_agent.py"
 ADAPTER_MODULE = "hermes_workflows.agent_cli_adapter"
+
+
+def _subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(SRC_DIR) if not existing else f"{SRC_DIR}{os.pathsep}{existing}"
+    env.update(extra or {})
+    return env
 
 
 def _request(**overrides: Any) -> dict[str, Any]:
@@ -67,7 +76,7 @@ def _runner(*agent_args: str, env: dict[str, str] | None = None, timeout_seconds
     return SubprocessAgentRunner(
         _adapter_command(*agent_args, max_stdout=max_stdout),
         timeout_seconds=timeout_seconds,
-        env=env,
+        env=_subprocess_env(env),
         max_stdout_bytes=65_536,
     )
 
@@ -81,6 +90,7 @@ def _run_adapter_direct(request: dict[str, Any] | str, *agent_args: str, timeout
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=REPO_ROOT,
+        env=_subprocess_env(),
         timeout=10,
         check=False,
     )
@@ -271,6 +281,7 @@ def test_agent_cli_adapter_timeout_covers_prompt_write_to_nonreading_provider():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=REPO_ROOT,
+        env=_subprocess_env(),
         timeout=2,
         check=False,
     )
@@ -339,7 +350,7 @@ def test_real_agent_cli_adapter_smoke(tmp_path):
     ]
     for arg in command[1:]:
         adapter.extend(["--agent-arg", arg])
-    runner = SubprocessAgentRunner(adapter, timeout_seconds=120, max_stdout_bytes=1_000_000)
+    runner = SubprocessAgentRunner(adapter, timeout_seconds=120, max_stdout_bytes=1_000_000, env=_subprocess_env())
     response = runner(
         _request(
             name="real_smoke_answer",
