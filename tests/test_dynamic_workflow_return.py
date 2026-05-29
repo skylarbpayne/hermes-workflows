@@ -394,6 +394,28 @@ def test_parent_completes_after_waiting_child_is_signaled_and_reconciled(tmp_pat
     assert completed[0]["payload"]["child_workflow_id"] == child_id
 
 
+def test_reconcile_children_replays_parent_after_terminal_child_crash_window(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(dynamic_waiting_child_pipeline, {"item": {"id": "crash-window"}}, workflow_id="wf_child_terminal_crash_window")
+    assert first.status == "waiting"
+    child_requested = [event for event in engine.events("wf_child_terminal_crash_window") if event["type"] == "ChildWorkflowRequested"][0]
+    child_key = child_requested["key"]
+    child_id = child_requested["payload"]["child_workflow_id"]
+    child_after_signal = engine.signal(child_id, "dynamic.ready", key="crash-window", payload={"ok": True}, source={"kind": "test", "id": "unit"})
+    assert child_after_signal.status == "completed"
+    # Simulate: terminal child event committed, but parent replay crashed before WorkflowCompleted.
+    with engine._connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        engine._append_event(con, "wf_child_terminal_crash_window", "ChildWorkflowCompleted", key=child_key, payload={"child_workflow_id": child_id, "result": child_after_signal.result}, idempotency_key=f"child-completed:{child_key}", ignore_duplicate=True)
+        con.execute("UPDATE workflow_instances SET status = 'running', waiting_on = NULL WHERE id = ?", ("wf_child_terminal_crash_window",))
+    assert engine.pending_child_workflow_keys("wf_child_terminal_crash_window") == []
+    recovered = engine.reconcile_children("wf_child_terminal_crash_window")
+    assert recovered.status == "completed"
+    assert recovered.result == {"payload": {"ok": True}}
+    assert [event["type"] for event in engine.events("wf_child_terminal_crash_window")].count("WorkflowCompleted") == 1
+
+
 def test_map_workflow_waits_on_gather_and_completes_after_children_reconcile_in_order(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)

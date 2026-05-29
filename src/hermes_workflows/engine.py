@@ -441,7 +441,25 @@ class WorkflowEngine:
             result = self.reconcile_child_result(workflow_id, child_key)
             if result.status in {"failed", "cancelled"}:
                 return result
+        if not pending and result.status == "running" and self._has_terminal_child_workflow_events(workflow_id):
+            parent = self._instance(workflow_id)
+            return self._run_decider(workflow_id, self._workflow_fn_for_instance(parent))
         return result
+
+    def _has_terminal_child_workflow_events(self, workflow_id: str) -> bool:
+        self._instance(workflow_id)
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT 1
+                FROM workflow_events
+                WHERE workflow_id = ?
+                  AND type IN ('ChildWorkflowCompleted', 'ChildWorkflowFailed')
+                LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+        return row is not None
 
     def reconcile_child_result(self, workflow_id: str, child_key: str) -> RunResult:
         requested = self._last_event_payload(workflow_id, "ChildWorkflowRequested", child_key)
