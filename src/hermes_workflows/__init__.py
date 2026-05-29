@@ -11,6 +11,18 @@ v0 intentionally tiny:
 from .decorators import step, workflow
 from .engine import RunResult, WorkflowEngine
 from .prompts import AgentPrompt, AgentStep, render_prompt
+from .runners import AgentRunnerError, SubprocessAgentRunner
 from .workflow_values import Workflow
 
-__all__ = ["AgentPrompt", "AgentStep", "RunResult", "Workflow", "WorkflowEngine", "render_prompt", "step", "workflow"]
+__all__ = [
+    "AgentPrompt",
+    "AgentRunnerError",
+    "AgentStep",
+    "RunResult",
+    "SubprocessAgentRunner",
+    "Workflow",
+    "WorkflowEngine",
+    "render_prompt",
+    "step",
+    "workflow",
+]

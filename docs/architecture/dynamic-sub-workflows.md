@@ -73,6 +73,28 @@ processor = await AgentStep(
 
 For live execution, pass an `agent_runner` to `WorkflowEngine`. The runner receives a JSON-safe request packet with the prompt, rendered prompt, variables, return type, workflow id, and step key. Its exact response and provenance are persisted as `StepCompleted.metadata`.
 
+The built-in `SubprocessAgentRunner` lets that live runner be a trusted argv command instead of a Python callable:
+
+```python
+from hermes_workflows import SubprocessAgentRunner, WorkflowEngine
+
+engine = WorkflowEngine(
+    "workflow.sqlite",
+    agent_runner=SubprocessAgentRunner(["python", "scripts/my_agent_runner.py"]),
+)
+```
+
+The subprocess receives an `agent_step.runner_request.v1` JSON object on stdin and returns a JSON object on stdout:
+
+```json
+{
+  "output": {"source": "from hermes_workflows import workflow\n...", "symbol": "process_item"},
+  "provenance": {"runner": "my-agent-runner", "model": "example-model", "request_id": "abc123"}
+}
+```
+
+`output` is required; `provenance` is optional but should be non-secret and review-useful. The adapter fails closed on non-zero exit, timeout, invalid JSON, missing `output`, invalid provenance, and oversized stdout. It deliberately has no provider-specific model config and no shell-string default.
+
 If a live `AgentStep(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(ctx, item)`, or `ctx.map_workflow(...)` first records an `ApprovalRequested` event and waits for `approval.decision`. No generated module is imported and no child workflow is requested until that approval is accepted.
 
 ## Replay rule
