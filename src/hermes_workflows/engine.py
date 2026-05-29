@@ -1284,7 +1284,7 @@ class WorkflowContext:
     async def _require_generated_workflow_approval(self, workflow_ref: Workflow) -> None:
         if not workflow_ref.approval_required:
             return
-        approval_key = workflow_ref.approval_key or f"generated-workflow:{workflow_ref.source_sha256}"
+        approval_key = workflow_ref.approval_key or f"generated-workflow:{workflow_ref.source_sha256}:{workflow_ref.symbol}"
         provenance = workflow_ref.provenance or {}
         decision = await self.approval.request(
             "Approve generated Python workflow before running it as a child workflow.",

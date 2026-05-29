@@ -88,7 +88,7 @@ Generated Python is dynamic only at creation time. After the `AgentStep` complet
   "path": ".../generated_workflows/<sha>.py",
   "module_name": "hermes_generated_workflows.<sha>",
   "approval_required": true,
-  "approval_key": "generated-workflow:<sha>",
+  "approval_key": "generated-workflow:<sha>:process_item",
   "provenance": {"runner_provenance": {"runner": "..."}}
 }
 ```
@@ -135,7 +135,7 @@ Generated-code approvals are exposed through the normal workflow status shape:
 {
   "approvals": [
     {
-      "key": "generated-workflow:<sha>",
+      "key": "generated-workflow:<sha>:process_item",
       "status": "waiting",
       "artifact": {
         "kind": "generated_workflow.approval.v1",

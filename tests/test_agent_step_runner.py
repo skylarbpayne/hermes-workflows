@@ -17,6 +17,18 @@ async def process_item(ctx, item):
     return {"processed": await label_item(ctx, item)}
 '''
 
+MULTI_WORKFLOW_SOURCE = '''
+from hermes_workflows import workflow
+
+@workflow
+async def harmless(ctx, item):
+    return {"symbol": "harmless", "item": item}
+
+@workflow
+async def dangerous(ctx, item):
+    return {"symbol": "dangerous", "item": item}
+'''
+
 
 @workflow
 async def live_json_agent_pipeline(ctx, inputs):
@@ -36,6 +48,25 @@ async def live_generated_workflow_pipeline(ctx, inputs):
         returns=Workflow,
     )(ctx)
     return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+
+
+@workflow
+async def live_multi_symbol_pipeline(ctx, inputs):
+    harmless_workflow = await AgentStep(
+        "build_harmless",
+        prompt="Write a harmless workflow for {{kind}} items.",
+        variables={"kind": inputs["kind"]},
+        returns=Workflow,
+    )(ctx)
+    first = await harmless_workflow(ctx, inputs["item"], key="first")
+    dangerous_workflow = await AgentStep(
+        "build_dangerous",
+        prompt="Write a dangerous workflow for {{kind}} items.",
+        variables={"kind": inputs["kind"]},
+        returns=Workflow,
+    )(ctx)
+    second = await dangerous_workflow(ctx, inputs["item"], key="second")
+    return {"first": first, "second": second}
 
 
 def test_agent_step_dispatches_to_live_runner_and_replays_stored_result(tmp_path):
@@ -154,6 +185,46 @@ def test_live_runner_non_json_response_fails_without_orphaning_step(tmp_path):
     assert len(failures) == 1
     assert failures[0]["payload"]["error"]["type"] == "TypeError"
     assert engine.workflow_status("wf_bad_response")["pending_commands"] == []
+
+
+def test_generated_workflow_approval_is_bound_to_selected_symbol(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+
+    def runner(request):
+        symbol = "harmless" if request["name"] == "build_harmless" else "dangerous"
+        return {
+            "output": {"source": MULTI_WORKFLOW_SOURCE, "symbol": symbol},
+            "provenance": {"runner": "fake", "symbol": symbol},
+        }
+
+    engine = WorkflowEngine(db, agent_runner=runner)
+    first = engine.run_until_idle(
+        live_multi_symbol_pipeline,
+        {"kind": "catalog", "item": {"id": "a"}},
+        workflow_id="wf_multi_symbol",
+    )
+    first_approval = engine.workflow_status("wf_multi_symbol")["approvals"][0]
+
+    assert first.status == "waiting"
+    assert first_approval["artifact"]["symbol"] == "harmless"
+
+    after_harmless = engine.signal(
+        "wf_multi_symbol",
+        "approval.decision",
+        key=first_approval["key"],
+        payload={"action": "approve", "by": "skylar", "message": "approve harmless only"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-harmless"},
+    )
+
+    assert after_harmless.status == "waiting"
+    approvals = engine.workflow_status("wf_multi_symbol")["approvals"]
+    assert [approval["artifact"]["symbol"] for approval in approvals] == ["harmless", "dangerous"]
+    assert approvals[0]["status"] == "approve"
+    assert approvals[1]["status"] == "waiting"
+    assert approvals[0]["key"] != approvals[1]["key"]
+    child_requests = [event for event in engine.events("wf_multi_symbol") if event["type"] == "ChildWorkflowRequested"]
+    assert len(child_requests) == 1
+    assert child_requests[0]["payload"]["symbol"] == "harmless"
 
 
 def test_live_agent_step_supports_async_runner(tmp_path):

@@ -111,7 +111,7 @@ class Workflow:
             module_name=module_name,
             provenance=provenance,
             approval_required=approval_required,
-            approval_key=approval_key or (f"generated-workflow:{source_sha256}" if approval_required else None),
+            approval_key=approval_key or (f"generated-workflow:{source_sha256}:{symbol}" if approval_required else None),
         )
         if load:
             workflow.load()
@@ -173,7 +173,7 @@ def workflow_from_agent_output(
             approval_key=output.approval_key or None,
         ).with_base_dir(base_dir)
         if workflow.approval_required and workflow.approval_key is None:
-            workflow = replace(workflow, approval_key=f"generated-workflow:{workflow.source_sha256}")
+            workflow = replace(workflow, approval_key=f"generated-workflow:{workflow.source_sha256}:{workflow.symbol}")
         if not workflow.approval_required:
             workflow.load()
         return workflow
