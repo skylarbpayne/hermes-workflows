@@ -1538,8 +1538,12 @@ def _safe_child_key(value: Any) -> str:
 
 
 def _workflow_child_group(workflow_ref: Workflow, *, group: str | None) -> str:
-    base = _safe_child_key(group or workflow_ref.symbol)
-    return f"{base}:{workflow_ref.source_sha256[:12]}"
+    symbol = _safe_child_key(workflow_ref.symbol)
+    digest = workflow_ref.source_sha256[:12]
+    if group is None:
+        return f"{symbol}:{digest}"
+    base = _safe_child_key(group)
+    return f"{base}:{symbol}:{digest}"
 
 
 def _hash_text(value: str) -> str:

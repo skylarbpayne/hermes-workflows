@@ -69,6 +69,25 @@ async def live_multi_symbol_pipeline(ctx, inputs):
     return {"first": first, "second": second}
 
 
+@workflow
+async def live_multi_symbol_same_group_pipeline(ctx, inputs):
+    harmless_workflow = await AgentStep(
+        "build_harmless",
+        prompt="Write a harmless workflow for {{kind}} items.",
+        variables={"kind": inputs["kind"]},
+        returns=Workflow,
+    )(ctx)
+    first = await ctx.start_child(harmless_workflow, inputs["item"], key="same", group="shared")
+    dangerous_workflow = await AgentStep(
+        "build_dangerous",
+        prompt="Write a dangerous workflow for {{kind}} items.",
+        variables={"kind": inputs["kind"]},
+        returns=Workflow,
+    )(ctx)
+    second = await ctx.start_child(dangerous_workflow, inputs["item"], key="same", group="shared")
+    return {"first": first, "second": second}
+
+
 def test_agent_step_dispatches_to_live_runner_and_replays_stored_result(tmp_path):
     db = tmp_path / "workflow.sqlite"
     calls = []
@@ -225,6 +244,47 @@ def test_generated_workflow_approval_is_bound_to_selected_symbol(tmp_path):
     child_requests = [event for event in engine.events("wf_multi_symbol") if event["type"] == "ChildWorkflowRequested"]
     assert len(child_requests) == 1
     assert child_requests[0]["payload"]["symbol"] == "harmless"
+
+
+def test_generated_workflow_child_identity_is_bound_to_selected_symbol_when_group_is_explicit(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+
+    def runner(request):
+        symbol = "harmless" if request["name"] == "build_harmless" else "dangerous"
+        return {
+            "output": {"source": MULTI_WORKFLOW_SOURCE, "symbol": symbol},
+            "provenance": {"runner": "fake", "symbol": symbol},
+        }
+
+    engine = WorkflowEngine(db, agent_runner=runner)
+    first = engine.run_until_idle(
+        live_multi_symbol_same_group_pipeline,
+        {"kind": "catalog", "item": {"id": "a"}},
+        workflow_id="wf_multi_symbol_same_group",
+    )
+    first_approval = engine.workflow_status("wf_multi_symbol_same_group")["approvals"][0]
+
+    assert first.status == "waiting"
+    assert first_approval["artifact"]["symbol"] == "harmless"
+
+    after_harmless = engine.signal(
+        "wf_multi_symbol_same_group",
+        "approval.decision",
+        key=first_approval["key"],
+        payload={"action": "approve", "by": "skylar", "message": "approve harmless only"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-harmless"},
+    )
+
+    assert after_harmless.status == "waiting"
+    approvals = engine.workflow_status("wf_multi_symbol_same_group")["approvals"]
+    assert [approval["artifact"]["symbol"] for approval in approvals] == ["harmless", "dangerous"]
+    assert approvals[1]["status"] == "waiting"
+    child_requests = [
+        event for event in engine.events("wf_multi_symbol_same_group") if event["type"] == "ChildWorkflowRequested"
+    ]
+    assert len(child_requests) == 1
+    assert child_requests[0]["payload"]["symbol"] == "harmless"
+    assert "harmless" in child_requests[0]["key"]
 
 
 def test_live_agent_step_supports_async_runner(tmp_path):

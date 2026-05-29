@@ -185,7 +185,7 @@ def test_map_workflow_starts_generated_workflow_for_items_and_preserves_order(tm
     workflow_value = [
         event for event in engine.events("wf_dynamic_map") if event["type"] == "StepCompleted" and event["key"] == "step:agent_step:0"
     ][0]["payload"]["output"]
-    child_group = f"map:0:{workflow_value.source_sha256[:12]}"
+    child_group = f"map:0:process_item:{workflow_value.source_sha256[:12]}"
     assert [
         event["key"] for event in engine.events("wf_dynamic_map") if event["type"] == "ChildWorkflowRequested"
     ] == [f"child:{child_group}:b", f"child:{child_group}:a"]
