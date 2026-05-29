@@ -162,12 +162,12 @@ def test_subprocess_runner_timeout_fails_closed_without_env_dump(tmp_path):
     assert "env" not in excinfo.value.details
 
 
-def test_subprocess_runner_oversized_stdout_fails_closed(tmp_path):
+def test_subprocess_runner_oversized_stdout_fails_closed_before_buffering_all_output(tmp_path):
     runner_script = _write_runner(
         tmp_path,
         '''
         import sys
-        sys.stdout.write("x" * 100)
+        sys.stdout.write("x" * 1_000_000)
         ''',
     )
     runner = SubprocessAgentRunner([sys.executable, str(runner_script)], max_stdout_bytes=32)
@@ -176,6 +176,7 @@ def test_subprocess_runner_oversized_stdout_fails_closed(tmp_path):
         runner({"kind": "agent_step.runner_request.v1"})
 
     assert "stdout exceeded 32 bytes" in str(excinfo.value)
+    assert excinfo.value.details["stdout_bytes"] == 33
 
 
 def test_subprocess_runner_errors_fail_workflow_without_step_completion(tmp_path):
