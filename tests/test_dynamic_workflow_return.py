@@ -49,6 +49,16 @@ async def waiting_child(ctx, item):
 '''
 
 
+SIGNAL_THEN_FAIL_CHILD_SOURCE = '''
+from hermes_workflows import workflow
+
+@workflow
+async def signal_then_fail_child(ctx, item):
+    await ctx.wait_for("dynamic.ready", key=item["id"])
+    raise RuntimeError("child exploded")
+'''
+
+
 @workflow
 async def dynamic_processor_pipeline(ctx, inputs):
     items = await produce_items(ctx, inputs)
@@ -91,6 +101,44 @@ async def dynamic_waiting_child_pipeline(ctx, inputs):
         prompt="Write a Python workflow that waits for a signal.",
         returns=Workflow,
         mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
+    )(ctx)
+    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+
+
+@workflow
+async def dynamic_waiting_child_map_pipeline(ctx, inputs):
+    processor = await AgentStep(
+        "build_waiting_child_map",
+        prompt="Write a Python workflow that waits for a signal.",
+        returns=Workflow,
+        mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
+    )(ctx)
+    results = await ctx.map_workflow(
+        processor,
+        inputs["items"],
+        key_fn=lambda item: item["id"],
+        concurrency=4,
+    )
+    return {"processed": results}
+
+
+@workflow
+async def dynamic_signal_then_fail_child_pipeline(ctx, inputs):
+    processor = await AgentStep(
+        "build_signal_then_fail_child",
+        prompt="Write a Python workflow that fails after a signal.",
+        returns=Workflow,
+        mock_output={"source": SIGNAL_THEN_FAIL_CHILD_SOURCE, "symbol": "signal_then_fail_child"},
+    )(ctx)
+    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+
+
+@workflow
+async def live_generated_waiting_child_pipeline(ctx, inputs):
+    processor = await AgentStep(
+        "build_live_waiting_child",
+        prompt="Write a Python workflow that waits for a signal.",
+        returns=Workflow,
     )(ctx)
     return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
 
@@ -284,7 +332,7 @@ async def fallback(ctx, inputs):
         raise AssertionError("decorator calls must be rejected before import")
 
 
-def test_child_workflow_waits_fail_closed_instead_of_deadlocking_parent(tmp_path):
+def test_child_workflow_waits_without_failing_parent(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
 
@@ -294,11 +342,199 @@ def test_child_workflow_waits_fail_closed_instead_of_deadlocking_parent(tmp_path
         workflow_id="wf_waiting_child",
     )
 
-    assert result.status == "failed"
-    assert "waiting children are not supported" in result.error
-    failed_events = [event for event in engine.events("wf_waiting_child") if event["type"] == "ChildWorkflowFailed"]
-    assert failed_events
-    assert failed_events[0]["payload"]["error"]["type"] == "ChildWorkflowIncomplete"
+    assert result.status == "waiting"
+    assert result.waiting_on is not None
+    assert result.waiting_on.startswith("child:")
+    assert "waiting children are not supported" not in (result.error or "")
+    assert not [event for event in engine.events("wf_waiting_child") if event["type"] == "ChildWorkflowFailed"]
+
+    child_requested = [
+        event for event in engine.events("wf_waiting_child") if event["type"] == "ChildWorkflowRequested"
+    ][0]
+    child_id = child_requested["payload"]["child_workflow_id"]
+    child_status = engine.workflow_status(child_id, recent_events=1)
+    assert child_status["status"] == "waiting"
+    assert child_status["waiting_on"] == "signal:dynamic.ready:needs-signal"
+
+
+def test_parent_completes_after_waiting_child_is_signaled_and_reconciled(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(
+        dynamic_waiting_child_pipeline,
+        {"item": {"id": "needs-signal"}},
+        workflow_id="wf_waiting_child_resume",
+    )
+    assert first.status == "waiting"
+
+    child_requested = [
+        event for event in engine.events("wf_waiting_child_resume") if event["type"] == "ChildWorkflowRequested"
+    ][0]
+    child_key = child_requested["key"]
+    child_id = child_requested["payload"]["child_workflow_id"]
+
+    child_after_signal = engine.signal(
+        child_id,
+        "dynamic.ready",
+        key="needs-signal",
+        payload={"ok": True},
+        source={"kind": "test", "id": "unit"},
+    )
+    assert child_after_signal.status == "completed"
+
+    final = engine.reconcile_child_result("wf_waiting_child_resume", child_key)
+
+    assert final.status == "completed"
+    assert final.result == {"payload": {"ok": True}}
+    completed = [
+        event for event in engine.events("wf_waiting_child_resume") if event["type"] == "ChildWorkflowCompleted"
+    ]
+    assert completed
+    assert completed[0]["payload"]["child_workflow_id"] == child_id
+
+
+def test_map_workflow_waits_on_gather_and_completes_after_children_reconcile_in_order(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(
+        dynamic_waiting_child_map_pipeline,
+        {"items": [{"id": "b"}, {"id": "a"}]},
+        workflow_id="wf_waiting_child_map",
+    )
+
+    assert first.status == "waiting"
+    gather_events = [event for event in engine.events("wf_waiting_child_map") if event["type"] == "ChildWorkflowGatherWaiting"]
+    assert len(gather_events) == 1
+    assert first.waiting_on == gather_events[0]["key"] == "child-gather:map:0"
+    requested = [event for event in engine.events("wf_waiting_child_map") if event["type"] == "ChildWorkflowRequested"]
+    assert [event["payload"]["child_key"] for event in requested] == ["b", "a"]
+    child_ids = {event["payload"]["child_key"]: event["payload"]["child_workflow_id"] for event in requested}
+    assert engine.workflow_status(child_ids["b"], recent_events=1)["waiting_on"] == "signal:dynamic.ready:b"
+    assert engine.workflow_status(child_ids["a"], recent_events=1)["waiting_on"] == "signal:dynamic.ready:a"
+
+    assert engine.pending_child_workflow_keys("wf_waiting_child_map") == [event["key"] for event in requested]
+
+    assert engine.signal(child_ids["b"], "dynamic.ready", key="b", payload={"letter": "B"}).status == "completed"
+    after_one = engine.reconcile_children("wf_waiting_child_map")
+    assert after_one.status == "waiting"
+    assert after_one.waiting_on == first.waiting_on
+    assert [event["type"] for event in engine.events("wf_waiting_child_map")].count("ChildWorkflowCompleted") == 1
+
+    assert engine.signal(child_ids["a"], "dynamic.ready", key="a", payload={"letter": "A"}).status == "completed"
+    final = engine.reconcile_children("wf_waiting_child_map")
+    assert final.status == "completed"
+    assert final.result == {"processed": [{"payload": {"letter": "B"}}, {"payload": {"letter": "A"}}]}
+    assert engine.pending_child_workflow_keys("wf_waiting_child_map") == []
+
+    again = engine.reconcile_children("wf_waiting_child_map")
+    assert again.status == "completed"
+    assert [event["type"] for event in engine.events("wf_waiting_child_map")].count("ChildWorkflowCompleted") == 2
+
+
+def test_reconcile_missing_child_instance_keeps_parent_waiting_with_diagnostic_event(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(
+        dynamic_waiting_child_pipeline,
+        {"item": {"id": "missing-child"}},
+        workflow_id="wf_missing_child",
+    )
+    assert first.status == "waiting"
+    child_requested = [event for event in engine.events("wf_missing_child") if event["type"] == "ChildWorkflowRequested"][0]
+    child_key = child_requested["key"]
+    child_id = child_requested["payload"]["child_workflow_id"]
+
+    with sqlite3.connect(db) as con:
+        con.execute("DELETE FROM workflow_instances WHERE id = ?", (child_id,))
+
+    reconciled = engine.reconcile_child_result("wf_missing_child", child_key)
+
+    assert reconciled.status == "waiting"
+    assert reconciled.waiting_on == child_key
+    waiting_events = [event for event in engine.events("wf_missing_child") if event["type"] == "ChildWorkflowWaiting"]
+    assert waiting_events[-1]["payload"] == {"child_workflow_id": child_id, "status": "pending", "waiting_on": None}
+
+
+def test_failed_waiting_child_fails_parent_when_reconciled(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(
+        dynamic_signal_then_fail_child_pipeline,
+        {"item": {"id": "boom"}},
+        workflow_id="wf_failing_child",
+    )
+    assert first.status == "waiting"
+    child_requested = [event for event in engine.events("wf_failing_child") if event["type"] == "ChildWorkflowRequested"][0]
+    child_id = child_requested["payload"]["child_workflow_id"]
+
+    child_after_signal = engine.signal(child_id, "dynamic.ready", key="boom", payload={"go": True})
+    assert child_after_signal.status == "failed"
+
+    reconciled = engine.reconcile_child_result("wf_failing_child", child_requested["key"])
+
+    assert reconciled.status == "failed"
+    assert "child exploded" in (reconciled.error or "")
+    failed_events = [event for event in engine.events("wf_failing_child") if event["type"] == "ChildWorkflowFailed"]
+    assert len(failed_events) == 1
+    assert failed_events[0]["payload"]["error"]["type"] == "ChildWorkflowFailed"
+
+
+def test_unapproved_live_generated_workflow_does_not_start_child_until_approved(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+
+    def live_runner(request):
+        return {
+            "output": {"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
+            "provenance": {"runner": "unit-test"},
+        }
+
+    engine = WorkflowEngine(db, agent_runner=live_runner)
+    first = engine.run_until_idle(
+        live_generated_waiting_child_pipeline,
+        {"item": {"id": "needs-approval"}},
+        workflow_id="wf_live_generated_waiting_child",
+    )
+
+    assert first.status == "waiting"
+    assert first.waiting_on is not None
+    assert first.waiting_on.startswith("signal:approval.decision:generated-workflow:")
+    events = engine.events("wf_live_generated_waiting_child")
+    assert [event["type"] for event in events].count("ApprovalRequested") == 1
+    assert not [event for event in events if event["type"] == "ChildWorkflowRequested"]
+    with sqlite3.connect(db) as con:
+        child_count = con.execute(
+            "SELECT COUNT(*) FROM workflow_instances WHERE id LIKE 'wf_live_generated_waiting_child.child.%'"
+        ).fetchone()[0]
+    assert child_count == 0
+
+    approval_key = first.waiting_on.removeprefix("signal:approval.decision:")
+    after_approval = engine.signal(
+        "wf_live_generated_waiting_child",
+        "approval.decision",
+        key=approval_key,
+        payload={"action": "approve", "by": "skylar", "message": "unit test approval"},
+        source={"kind": "human", "id": "skylar", "channel": "unit-test", "event_id": "evt-approval"},
+    )
+    assert after_approval.status == "waiting"
+    assert after_approval.waiting_on is not None
+    assert after_approval.waiting_on.startswith("child:")
+
+    child_requested = [
+        event for event in engine.events("wf_live_generated_waiting_child") if event["type"] == "ChildWorkflowRequested"
+    ][0]
+    child_id = child_requested["payload"]["child_workflow_id"]
+    assert engine.workflow_status(child_id, recent_events=1)["waiting_on"] == "signal:dynamic.ready:needs-approval"
+
+    child_done = engine.signal(child_id, "dynamic.ready", key="needs-approval", payload={"ok": True})
+    assert child_done.status == "completed"
+
+    final = engine.reconcile_child_result("wf_live_generated_waiting_child", child_requested["key"])
+    assert final.status == "completed"
+    assert final.result == {"payload": {"ok": True}}
 
 
 def test_generated_source_validation_rejects_decorator_shadowing(tmp_path):

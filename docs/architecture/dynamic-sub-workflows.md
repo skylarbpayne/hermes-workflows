@@ -186,12 +186,45 @@ Generated-code approvals are exposed through the normal workflow status shape:
 
 Approval signals use the existing human provenance check. For generated workflows the approval client currently asks for `human:skylar`; tests can satisfy that with a human source record containing `id`, `channel`, and an external event/message id.
 
+## Resuming waiting children
+
+A parent that starts a child workflow can remain durably waiting while the child waits for its own signal or approval. Resume is explicit: complete or signal the child, then reconcile the parent.
+
+```bash
+rm -f /tmp/resumable-child.sqlite
+PYTHONPATH=src:. python -m hermes_workflows run \
+  examples.dynamic_workflow_return:dynamic_waiting_child_pipeline \
+  --db /tmp/resumable-child.sqlite \
+  --id wf_resumable_child \
+  --input-json '{"item":{"id":"needs-signal"}}'
+
+# Discover the child workflow id/key from status/events.
+PYTHONPATH=src:. python -m hermes_workflows status \
+  --db /tmp/resumable-child.sqlite \
+  --id wf_resumable_child
+
+PYTHONPATH=src:. python -m hermes_workflows signal \
+  examples.dynamic_workflow_return:dynamic_waiting_child_pipeline \
+  --db /tmp/resumable-child.sqlite \
+  --id '<child-workflow-id>' \
+  --type dynamic.ready \
+  --key needs-signal \
+  --payload-json '{"ok":true}'
+
+PYTHONPATH=src:. python -m hermes_workflows reconcile-children \
+  examples.dynamic_workflow_return:dynamic_waiting_child_pipeline \
+  --db /tmp/resumable-child.sqlite \
+  --id wf_resumable_child
+```
+
+Generated workflow approval remains upstream of this flow: an unapproved generated child records `ApprovalRequested` and does not create `ChildWorkflowRequested` or a child workflow instance until the approval signal is valid.
+
 ## Current limitations
 
 - A generic CLI adapter exists at `python -m hermes_workflows.agent_cli_adapter` for local Hermes/Codex-style commands that can produce strict JSON, but default tests use a fake CLI and real provider smoke is opt-in only; the runtime does not manage credentials or mutate provider config.
 - Generated module validation is intentionally narrow: parseable Python, `from hermes_workflows import workflow, step` only, at least one selected `@workflow`, no top-level executable statements beyond functions/literal assignments, and no import-time function shapes like decorator calls/default expressions/annotations. It is a shape check, not a sandbox.
-- Child workflows that pause on human approval fail closed for now instead of deadlocking the parent. Parent wake-up after an independently signaled child is a later slice.
-- No concurrency worker pool yet; local `run_until_idle` drains child commands serially.
+- Child workflows that pause for signals or human approval now leave the parent durably `waiting`. After the child completes, call `reconcile-child` for the specific child key or `reconcile-children` for all pending children on the parent to record the child result and replay the parent.
+- No concurrency worker pool yet; local `run_until_idle` drains child commands serially, and parent wake-up is explicit reconciliation rather than a background daemon.
 - No sandbox yet. Approval prevents surprise execution; it does not make generated Python safe after approval.
 
 ## Example
