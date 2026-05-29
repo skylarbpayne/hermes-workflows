@@ -151,7 +151,7 @@ Adapter response on stdout back to `SubprocessAgentRunner`:
   "provenance": {
     "runner": "hermes_workflows.agent_cli_adapter",
     "adapter_version": 1,
-    "agent_command": ["codex", "exec", "--json"],
+    "agent_command": {"argv0": "codex", "argv": ["codex", "exec", "--json"]},
     "request_kind": "agent_step.runner_request.v1",
     "request_name": "summarize_item",
     "request_sha256": "sha256 of canonical request JSON",
@@ -198,8 +198,11 @@ Implement strict parsing. Do not make a clever garbage-eating parser in v1.
 - The adapter must not synthesize auth tokens or import credentials.
 - The caller may pass environment via `SubprocessAgentRunner(env={...})`; those values are inherited by the adapter/provider process, but never printed.
 - Error details and provenance must not include raw `env`.
+- Treat argv as potentially secret-bearing. The adapter must expose only sanitized command metadata in provenance/errors: `argv0` basename plus a redacted argv list where values following known secret flags (`--api-key`, `--token`, `--password`, `--secret`, `--auth`, `--cookie`, `-k`) and inline `KEY=VALUE`/`TOKEN=VALUE`/`SECRET=VALUE` arguments are replaced with `[REDACTED]`.
+- The adapter should fail fast for obviously secret-bearing argv when redaction cannot preserve useful diagnostics. Provider credentials should be supplied through the caller's environment or the provider's own local auth store, not command-line flags.
 - Redact keys containing `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `AUTH`, or `COOKIE` if any future diagnostic path includes key names.
-- Include only non-secret provenance: runner name, adapter version, command basename/argv, request hash, prompt hash, duration, exit code, provider model/request id if the provider returned them.
+- Include only non-secret provenance: runner name, adapter version, sanitized command metadata, request hash, prompt hash, duration, exit code, provider model/request id if the provider returned them.
+- Do not include raw provider stdout/stderr in provenance. Error diagnostics may include only redacted bounded tails, and redaction must run before writing stderr so provider output cannot leak tokens, cookies, or echoed credential-bearing prompts.
 - Default tests use fake local Python CLIs, not real provider commands.
 - Real smoke requires an explicit flag like `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` and a caller-supplied command env var; otherwise it skips.
 
@@ -214,19 +217,19 @@ Outer boundary remains `SubprocessAgentRunner`:
 
 Inner adapter boundary for provider CLI:
 
-- Use `subprocess.run(argv, input=provider_prompt, text=True, capture_output=True, timeout=inner_timeout)` or an equivalent bounded-reader helper if needed.
-- Cap provider stdout before parsing; fail closed if it exceeds `--max-agent-stdout-bytes`.
-- Keep only the tail of provider stderr, capped by `--max-agent-stderr-bytes`.
+- Do **not** use `subprocess.run(..., capture_output=True)` for the provider process. That buffers unbounded output before the adapter can enforce the cap.
+- Use `subprocess.Popen` plus a bounded-reader helper that enforces stdout/stderr byte caps while reading. Kill the provider and fail closed as soon as stdout exceeds `--max-agent-stdout-bytes` or stderr exceeds the retained-tail policy.
+- Retain at most the configured stdout bytes needed for JSON parsing and at most the configured stderr tail bytes for diagnostics. The implementation must not hold arbitrarily large provider output in memory.
 - On timeout/non-zero/oversized/invalid JSON, exit non-zero and write a redacted diagnostic JSON to stderr:
 
 ```json
 {
   "kind": "agent_cli_adapter.error.v1",
   "error": "provider_invalid_json",
-  "agent_command": ["codex", "exec", "--json"],
+  "agent_command": {"argv0": "codex", "argv": ["codex", "exec", "--json"]},
   "duration_ms": 1234,
-  "stdout_tail": "bounded non-secret tail",
-  "stderr_tail": "bounded non-secret tail"
+  "stdout_tail": "redacted bounded non-secret tail",
+  "stderr_tail": "redacted bounded non-secret tail"
 }
 ```
 
@@ -307,8 +310,8 @@ Expected: JSON object containing `output` and fake provenance.
    - Build a fake request with `kind=agent_step.runner_request.v1`.
    - Call the adapter module through `SubprocessAgentRunner([sys.executable, "-m", "hermes_workflows.agent_cli_adapter", ...])`.
    - Assert output comes from fake CLI.
-   - Assert provenance includes adapter runner, adapter version, agent command argv, request name, request hash, prompt hash.
-   - Assert provenance does not include `env` or secret values.
+   - Assert provenance includes adapter runner, adapter version, sanitized agent command metadata, request name, request hash, prompt hash.
+   - Assert provenance does not include `env`, raw prompt text, or secret values.
 
 2. `test_agent_cli_adapter_fails_closed_on_provider_invalid_json`
    - Fake provider emits `not json`.
@@ -323,7 +326,15 @@ Expected: JSON object containing `output` and fake provenance.
    - Fake provider sleeps.
    - Assert timeout error path is non-zero and no token leaks.
 
-5. `test_agent_cli_adapter_generated_workflow_still_waits_for_approval`
+5. `test_agent_cli_adapter_redacts_secret_bearing_argv_and_provider_output`
+   - Configure fake provider argv with `--api-key sk-test-secret` and provider stderr/stdout containing token-looking strings.
+   - Assert provenance/error diagnostics contain `[REDACTED]` and do not contain the raw secret.
+
+6. `test_agent_cli_adapter_enforces_provider_stdout_cap_while_reading`
+   - Fake provider writes much more than `--max-agent-stdout-bytes` without producing valid JSON.
+   - Assert the adapter kills/fails closed at the cap and the retained diagnostic stays near the configured cap, proving it did not buffer the whole provider output first.
+
+7. `test_agent_cli_adapter_generated_workflow_still_waits_for_approval`
    - Use `WorkflowEngine(..., agent_runner=SubprocessAgentRunner(adapter argv))`.
    - Run an `AgentStep(..., returns=Workflow)` pipeline.
    - Assert workflow status is `waiting` on generated-workflow approval.
@@ -361,6 +372,8 @@ Expected before implementation: tests fail because `hermes_workflows.agent_cli_a
 **Important code constraints:**
 
 - Use argv list, never `shell=True`.
+- Use a streaming/bounded provider process reader; never use `subprocess.run(..., capture_output=True)` for the nested provider command.
+- Sanitize/redact command metadata and provider output before putting it in provenance or diagnostics.
 - Read one JSON request from stdin.
 - Write one JSON object to stdout on success.
 - Write only redacted diagnostics to stderr on failure.
