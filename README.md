@@ -216,7 +216,33 @@ Try the deterministic local smoke path:
 PYTHONPATH=src:. python examples/subprocess_agent_runner.py
 ```
 
-Provider-specific wrappers belong outside the core runtime for now; they can be thin scripts that implement this JSON stdin/stdout contract.
+### CLI-backed AgentStep adapter
+
+`hermes_workflows.agent_cli_adapter` is an optional command you can put behind `SubprocessAgentRunner` when a Hermes/Codex-style local CLI already knows how to authenticate and can return strict JSON. `SubprocessAgentRunner` remains the safe outer process boundary; the adapter is a thin JSON bridge that:
+
+- reads the `agent_step.runner_request.v1` JSON object from stdin
+- builds the provider prompt packet
+- invokes the configured provider CLI with an argv list (`shell=True` is never used)
+- requires the provider to write exactly one JSON object with `output` and optional non-secret `provenance`
+- adds redacted adapter provenance, request hashes, command metadata, duration, and exit code
+- fails closed on non-zero exit, timeout, invalid/chatty JSON, oversized output, or invalid provenance
+
+Deterministic fake-provider example:
+
+```bash
+PYTHONPATH=src:. python examples/agent_cli_adapter_runner.py
+```
+
+Adapter command shape:
+
+```bash
+PYTHONPATH=src:. python -m hermes_workflows.agent_cli_adapter \
+  --agent-command codex \
+  --agent-arg exec \
+  --agent-arg --json
+```
+
+Provider credentials are not created, imported, or mutated by `hermes-workflows`; use the provider CLI's own local auth store or environment. Default tests use `examples/runners/fake_json_cli_agent.py` and require no network, credentials, Hermes, Codex, or provider auth. A real provider smoke test exists only behind `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` plus a caller-supplied `HERMES_WORKFLOWS_AGENT_COMMAND`; do not treat real-provider support as verified unless that opt-in smoke was explicitly run. Generated Python returned through `AgentStep(..., returns=Workflow)` still waits at the existing generated-workflow approval gate before import or child execution.
 
 ## Workflow-backed PR path
 
@@ -364,5 +390,5 @@ pytest -q
 Expected now:
 
 ```text
-81 passed, 1 skipped
+90 passed, 2 skipped
 ```

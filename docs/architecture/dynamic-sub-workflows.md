@@ -73,18 +73,30 @@ processor = await AgentStep(
 
 For live execution, pass an `agent_runner` to `WorkflowEngine`. The runner receives a JSON-safe request packet with the prompt, rendered prompt, variables, return type, workflow id, and step key. Its exact response and provenance are persisted as `StepCompleted.metadata`.
 
-The built-in `SubprocessAgentRunner` lets that live runner be a trusted argv command instead of a Python callable:
+The built-in `SubprocessAgentRunner` lets that live runner be a trusted argv command instead of a Python callable. For a generic local CLI that can return strict JSON, run the optional adapter command behind it:
 
 ```python
+import sys
+from pathlib import Path
+
 from hermes_workflows import SubprocessAgentRunner, WorkflowEngine
 
+repo_root = Path(__file__).resolve().parent.parent
 engine = WorkflowEngine(
     "workflow.sqlite",
-    agent_runner=SubprocessAgentRunner(["python", "scripts/my_agent_runner.py"]),
+    agent_runner=SubprocessAgentRunner([
+        sys.executable,
+        "-m",
+        "hermes_workflows.agent_cli_adapter",
+        "--agent-command",
+        sys.executable,
+        "--agent-arg",
+        str(repo_root / "examples" / "runners" / "fake_json_cli_agent.py"),
+    ]),
 )
 ```
 
-The subprocess receives an `agent_step.runner_request.v1` JSON object on stdin and returns a JSON object on stdout:
+The subprocess boundary still receives an `agent_step.runner_request.v1` JSON object on stdin. The adapter turns that request into a provider prompt, invokes the configured provider CLI using argv-only `subprocess.Popen`, and requires the provider to return strict JSON on stdout:
 
 ```json
 {
@@ -93,7 +105,9 @@ The subprocess receives an `agent_step.runner_request.v1` JSON object on stdin a
 }
 ```
 
-`output` is required; `provenance` is optional but should be non-secret and review-useful. The adapter fails closed on non-zero exit, timeout, invalid JSON, missing `output`, invalid provenance, and oversized stdout. It deliberately has no provider-specific model config and no shell-string default.
+`output` is required; `provenance` is optional but should be non-secret and review-useful. The subprocess runner and adapter fail closed on non-zero exit, timeout, invalid/chatty JSON, missing `output`, invalid provenance, and oversized output. The adapter redacts secret-looking argv values and bounded provider stdout/stderr diagnostics before writing provenance or error JSON. It deliberately has no provider-specific model config and no shell-string default.
+
+Default tests and examples use `examples/runners/fake_json_cli_agent.py`, so they require no network, credentials, Hermes/Codex install, provider auth, or config mutation. Real local provider smoke is opt-in only via `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` and a caller-supplied `HERMES_WORKFLOWS_AGENT_COMMAND`; otherwise it is skipped.
 
 If a live `AgentStep(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(ctx, item)`, or `ctx.map_workflow(...)` first records an `ApprovalRequested` event and waits for `approval.decision`. No generated module is imported and no child workflow is requested until that approval is accepted.
 
@@ -174,7 +188,7 @@ Approval signals use the existing human provenance check. For generated workflow
 
 ## Current limitations
 
-- `AgentStep` has a live injectable runner boundary, but no built-in vendor/LLM adapter yet.
+- A generic CLI adapter exists at `python -m hermes_workflows.agent_cli_adapter` for local Hermes/Codex-style commands that can produce strict JSON, but default tests use a fake CLI and real provider smoke is opt-in only; the runtime does not manage credentials or mutate provider config.
 - Generated module validation is intentionally narrow: parseable Python, `from hermes_workflows import workflow, step` only, at least one selected `@workflow`, no top-level executable statements beyond functions/literal assignments, and no import-time function shapes like decorator calls/default expressions/annotations. It is a shape check, not a sandbox.
 - Child workflows that pause on human approval fail closed for now instead of deadlocking the parent. Parent wake-up after an independently signaled child is a later slice.
 - No concurrency worker pool yet; local `run_until_idle` drains child commands serially.
