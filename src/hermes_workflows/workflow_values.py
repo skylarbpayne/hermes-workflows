@@ -5,7 +5,7 @@ import hashlib
 import importlib.util
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,6 +27,9 @@ class Workflow:
     source_sha256: str
     path: str
     module_name: str
+    provenance: dict[str, Any] | None = None
+    approval_required: bool = False
+    approval_key: str | None = None
 
     def __call__(self, ctx: Any, inputs: Any, *, key: str | None = None) -> Any:
         return ctx.start_child(self, inputs, key=key)
@@ -39,6 +42,9 @@ class Workflow:
             "source_sha256": self.source_sha256,
             "path": self.path,
             "module_name": self.module_name,
+            "provenance": self.provenance,
+            "approval_required": self.approval_required,
+            "approval_key": self.approval_key,
         }
 
     @classmethod
@@ -54,6 +60,9 @@ class Workflow:
             source_sha256=source_sha256,
             path="",
             module_name=f"hermes_generated_workflows.{source_sha256}",
+            provenance=payload.get("provenance"),
+            approval_required=bool(payload.get("approval_required", False)),
+            approval_key=payload.get("approval_key"),
         )
 
     def with_base_dir(self, base_dir: Path) -> "Workflow":
@@ -67,10 +76,23 @@ class Workflow:
             source_sha256=source_sha256,
             path=str(path),
             module_name=f"hermes_generated_workflows.{source_sha256}",
+            provenance=self.provenance,
+            approval_required=self.approval_required,
+            approval_key=self.approval_key,
         )
 
     @classmethod
-    def from_source(cls, source: str, *, symbol: str, base_dir: Path) -> "Workflow":
+    def from_source(
+        cls,
+        source: str,
+        *,
+        symbol: str,
+        base_dir: Path,
+        provenance: dict[str, Any] | None = None,
+        approval_required: bool = False,
+        approval_key: str | None = None,
+        load: bool = True,
+    ) -> "Workflow":
         validate_generated_workflow_source(source)
         if symbol not in _workflow_symbol_names(source):
             raise ValueError(f"generated Workflow symbol is not a @workflow function: {symbol}")
@@ -87,11 +109,17 @@ class Workflow:
             source_sha256=source_sha256,
             path=str(path),
             module_name=module_name,
+            provenance=provenance,
+            approval_required=approval_required,
+            approval_key=approval_key or (f"generated-workflow:{source_sha256}" if approval_required else None),
         )
-        workflow.load()
+        if load:
+            workflow.load()
         return workflow
 
-    def load(self) -> Callable[..., Any]:
+    def load(self, *, approved: bool = False) -> Callable[..., Any]:
+        if self.approval_required and not approved:
+            raise ValueError("generated Workflow requires human approval before import/execution")
         if sha256_text(self.source) != self.source_sha256:
             raise ValueError("Workflow source_sha256 does not match source")
         validate_generated_workflow_source(self.source)
@@ -130,10 +158,24 @@ class Workflow:
         return f"generated:{self.source_sha256}:{self.symbol}"
 
 
-def workflow_from_agent_output(output: Any, *, base_dir: Path) -> Workflow:
+def workflow_from_agent_output(
+    output: Any,
+    *,
+    base_dir: Path,
+    provenance: dict[str, Any] | None = None,
+    approval_required: bool = False,
+) -> Workflow:
     if isinstance(output, Workflow):
-        workflow = output.with_base_dir(base_dir)
-        workflow.load()
+        workflow = replace(
+            output,
+            provenance=provenance or output.provenance,
+            approval_required=approval_required or output.approval_required,
+            approval_key=output.approval_key or None,
+        ).with_base_dir(base_dir)
+        if workflow.approval_required and workflow.approval_key is None:
+            workflow = replace(workflow, approval_key=f"generated-workflow:{workflow.source_sha256}")
+        if not workflow.approval_required:
+            workflow.load()
         return workflow
     if isinstance(output, str):
         source = output
@@ -151,7 +193,14 @@ def workflow_from_agent_output(output: Any, *, base_dir: Path) -> Workflow:
             raise ValueError("Workflow AgentStep output symbol must be a string")
     else:
         raise TypeError("Workflow AgentStep output must be Python source or a {source, symbol} dict")
-    return Workflow.from_source(source, symbol=symbol, base_dir=base_dir)
+    return Workflow.from_source(
+        source,
+        symbol=symbol,
+        base_dir=base_dir,
+        provenance=provenance,
+        approval_required=approval_required,
+        load=not approval_required,
+    )
 
 
 def validate_generated_workflow_source(source: str) -> None:

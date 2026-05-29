@@ -24,10 +24,11 @@ An agent step may return executable Python source. If the caller declares `retur
 
 1. snapshots the generated source to the workflow DB directory,
 2. hashes it,
-3. validates/imports it,
-4. registers the generated `@workflow`,
+3. validates its top-level shape,
+4. if it came from a live runner, requests human approval before import/execution,
 5. stores a typed `Workflow` value in the ordinary `StepCompleted` payload,
-6. rehydrates the same value on replay without calling the agent again.
+6. imports/registers the generated `@workflow` only after approval or for deterministic `mock_output`,
+7. rehydrates the same value on replay without calling the agent again.
 
 That keeps the magic where it belongs: `AgentStep` returns a value. One possible value is `Workflow`.
 
@@ -59,7 +60,7 @@ async def dynamic_pipeline(ctx, inputs):
     )
 ```
 
-For the first implemented slice, examples/tests use `mock_output` instead of a live model runner:
+Examples/tests can still use `mock_output` for deterministic generated Python without configuring a live agent runner:
 
 ```python
 processor = await AgentStep(
@@ -70,7 +71,9 @@ processor = await AgentStep(
 )(ctx)
 ```
 
-The runtime contract is real; the live agent runner can replace `mock_output` later.
+For live execution, pass an `agent_runner` to `WorkflowEngine`. The runner receives a JSON-safe request packet with the prompt, rendered prompt, variables, return type, workflow id, and step key. Its exact response and provenance are persisted as `StepCompleted.metadata`.
+
+If a live `AgentStep(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(ctx, item)`, or `ctx.map_workflow(...)` first records an `ApprovalRequested` event and waits for `approval.decision`. No generated module is imported and no child workflow is requested until that approval is accepted.
 
 ## Replay rule
 
@@ -83,7 +86,10 @@ Generated Python is dynamic only at creation time. After the `AgentStep` complet
   "symbol": "process_item",
   "source_sha256": "...",
   "path": ".../generated_workflows/<sha>.py",
-  "module_name": "hermes_generated_workflows.<sha>"
+  "module_name": "hermes_generated_workflows.<sha>",
+  "approval_required": true,
+  "approval_key": "generated-workflow:<sha>",
+  "provenance": {"runner_provenance": {"runner": "..."}}
 }
 ```
 
@@ -121,13 +127,36 @@ results = await ctx.map_workflow(processor, items, key_fn=lambda item: item["id"
 
 `map_workflow` starts all missing children before waiting and returns results in the original item order.
 
+## Approval/status surface
+
+Generated-code approvals are exposed through the normal workflow status shape:
+
+```json
+{
+  "approvals": [
+    {
+      "key": "generated-workflow:<sha>",
+      "status": "waiting",
+      "artifact": {
+        "kind": "generated_workflow.approval.v1",
+        "symbol": "process_item",
+        "source_sha256": "...",
+        "runner_provenance": {"runner": "..."}
+      }
+    }
+  ]
+}
+```
+
+Approval signals use the existing human provenance check. For generated workflows the approval client currently asks for `human:skylar`; tests can satisfy that with a human source record containing `id`, `channel`, and an external event/message id.
+
 ## Current limitations
 
-- `AgentStep` has the durable typed-return surface, but no live LLM runner yet.
+- `AgentStep` has a live injectable runner boundary, but no built-in vendor/LLM adapter yet.
 - Generated module validation is intentionally narrow: parseable Python, `from hermes_workflows import workflow, step` only, at least one selected `@workflow`, no top-level executable statements beyond functions/literal assignments, and no import-time function shapes like decorator calls/default expressions/annotations. It is a shape check, not a sandbox.
 - Child workflows that pause on human approval fail closed for now instead of deadlocking the parent. Parent wake-up after an independently signaled child is a later slice.
 - No concurrency worker pool yet; local `run_until_idle` drains child commands serially.
-- No generated-code approval gate yet. Add one before enabling live model-generated Python with side effects.
+- No sandbox yet. Approval prevents surprise execution; it does not make generated Python safe after approval.
 
 ## Example
 

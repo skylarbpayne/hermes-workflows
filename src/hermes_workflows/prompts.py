@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -45,10 +46,9 @@ class AgentPrompt:
 class AgentStep:
     """A durable agent step with typed return coercion.
 
-    V1 keeps the runner injectable/testable: `mock_output` stands in for the
-    future live agent runner. The important runtime behavior is already real:
-    outputs are stored as ordinary StepCompleted values, and `returns=Workflow`
-    snapshots/imports generated Python code into a durable Workflow value.
+    The runner is injectable/testable. `mock_output` remains available for
+    examples and deterministic tests, while a configured engine `agent_runner`
+    receives a snapshotted request packet and returns a durable output.
     """
 
     name: str
@@ -151,12 +151,40 @@ async def agent_prompt(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
 async def agent_step(ctx: Any, request: dict[str, Any]) -> Any:
     """Execute an agent request and coerce its typed return value.
 
-    The live runner is intentionally not wired yet. Tests and examples use
-    `mock_output` so the runtime contract can land first without pretending an
-    LLM integration exists.
+    Live runs persist the exact request/response/provenance as StepCompleted
+    metadata. Generated Workflow values are snapshotted and validated here, but
+    are marked approval-required so import/execution fails closed until a human
+    approval decision wakes the parent workflow.
     """
 
-    output = request.get("mock_output")
+    mock_output = request.get("mock_output")
+    live = mock_output is None and ctx.engine.agent_runner is not None
+    metadata = None
+    provenance = None
+    if live:
+        from .engine import StepOutput
+
+        agent_runner = ctx.engine.agent_runner
+        if agent_runner is None:
+            raise RuntimeError("agent_step live runner requested but engine.agent_runner is not configured")
+        runner_request = _build_runner_request(ctx, request)
+        runner_response = agent_runner(runner_request)
+        if inspect.isawaitable(runner_response):
+            runner_response = await runner_response
+        if isinstance(runner_response, dict) and "output" in runner_response:
+            output = runner_response["output"]
+            provenance = runner_response.get("provenance")
+        else:
+            output = runner_response
+        metadata = {
+            "kind": "agent_step.live_result.v1",
+            "request": runner_request,
+            "response": runner_response,
+            "provenance": provenance,
+        }
+    else:
+        output = mock_output
+
     if output is None:
         output = {
             "kind": "agent_step.rendered.v1",
@@ -165,8 +193,39 @@ async def agent_step(ctx: Any, request: dict[str, Any]) -> Any:
             "variables": request["variables"],
         }
     if request.get("returns") == "workflow":
-        return workflow_from_agent_output(output, base_dir=ctx.engine.db_path.parent)
-    return output
+        workflow = workflow_from_agent_output(
+            output,
+            base_dir=ctx.engine.db_path.parent,
+            provenance=(
+                {
+                    "runner_provenance": provenance,
+                    "request": metadata["request"],
+                    "response": metadata["response"],
+                }
+                if live and metadata is not None
+                else None
+            ),
+            approval_required=live,
+        )
+        return StepOutput(workflow, metadata) if live else workflow
+    return StepOutput(output, metadata) if live else output
+
+
+def _build_runner_request(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
+    rendered_prompt = render_prompt(request["prompt"], request["variables"])
+    return {
+        "kind": "agent_step.runner_request.v1",
+        "name": request["name"],
+        "prompt": request["prompt"],
+        "prompt_sha256": request["prompt_sha256"],
+        "rendered_prompt": rendered_prompt,
+        "rendered_prompt_sha256": _sha256_text(rendered_prompt),
+        "variables": request["variables"],
+        "variables_sha256": request["variables_sha256"],
+        "returns": request["returns"],
+        "workflow_id": ctx.workflow_id,
+        "step_key": ctx.step_key,
+    }
 
 
 def render_prompt(template: str, variables: dict[str, Any]) -> str:

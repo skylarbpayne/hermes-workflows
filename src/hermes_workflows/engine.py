@@ -36,6 +36,14 @@ class RunResult:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class StepOutput:
+    """Step body return wrapper for durable metadata that is not user output."""
+
+    output: Any
+    metadata: Optional[Dict[str, Any]] = None
+
+
 class JsonCodec:
     @staticmethod
     def dumps(value: Any) -> str:
@@ -49,8 +57,14 @@ class JsonCodec:
 
 
 class WorkflowEngine:
-    def __init__(self, db_path: Union[Path, str]):
+    def __init__(
+        self,
+        db_path: Union[Path, str],
+        *,
+        agent_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    ):
         self.db_path = Path(db_path)
+        self.agent_runner = agent_runner
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -102,7 +116,14 @@ class WorkflowEngine:
                 # test DB, but v0 stops on terminal status.
                 return result
 
-    def complete_step(self, workflow_id: str, step_key: str, output: Any) -> RunResult:
+    def complete_step(
+        self,
+        workflow_id: str,
+        step_key: str,
+        output: Any,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> RunResult:
         instance = self._instance(workflow_id)
         if instance["status"] == "cancelled":
             return self._result_from_instance(workflow_id)
@@ -116,12 +137,15 @@ class WorkflowEngine:
             if row["status"] == "cancelled":
                 return self._result_from_row(row)
 
+            payload = {"output": output}
+            if metadata is not None:
+                payload["metadata"] = metadata
             self._append_event(
                 con,
                 workflow_id,
                 "StepCompleted",
                 key=step_key,
-                payload={"output": output},
+                payload=payload,
                 idempotency_key=f"completed:{step_key}",
                 ignore_duplicate=True,
             )
@@ -496,17 +520,27 @@ class WorkflowEngine:
             key = payload.get("key")
             decision_event = decisions.get(key)
             decision = decision_event.get("payload") if decision_event else None
-            approvals.append(
-                {
-                    "key": key,
-                    "status": (decision or {}).get("action", "waiting"),
-                    "approver": payload.get("approver"),
-                    "prompt": payload.get("prompt"),
-                    "artifact": payload.get("artifact"),
-                    "decision": decision,
-                    "source": decision_event.get("source") if decision_event else None,
-                }
-            )
+            source = decision_event.get("source") if decision_event else None
+            status = (decision or {}).get("action", "waiting")
+            validation_error = None
+            if decision_event is not None:
+                try:
+                    _validate_approval_source(str(key), str(payload.get("approver") or "human"), decision or {}, source)
+                except ValueError as exc:
+                    status = "invalid_decision"
+                    validation_error = str(exc)
+            summary = {
+                "key": key,
+                "status": status,
+                "approver": payload.get("approver"),
+                "prompt": payload.get("prompt"),
+                "artifact": payload.get("artifact"),
+                "decision": decision,
+                "source": source,
+            }
+            if validation_error is not None:
+                summary["validation_error"] = validation_error
+            approvals.append(summary)
         return approvals
 
     def _active_commands(self, workflow_id: str) -> List[Dict[str, Any]]:
@@ -717,7 +751,7 @@ class WorkflowEngine:
         workflow_ref = workflow_ref.with_base_dir(self.db_path.parent)
 
         child_id = payload["child_workflow_id"]
-        child_fn = workflow_ref.load()
+        child_fn = workflow_ref.load(approved=True)
         child_result = self.run_until_idle(child_fn, payload["inputs"], workflow_id=child_id)
 
         with self._connect() as con:
@@ -863,6 +897,50 @@ class WorkflowEngine:
                 )
             return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
 
+        metadata = None
+        if isinstance(output, StepOutput):
+            metadata = output.metadata
+            output = output.output
+        completion_payload = {"output": output}
+        if metadata is not None:
+            completion_payload["metadata"] = metadata
+        try:
+            JsonCodec.dumps(completion_payload)
+        except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            with self._connect() as con:
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'failed', last_error_json = ?, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND attempts = ?
+                    """,
+                    (JsonCodec.dumps(error), _now(), command["id"], command["claimed_by"], command["attempts"]),
+                ).rowcount
+                if changed == 0:
+                    return self._result_from_instance(workflow_id)
+                self._append_event(
+                    con,
+                    workflow_id,
+                    "StepFailed",
+                    key=key,
+                    payload={"error": error},
+                    idempotency_key=f"failed:{key}:{command['id']}:{command['attempts']}",
+                    ignore_duplicate=True,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'failed', error_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (JsonCodec.dumps(error), _now(), workflow_id),
+                )
+            return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
+
         with self._connect() as con:
             changed = con.execute(
                 """
@@ -877,7 +955,7 @@ class WorkflowEngine:
             ).rowcount
         if changed == 0:
             return self._result_from_instance(workflow_id)
-        return self.complete_step(workflow_id, key, output)
+        return self.complete_step(workflow_id, key, output, metadata=metadata)
 
     def _next_pending_command(self, workflow_id: str, *, command_type: str) -> Optional[sqlite3.Row]:
         with self._connect() as con:
@@ -1157,8 +1235,6 @@ class WorkflowContext:
         self._raise_if_cancelled()
         if not isinstance(workflow_ref, Workflow):
             raise TypeError("ctx.start_child expects a Workflow value")
-        workflow_ref = workflow_ref.with_base_dir(self.engine.db_path.parent)
-        workflow_ref.load()
         child_group = _workflow_child_group(workflow_ref, group=group)
         child_key_part = _safe_child_key(key if key is not None else str(self._child_call_count_for(child_group)))
         event_key = f"child:{child_group}:{child_key_part}"
@@ -1169,6 +1245,10 @@ class WorkflowContext:
         failed = self._last_event("ChildWorkflowFailed", event_key)
         if failed is not None:
             raise RuntimeError(failed.get("error", {}).get("message") or f"child workflow failed: {event_key}")
+
+        workflow_ref = workflow_ref.with_base_dir(self.engine.db_path.parent)
+        await self._require_generated_workflow_approval(workflow_ref)
+        workflow_ref.load(approved=workflow_ref.approval_required)
 
         child_workflow_id = f"{self.workflow_id}.child.{child_group}.{child_key_part}"
         request_payload = {
@@ -1200,6 +1280,31 @@ class WorkflowContext:
         if block:
             raise WorkflowWaiting(event_key)
         return PendingStep(event_key)
+
+    async def _require_generated_workflow_approval(self, workflow_ref: Workflow) -> None:
+        if not workflow_ref.approval_required:
+            return
+        approval_key = workflow_ref.approval_key or f"generated-workflow:{workflow_ref.source_sha256}"
+        provenance = workflow_ref.provenance or {}
+        decision = await self.approval.request(
+            "Approve generated Python workflow before running it as a child workflow.",
+            key=approval_key,
+            artifact={
+                "kind": "generated_workflow.approval.v1",
+                "workflow_name": workflow_ref.workflow_name,
+                "symbol": workflow_ref.symbol,
+                "source_sha256": workflow_ref.source_sha256,
+                "source": workflow_ref.source,
+                "runner_provenance": provenance.get("runner_provenance"),
+                "agent_request": provenance.get("request"),
+                "agent_response": provenance.get("response"),
+            },
+            approver="human:skylar",
+            authority=["run_generated_python_workflow"],
+            allowed=["approve", "reject"],
+        )
+        if decision.get("action") != "approve":
+            raise ValueError(f"generated workflow approval {approval_key} was not approved")
 
     async def map_workflow(
         self,
