@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from .engine import RunResult, WorkflowEngine
+from .engine import JsonCodec, RunResult, WorkflowEngine
 
 
 def load_workflow(ref: str) -> Callable[..., Any]:
@@ -33,6 +33,10 @@ def positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def print_json(payload: Any) -> None:
+    print(JsonCodec.dumps(payload))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -106,14 +110,14 @@ def main(argv: list[str] | None = None) -> int:
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
         )
-        print(json.dumps(result_payload(result), sort_keys=True))
+        print_json(result_payload(result))
     elif args.command == "run":
         result = engine.run_until_idle(
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
         )
-        print(json.dumps(result_payload(result), sort_keys=True))
+        print_json(result_payload(result))
     elif args.command == "worker":
         if args.once:
             result = engine.worker_once(
@@ -128,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 lease_seconds=args.lease_seconds,
                 max_commands=args.max_commands,
             )
-        print(json.dumps(result_payload(result), sort_keys=True))
+        print_json(result_payload(result))
     elif args.command == "signal":
         result = engine.signal(
             args.workflow_id,
@@ -138,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             source=json.loads(args.source_json) if args.source_json else None,
             idempotency_key=args.idempotency_key,
         )
-        print(json.dumps(result_payload(result), sort_keys=True))
+        print_json(result_payload(result))
     elif args.command == "cancel":
         result = engine.cancel_workflow(
             args.workflow_id,
@@ -146,20 +150,15 @@ def main(argv: list[str] | None = None) -> int:
             source=json.loads(args.source_json) if args.source_json else None,
             superseded_by=args.superseded_by,
         )
-        print(json.dumps(result_payload(result), sort_keys=True))
+        print_json(result_payload(result))
     elif args.command == "status":
-        print(json.dumps(engine.workflow_status(args.workflow_id, recent_events=args.recent_events), sort_keys=True))
+        print_json(engine.workflow_status(args.workflow_id, recent_events=args.recent_events))
     elif args.command == "list":
-        print(json.dumps({"workflows": engine.list_workflows(status=args.status)}, sort_keys=True))
+        print_json({"workflows": engine.list_workflows(status=args.status)})
     elif args.command == "events":
-        print(json.dumps({"events": engine.events(args.workflow_id, limit=args.limit)}, sort_keys=True))
+        print_json({"events": engine.events(args.workflow_id, limit=args.limit)})
     elif args.command == "outbox":
-        print(
-            json.dumps(
-                {"commands": engine.outbox_commands(workflow_id=args.workflow_id, status=args.status)},
-                sort_keys=True,
-            )
-        )
+        print_json({"commands": engine.outbox_commands(workflow_id=args.workflow_id, status=args.status)})
     else:  # pragma: no cover - argparse prevents this.
         raise SystemExit(f"unknown command: {args.command}")
 

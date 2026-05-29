@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Awaitable, Callable, Dict, Generator
 
 _STEP_REGISTRY: Dict[str, Callable[..., Any]] = {}
+_REGISTRATION_NAMESPACE: str | None = None
+
+
+@contextmanager
+def registration_namespace(namespace: str):
+    """Temporarily namespace workflow/step registration names.
+
+    Generated Python modules still use the normal public decorators, but their
+    durable names must not collide with static workflow/step names. Importing a
+    generated module runs decorators at import time, so the namespace has to be
+    active while `exec_module(...)` runs.
+    """
+
+    global _REGISTRATION_NAMESPACE
+    previous = _REGISTRATION_NAMESPACE
+    _REGISTRATION_NAMESPACE = namespace
+    try:
+        yield
+    finally:
+        _REGISTRATION_NAMESPACE = previous
 
 
 class DurableStepCall:
@@ -42,7 +63,8 @@ class DurableStepCall:
 def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     """Mark a plain async function as a durable workflow decider."""
 
-    setattr(fn, "__workflow_name__", fn.__name__)
+    workflow_name = f"{_REGISTRATION_NAMESPACE}:{fn.__name__}" if _REGISTRATION_NAMESPACE else fn.__name__
+    setattr(fn, "__workflow_name__", workflow_name)
     from .engine import register_workflow
 
     return register_workflow(fn)
@@ -56,13 +78,14 @@ def step(fn: Callable[..., Awaitable[Any]]) -> Callable[..., DurableStepCall]:
     and reports StepCompleted.
     """
 
-    _STEP_REGISTRY[fn.__name__] = fn
+    step_name = f"{_REGISTRATION_NAMESPACE}:{fn.__name__}" if _REGISTRATION_NAMESPACE else fn.__name__
+    _STEP_REGISTRY[step_name] = fn
 
     @wraps(fn)
     def wrapper(ctx: Any, *args: Any, **kwargs: Any) -> DurableStepCall:
-        return DurableStepCall(ctx, fn.__name__, args, kwargs)
+        return DurableStepCall(ctx, step_name, args, kwargs)
 
-    setattr(wrapper, "__step_name__", fn.__name__)
+    setattr(wrapper, "__step_name__", step_name)
     setattr(wrapper, "__step_body__", fn)
     return wrapper
 
