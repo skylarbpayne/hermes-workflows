@@ -796,7 +796,6 @@ class WorkflowEngine:
             return []
 
         requested: dict[str, Dict[str, Any]] = {}
-        waiting: dict[str, Dict[str, Any]] = {}
         terminal: set[str] = set()
 
         for event in events:
@@ -805,15 +804,13 @@ class WorkflowEngine:
             payload = event["payload"] or {}
             if event_type == "ChildWorkflowRequested" and key not in requested:
                 requested[key] = payload
-            elif event_type == "ChildWorkflowWaiting":
-                waiting[key] = payload
             elif event_type in {"ChildWorkflowCompleted", "ChildWorkflowFailed"}:
                 terminal.add(key)
 
         child_ids = [
-            str((waiting.get(key) or {}).get("child_workflow_id") or payload.get("child_workflow_id"))
+            str(payload.get("child_workflow_id"))
             for key, payload in requested.items()
-            if key not in terminal and ((waiting.get(key) or {}).get("child_workflow_id") or payload.get("child_workflow_id"))
+            if key not in terminal and payload.get("child_workflow_id")
         ]
         actual_status = self._workflow_child_status_summaries(child_ids) if child_ids else {}
 
@@ -821,8 +818,8 @@ class WorkflowEngine:
         for key, payload in requested.items():
             if key in terminal:
                 continue
-            wait_payload = waiting.get(key) or {}
-            child_workflow_id = wait_payload.get("child_workflow_id") or payload.get("child_workflow_id")
+
+            child_workflow_id = payload.get("child_workflow_id")
             actual = actual_status.get(str(child_workflow_id)) if child_workflow_id else None
             if actual is None:
                 child_status = "pending"
