@@ -625,6 +625,7 @@ class WorkflowEngine:
         row = self._instance(workflow_id)
         events = self.events(workflow_id)
         pending_commands = self._active_commands(workflow_id)
+        child_workflows = self._child_workflow_summaries(row, events)
         return {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
@@ -639,6 +640,7 @@ class WorkflowEngine:
             "events": events[-recent_events:],
             "pending_commands": pending_commands,
             "diagnostics": self._command_diagnostics(pending_commands),
+            "child_workflows": child_workflows,
             "approvals": self._approval_summaries(events),
         }
 
@@ -739,6 +741,18 @@ class WorkflowEngine:
             ).fetchall()
         return {row["id"]: {"status": row["status"], "waiting_on": row["waiting_on"]} for row in rows}
 
+    def _workflow_child_status_summaries(self, workflow_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        workflow_ids = sorted({workflow_id for workflow_id in workflow_ids if workflow_id})
+        if not workflow_ids:
+            return {}
+        placeholders = ",".join("?" for _ in workflow_ids)
+        with self._connect() as con:
+            rows = con.execute(
+                f"SELECT id, status, waiting_on FROM workflow_instances WHERE id IN ({placeholders})",
+                workflow_ids,
+            ).fetchall()
+        return {row["id"]: {"status": row["status"], "waiting_on": row["waiting_on"]} for row in rows}
+
     def _signal_keys_by_workflow(self, workflow_ids: List[str]) -> Dict[str, set[str]]:
         placeholders = ",".join("?" for _ in workflow_ids)
         with self._connect() as con:
@@ -775,6 +789,56 @@ class WorkflowEngine:
         if not labels:
             labels.append("orphaned_or_inconsistent")
         return labels
+
+    def _child_workflow_summaries(self, parent_row: sqlite3.Row, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        parent_waiting_on = parent_row["waiting_on"]
+        if parent_row["status"] != "waiting" or not str(parent_waiting_on or "").startswith(("child:", "child-gather:")):
+            return []
+
+        requested: dict[str, Dict[str, Any]] = {}
+        terminal: set[str] = set()
+
+        for event in events:
+            event_type = event["type"]
+            key = event["key"]
+            payload = event["payload"] or {}
+            if event_type == "ChildWorkflowRequested" and key not in requested:
+                requested[key] = payload
+            elif event_type in {"ChildWorkflowCompleted", "ChildWorkflowFailed"}:
+                terminal.add(key)
+
+        child_ids = [
+            str(payload.get("child_workflow_id"))
+            for key, payload in requested.items()
+            if key not in terminal and payload.get("child_workflow_id")
+        ]
+        actual_status = self._workflow_child_status_summaries(child_ids) if child_ids else {}
+
+        summaries: list[Dict[str, Any]] = []
+        for key, payload in requested.items():
+            if key in terminal:
+                continue
+
+            child_workflow_id = payload.get("child_workflow_id")
+            actual = actual_status.get(str(child_workflow_id)) if child_workflow_id else None
+            if actual is None:
+                child_status = "pending"
+                child_waiting_on = None
+            else:
+                child_status = actual.get("status") or "pending"
+                child_waiting_on = None if child_status in {"completed", "failed", "cancelled"} else actual.get("waiting_on")
+            label = _child_workflow_diagnostic_label(str(child_status))
+            summaries.append(
+                {
+                    "key": key,
+                    "child_workflow_id": child_workflow_id,
+                    "status": child_status,
+                    "waiting_on": child_waiting_on,
+                    "diagnostic_label": label,
+                    "diagnostic_message": _child_workflow_diagnostic_message(label),
+                }
+            )
+        return summaries
 
     def _command_diagnostics(self, commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         diagnostics: list[Dict[str, Any]] = []
@@ -1741,6 +1805,26 @@ def _parent_wait_key_for_child_wait(
             return str(existing_wait)
         return gather_key
     return child_event_key
+
+
+def _child_workflow_diagnostic_label(status: str) -> str:
+    if status in {"completed", "failed", "cancelled"}:
+        return "child_workflow_terminal_unreconciled"
+    if status == "waiting":
+        return "child_workflow_waiting"
+    if status == "pending":
+        return "child_workflow_pending"
+    return "child_workflow_non_terminal"
+
+
+def _child_workflow_diagnostic_message(label: str) -> str:
+    messages = {
+        "child_workflow_waiting": "Parent is waiting on child workflow output.",
+        "child_workflow_pending": "Parent requested a child workflow that has not produced an inspectable status yet.",
+        "child_workflow_non_terminal": "Parent requested a child workflow that is not terminal yet.",
+        "child_workflow_terminal_unreconciled": "Child workflow is terminal; parent has not reconciled it yet.",
+    }
+    return messages.get(label, "Child workflow has an unknown diagnostic state.")
 
 
 def _diagnostic_message(label: str) -> str:

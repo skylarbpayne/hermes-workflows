@@ -356,6 +356,18 @@ def test_child_workflow_waits_without_failing_parent(tmp_path):
     assert child_status["status"] == "waiting"
     assert child_status["waiting_on"] == "signal:dynamic.ready:needs-signal"
 
+    parent_status = engine.workflow_status("wf_waiting_child", recent_events=1)
+    assert parent_status["child_workflows"] == [
+        {
+            "key": child_requested["key"],
+            "child_workflow_id": child_id,
+            "status": "waiting",
+            "waiting_on": "signal:dynamic.ready:needs-signal",
+            "diagnostic_label": "child_workflow_waiting",
+            "diagnostic_message": "Parent is waiting on child workflow output.",
+        }
+    ]
+
 
 def test_parent_completes_after_waiting_child_is_signaled_and_reconciled(tmp_path):
     db = tmp_path / "workflow.sqlite"
@@ -382,11 +394,24 @@ def test_parent_completes_after_waiting_child_is_signaled_and_reconciled(tmp_pat
         source={"kind": "test", "id": "unit"},
     )
     assert child_after_signal.status == "completed"
+    parent_status_before_reconcile = engine.workflow_status("wf_waiting_child_resume", recent_events=1)
+    assert parent_status_before_reconcile["status"] == "waiting"
+    assert parent_status_before_reconcile["child_workflows"] == [
+        {
+            "key": child_key,
+            "child_workflow_id": child_id,
+            "status": "completed",
+            "waiting_on": None,
+            "diagnostic_label": "child_workflow_terminal_unreconciled",
+            "diagnostic_message": "Child workflow is terminal; parent has not reconciled it yet.",
+        }
+    ]
 
     final = engine.reconcile_child_result("wf_waiting_child_resume", child_key)
 
     assert final.status == "completed"
     assert final.result == {"payload": {"ok": True}}
+    assert engine.workflow_status("wf_waiting_child_resume", recent_events=1)["child_workflows"] == []
     completed = [
         event for event in engine.events("wf_waiting_child_resume") if event["type"] == "ChildWorkflowCompleted"
     ]
@@ -455,6 +480,31 @@ def test_map_workflow_waits_on_gather_and_completes_after_children_reconcile_in_
     assert [event["type"] for event in engine.events("wf_waiting_child_map")].count("ChildWorkflowCompleted") == 2
 
 
+def test_cancelled_parent_does_not_report_active_child_workflows(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(
+        dynamic_waiting_child_pipeline,
+        {"item": {"id": "cancelled-child-wait"}},
+        workflow_id="wf_cancelled_child_wait",
+    )
+    assert first.status == "waiting"
+    assert engine.workflow_status("wf_cancelled_child_wait", recent_events=1)["child_workflows"]
+
+    cancelled = engine.cancel_workflow(
+        "wf_cancelled_child_wait",
+        reason="test cancellation",
+        source={"kind": "test", "id": "unit"},
+    )
+
+    assert cancelled.status == "cancelled"
+    status = engine.workflow_status("wf_cancelled_child_wait", recent_events=1)
+    assert status["status"] == "cancelled"
+    assert status["waiting_on"] is None
+    assert status["child_workflows"] == []
+
+
 def test_reconcile_missing_child_instance_keeps_parent_waiting_with_diagnostic_event(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
@@ -471,6 +521,17 @@ def test_reconcile_missing_child_instance_keeps_parent_waiting_with_diagnostic_e
 
     with sqlite3.connect(db) as con:
         con.execute("DELETE FROM workflow_instances WHERE id = ?", (child_id,))
+
+    assert engine.workflow_status("wf_missing_child", recent_events=1)["child_workflows"] == [
+        {
+            "key": child_key,
+            "child_workflow_id": child_id,
+            "status": "pending",
+            "waiting_on": None,
+            "diagnostic_label": "child_workflow_pending",
+            "diagnostic_message": "Parent requested a child workflow that has not produced an inspectable status yet.",
+        }
+    ]
 
     reconciled = engine.reconcile_child_result("wf_missing_child", child_key)
 

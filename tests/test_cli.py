@@ -115,6 +115,16 @@ def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
     child_requested = [event for event in status_payload["events"] if event["type"] == "ChildWorkflowRequested"][0]
     child_key = child_requested["key"]
     child_id = child_requested["payload"]["child_workflow_id"]
+    assert status_payload["child_workflows"] == [
+        {
+            "key": child_key,
+            "child_workflow_id": child_id,
+            "status": "waiting",
+            "waiting_on": "signal:dynamic.ready:cli-child",
+            "diagnostic_label": "child_workflow_waiting",
+            "diagnostic_message": "Parent is waiting on child workflow output.",
+        }
+    ]
 
     child_signal_payload = json.loads(
         run_cli(
@@ -134,6 +144,17 @@ def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
         ).stdout
     )
     assert child_signal_payload["status"] == "completed"
+    pre_reconcile_status = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli_child").stdout)
+    assert pre_reconcile_status["child_workflows"] == [
+        {
+            "key": child_key,
+            "child_workflow_id": child_id,
+            "status": "completed",
+            "waiting_on": None,
+            "diagnostic_label": "child_workflow_terminal_unreconciled",
+            "diagnostic_message": "Child workflow is terminal; parent has not reconciled it yet.",
+        }
+    ]
 
     reconcile_payload = json.loads(
         run_cli(
