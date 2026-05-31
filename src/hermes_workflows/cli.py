@@ -96,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--db", required=True, type=Path)
     status.add_argument("--id", required=True, dest="workflow_id")
     status.add_argument("--recent-events", type=int, default=20)
+    status.add_argument("--commands", choices=["failed", "recent", "all"], help="Include bounded command history in the status packet")
+    status.add_argument("--command-limit", type=positive_int, default=20, help="Maximum command-history rows to include")
+    status.add_argument("--command-payload-chars", type=positive_int, default=500, help="Maximum serialized payload preview chars per command-history row")
 
     list_cmd = sub.add_parser("list", help="List workflow instances in a workflow DB")
     list_cmd.add_argument("--db", required=True, type=Path)
@@ -169,7 +172,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         print_json(result_payload(result))
     elif args.command == "status":
-        print_json(engine.workflow_status(args.workflow_id, recent_events=args.recent_events))
+        print_json(
+            engine.workflow_status(
+                args.workflow_id,
+                recent_events=args.recent_events,
+                command_history=args.commands,
+                command_limit=args.command_limit,
+                command_payload_chars=args.command_payload_chars,
+            )
+        )
     elif args.command == "list":
         print_json({"workflows": engine.list_workflows(status=args.status)})
     elif args.command == "events":
