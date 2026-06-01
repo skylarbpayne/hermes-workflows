@@ -621,12 +621,20 @@ class WorkflowEngine:
             rows = con.execute(query, params).fetchall()
         return self._enrich_command_payloads([self._command_payload(row) for row in rows])
 
-    def workflow_status(self, workflow_id: str, *, recent_events: int = 20) -> Dict[str, Any]:
+    def workflow_status(
+        self,
+        workflow_id: str,
+        *,
+        recent_events: int = 20,
+        command_history: Optional[str] = None,
+        command_limit: int = 20,
+        command_payload_chars: int = 500,
+    ) -> Dict[str, Any]:
         row = self._instance(workflow_id)
         events = self.events(workflow_id)
         pending_commands = self._active_commands(workflow_id)
         child_workflows = self._child_workflow_summaries(row, events)
-        return {
+        status = {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
             "status": row["status"],
@@ -643,6 +651,57 @@ class WorkflowEngine:
             "child_workflows": child_workflows,
             "approvals": self._approval_summaries(events),
         }
+        if command_history is not None:
+            history, truncated = self._command_history(
+                workflow_id,
+                mode=command_history,
+                limit=command_limit,
+                payload_chars=command_payload_chars,
+            )
+            status["command_history_mode"] = command_history
+            status["command_history_truncated"] = truncated
+            status["command_history"] = history
+        return status
+
+    def _command_history(
+        self,
+        workflow_id: str,
+        *,
+        mode: str,
+        limit: int,
+        payload_chars: int,
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        if mode not in {"failed", "recent", "all"}:
+            raise ValueError("command_history mode must be one of: failed, recent, all")
+        if limit < 1:
+            raise ValueError("command_limit must be positive")
+        if payload_chars < 1:
+            raise ValueError("command_payload_chars must be positive")
+
+        where = "WHERE workflow_id = ?"
+        params: list[Any] = [workflow_id]
+        if mode == "failed":
+            where += " AND status = 'failed'"
+
+        order = "ORDER BY COALESCE(updated_at, id) DESC, id DESC"
+        if mode == "all":
+            order = "ORDER BY id ASC"
+
+        with self._connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT *
+                FROM workflow_commands_outbox
+                {where}
+                {order}
+                LIMIT ?
+                """,
+                (*params, limit + 1),
+            ).fetchall()
+
+        truncated = len(rows) > limit
+        commands = self._enrich_command_payloads([self._command_payload(row) for row in rows[:limit]])
+        return [_history_command_payload(command, payload_chars=payload_chars) for command in commands], truncated
 
     def _terminal_reason(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as con:
@@ -1403,6 +1462,8 @@ class WorkflowEngine:
             "lease_expires_at": row["lease_expires_at"],
             "attempts": row["attempts"],
             "last_error": JsonCodec.loads(row["last_error_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }
 
 
@@ -1895,6 +1956,25 @@ def _format_error(error: Any) -> Optional[str]:
         if error_type and message:
             return f"{error_type}: {message}"
     return JsonCodec.dumps(error)
+
+
+def _history_command_payload(command: Dict[str, Any], *, payload_chars: int) -> Dict[str, Any]:
+    item = dict(command)
+    payload = item.pop("payload", None)
+    payload_json = JsonCodec.dumps(payload)
+    if len(payload_json) > payload_chars:
+        item["payload_context"] = {
+            "truncated": True,
+            "limit": payload_chars,
+            "preview": payload_json[:payload_chars],
+        }
+    else:
+        item["payload_context"] = {
+            "truncated": False,
+            "limit": payload_chars,
+            "value": payload,
+        }
+    return item
 
 
 def _now() -> int:

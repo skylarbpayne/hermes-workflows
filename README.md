@@ -333,6 +333,14 @@ PYTHONPATH=src:. python -m hermes_workflows status \
   --db /tmp/hermes-workflows.sqlite \
   --id wf_first_real_trip
 
+# When a workflow failed or stuck and pending_commands is empty, include
+# bounded command history directly in the status packet:
+PYTHONPATH=src:. python -m hermes_workflows status \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --commands failed \
+  --command-limit 10
+
 PYTHONPATH=src:. python -m hermes_workflows events \
   --db /tmp/hermes-workflows.sqlite \
   --id wf_first_real_trip \
@@ -364,6 +372,8 @@ PYTHONPATH=src:. python -m hermes_workflows list \
 
 These labels are advisory only. They do not delete commands, rewrite history, or resume workflows.
 
+`status --commands failed|recent|all` is opt-in command history for debugging failures from one packet. It adds `command_history` with bounded `payload_context`, `last_error`, `attempts`, `claimed_by`, lease metadata, timestamps, and diagnostic labels when applicable; default `status` output stays compact and only includes active `pending_commands`.
+
 `cancel` is the explicit mutation path for retiring stale or superseded workflows. It appends a `WorkflowCancelled` event, sets the instance to `status="cancelled"`, clears `waiting_on`, marks pending/running outbox rows `cancelled`, and exposes the audit payload as `terminal_reason` in `status`/`list`. It does not clean up real workflow DB rows unless you run it against that DB deliberately.
 
 ## Current limitations
@@ -390,5 +400,5 @@ pytest -q
 Expected now:
 
 ```text
-90 passed, 2 skipped
+106 passed, 1 skipped
 ```
