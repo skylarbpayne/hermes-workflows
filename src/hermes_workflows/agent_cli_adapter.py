@@ -18,6 +18,8 @@ ADAPTER_VERSION = 1
 DEFAULT_RUNNER_NAME = "hermes_workflows.agent_cli_adapter"
 SECRET_FLAGS = {"--api-key", "--token", "--password", "--secret", "--auth", "--cookie", "-k"}
 SECRET_KEY_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|AUTH|COOKIE)", re.IGNORECASE)
+STRONG_SECRET_ENV_KEY_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|COOKIE)", re.IGNORECASE)
+NON_SECRET_ENV_KEY_SUFFIXES = ("USERNAME", "USER")
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,10 @@ def collect_secret_values(argv: Sequence[str]) -> set[str]:
                 if len(value) >= 3:
                     secrets.add(value)
     for key, value in os.environ.items():
+        normalized_key = key.upper()
+        username_only_key = any(normalized_key.endswith(suffix) for suffix in NON_SECRET_ENV_KEY_SUFFIXES)
+        if username_only_key and not STRONG_SECRET_ENV_KEY_RE.search(key):
+            continue
         if SECRET_KEY_RE.search(key) and len(value) >= 3:
             secrets.add(value)
     return secrets

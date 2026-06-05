@@ -99,7 +99,7 @@ def _run_adapter_direct(request: dict[str, Any] | str, *agent_args: str, timeout
 def test_agent_cli_adapter_turns_agentstep_request_into_provider_prompt_and_records_provenance():
     secret = "env-secret-token-123"
     request = _request(prompt="Summarize {{item}} with {{token}}.", rendered_prompt="Summarize alpha with public-value.")
-    response = _runner(env={"API_TOKEN": secret})(request)
+    response = _runner(env={"API_TOKEN": secret, "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": "skylar"})(request)
 
     assert response["output"] == {"kind": "fake.agent_response.v1", "prompt_seen": True}
     provenance = response["provenance"]
@@ -197,6 +197,30 @@ def test_agent_cli_adapter_success_redacts_secret_bearing_argv_in_provenance():
     assert "sk-test-secret" not in serialized
     assert "[REDACTED]" in serialized
     assert response["provenance"]["agent_command"]["argv"][-1] == "[REDACTED]"
+
+
+def test_agent_cli_adapter_does_not_treat_auth_username_env_as_secret():
+    response = _runner(
+        "--stderr",
+        "not-secret-skylar-value",
+        env={"HERMES_DASHBOARD_BASIC_AUTH_USERNAME": "skylar"},
+    )(_request())
+
+    argv = response["provenance"]["agent_command"]["argv"]
+    assert "not-secret-skylar-value" in argv
+    assert "not-secret-[REDACTED]-value" not in argv
+
+
+def test_agent_cli_adapter_still_redacts_secret_user_env_values():
+    response = _runner(
+        "--stderr",
+        "value=super-sensitive-value",
+        env={"SECRET_USER": "super-sensitive-value"},
+    )(_request())
+
+    serialized = json.dumps(response, sort_keys=True)
+    assert "super-sensitive-value" not in serialized
+    assert "value=[REDACTED]" in serialized
 
 
 def test_agent_cli_adapter_redacts_raw_prompt_text_from_provider_provenance():
