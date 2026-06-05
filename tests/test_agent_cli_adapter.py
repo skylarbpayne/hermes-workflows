@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from hermes_workflows import AgentRunnerError, AgentStep, SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows.agent_cli_adapter import collect_secret_values, redact_text
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -239,6 +240,20 @@ def test_agent_cli_adapter_redacts_raw_prompt_text_from_provider_error_tails():
     assert "provider_invalid_json" in diagnostic
     assert request["rendered_prompt"] not in diagnostic
     assert "[REDACTED]" in diagnostic
+
+
+def test_agent_cli_adapter_does_not_collect_username_env_value_as_secret(monkeypatch):
+    monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "skylar")
+    monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "dashboard-password-secret")
+    monkeypatch.setenv("SERVICE_USER_TOKEN", "service-user-token-secret")
+
+    secrets = collect_secret_values([])
+
+    assert "skylar" not in secrets
+    assert "dashboard-password-secret" in secrets
+    assert "service-user-token-secret" in secrets
+    assert redact_text("/Users/skylarpayne/.hermes", secrets) == "/Users/skylarpayne/.hermes"
+    assert redact_text("dashboard-password-secret service-user-token-secret", secrets) == "[REDACTED] [REDACTED]"
 
 
 def test_agent_cli_adapter_enforces_provider_stdout_cap_while_reading():
