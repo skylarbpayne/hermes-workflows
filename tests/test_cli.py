@@ -725,6 +725,130 @@ def test_packaged_trip_example_runs_without_repo_examples_path(tmp_path):
     assert approved["result"]["approved"] is True
     assert approved["result"]["approved_by"] == "operator"
 
+
+def test_cli_serve_dashboard_is_read_only_without_approval_actions(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_web_read_only",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_workflows",
+            "serve-dashboard",
+            "demo_wf:demo_workflow",
+            "--db",
+            str(db),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ],
+        cwd=Path.cwd(),
+        env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        line = proc.stdout.readline().strip()
+        payload = json.loads(line)
+
+        from urllib.error import HTTPError
+        from urllib.parse import urlencode
+        from urllib.request import Request, urlopen
+
+        html = urlopen(payload["url"], timeout=5).read().decode("utf-8")
+        assert "Hermes Workflows Dashboard" in html
+        assert "Local approval form" not in html
+
+        body = urlencode(
+            {
+                "workflow_id": "wf_web_read_only",
+                "key": "approve_plan",
+                "by": "skylar",
+                "channel": "local-dashboard",
+                "message_id": "web-click-1",
+            }
+        ).encode("utf-8")
+        request = Request(payload["url"] + "/approve", data=body, method="POST")
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(request, timeout=5)
+        assert exc_info.value.code == 405
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_web_read_only").stdout)
+    assert status_payload["status"] == "waiting"
+
+
+def test_cli_serve_dashboard_read_only_does_not_import_workflow_module(tmp_path):
+    marker = tmp_path / "imported.txt"
+    (tmp_path / "side_effect_wf.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('imported')\n"
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def side_effect_workflow(ctx, inputs):\n"
+        "    return {'ok': True}\n"
+    )
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_import_guard",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_workflows",
+            "serve-dashboard",
+            "side_effect_wf:side_effect_workflow",
+            "--db",
+            str(db),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ],
+        cwd=Path.cwd(),
+        env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        json.loads(proc.stdout.readline().strip())
+        assert not marker.exists()
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
 def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
@@ -754,6 +878,7 @@ def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
             "--port",
             "0",
             "--once",
+            "--enable-approval-actions",
         ],
         cwd=Path.cwd(),
         env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},

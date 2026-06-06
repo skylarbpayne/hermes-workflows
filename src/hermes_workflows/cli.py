@@ -170,13 +170,18 @@ def main(argv: list[str] | None = None) -> int:
 
     serve_dashboard_cmd = sub.add_parser(
         "serve-dashboard",
-        help="Serve a local workflow dashboard with approval forms that use the canonical approval signal path",
+        help="Serve a read-only local workflow dashboard; approval POST forms require --enable-approval-actions",
     )
-    serve_dashboard_cmd.add_argument("workflow_ref", help="module:function; imported so approvals can resume the workflow")
+    serve_dashboard_cmd.add_argument("workflow_ref", help="module:function; imported so explicit approval actions can resume the workflow")
     serve_dashboard_cmd.add_argument("--db", required=True, type=Path)
     serve_dashboard_cmd.add_argument("--host", default="127.0.0.1")
     serve_dashboard_cmd.add_argument("--port", type=int, default=8765)
     serve_dashboard_cmd.add_argument("--once", action="store_true", help="Stop after one approval POST; useful for tests/smokes")
+    serve_dashboard_cmd.add_argument(
+        "--enable-approval-actions",
+        action="store_true",
+        help="Enable local /approve POST forms; omitted by default so serve-dashboard stays read-only.",
+    )
 
     doctor = sub.add_parser("doctor", help="Check local install, SQLite, DB path, and optional workflow import")
     doctor.add_argument("--db", type=Path, default=Path(".hermes/workflows.sqlite"))
@@ -202,9 +207,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         return run_doctor(args)
 
-    read_only_commands = {"status", "list", "events", "outbox", "dashboard"}
+    read_only_commands = {"status", "list", "events", "outbox", "dashboard", "serve-dashboard"}
     engine = WorkflowEngine(args.db, read_only=args.command in read_only_commands)
-    workflow = load_workflow(args.workflow_ref) if hasattr(args, "workflow_ref") else None
+    workflow = None
+    if hasattr(args, "workflow_ref") and not (args.command == "serve-dashboard" and not args.enable_approval_actions):
+        workflow = load_workflow(args.workflow_ref)
 
     if args.command == "start":
         result = engine.start(
@@ -311,8 +318,8 @@ def main(argv: list[str] | None = None) -> int:
         out_path = render_dashboard(engine, args.out, status=args.status, recent_events=args.recent_events)
         print_json({"dashboard": str(out_path)})
     elif args.command == "serve-dashboard":
-        if workflow is None:  # pragma: no cover - argparse always supplies workflow_ref here.
-            raise SystemExit("serve-dashboard requires workflow_ref")
+        if args.enable_approval_actions and workflow is None:  # pragma: no cover - argparse always supplies workflow_ref here.
+            raise SystemExit("serve-dashboard approval actions require workflow_ref")
         serve_dashboard(
             db_path=args.db,
             workflow=workflow,
@@ -320,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             once=args.once,
+            approval_actions=args.enable_approval_actions,
         )
     else:  # pragma: no cover - argparse prevents this.
         raise SystemExit(f"unknown command: {args.command}")

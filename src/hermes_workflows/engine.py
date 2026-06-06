@@ -222,13 +222,11 @@ class WorkflowEngine:
     ) -> RunResult:
         self._ensure_writable("record workflow signals")
         instance = self._instance(workflow_id)
-        if instance["status"] in TERMINAL_WORKFLOW_STATUSES:
+        dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type != "approval.decision":
             return self._result_from_instance(workflow_id)
 
-        workflow_fn = self._workflow_fn_for_instance(instance)
-        dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
-        if signal_type == "approval.decision":
-            self._validate_approval_decision_signal(workflow_id, key, payload, source, dedupe)
+        workflow_fn = None if instance["status"] in TERMINAL_WORKFLOW_STATUSES else self._workflow_fn_for_instance(instance)
         inserted = False
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -236,7 +234,19 @@ class WorkflowEngine:
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
             if row["status"] in TERMINAL_WORKFLOW_STATUSES:
+                if signal_type == "approval.decision":
+                    self._validate_approval_decision_signal(
+                        workflow_id,
+                        key,
+                        payload,
+                        source,
+                        dedupe,
+                        con=con,
+                        require_existing=row["status"] == "completed",
+                    )
                 return self._result_from_row(row)
+            if signal_type == "approval.decision":
+                self._validate_approval_decision_signal(workflow_id, key, payload, source, dedupe, con=con)
 
             inserted = self._append_event(
                 con,
@@ -265,7 +275,11 @@ class WorkflowEngine:
                         """,
                         (_now(), workflow_id, f"approval:{key}"),
                     )
-        result = self._run_decider(workflow_id, workflow_fn) if inserted else self._result_from_instance(workflow_id)
+        if inserted:
+            assert workflow_fn is not None
+            result = self._run_decider(workflow_id, workflow_fn)
+        else:
+            result = self._result_from_instance(workflow_id)
         return self.drain(workflow_id, initial=result)
 
     def resume(self, workflow_fn: Callable[..., Any], workflow_id: str) -> RunResult:
@@ -347,13 +361,21 @@ class WorkflowEngine:
                 workflow_ref=workflow_ref,
             )
 
-        self._validate_approval_decision_signal(decision.workflow_id, decision.key, payload, decision.source, dedupe)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (decision.workflow_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown workflow_id: {decision.workflow_id}")
             if row["status"] in TERMINAL_WORKFLOW_STATUSES:
+                self._validate_approval_decision_signal(
+                    decision.workflow_id,
+                    decision.key,
+                    payload,
+                    decision.source,
+                    dedupe,
+                    con=con,
+                    require_existing=row["status"] == "completed",
+                )
                 result = self._result_from_row(row)
                 return ApprovalReceipt(
                     workflow_id=decision.workflow_id,
@@ -366,6 +388,7 @@ class WorkflowEngine:
                     result_summary=result.result if isinstance(result.result, dict) else None,
                     workflow_ref=row["workflow_ref"],
                 )
+            self._validate_approval_decision_signal(decision.workflow_id, decision.key, payload, decision.source, dedupe, con=con)
             inserted = self._append_event(
                 con,
                 decision.workflow_id,
@@ -442,30 +465,45 @@ class WorkflowEngine:
         payload: Any,
         source: Any,
         idempotency_key: str,
+        *,
+        con: sqlite3.Connection | None = None,
+        require_existing: bool = False,
     ) -> None:
         if not isinstance(payload, dict):
             raise ValueError(f"approval {key} decision payload must be an object")
 
         event_key = f"approval:{key}"
-        with self._connect() as con:
-            row = con.execute(
-                """
-                SELECT payload_json
-                FROM workflow_events
-                WHERE workflow_id = ? AND type = 'ApprovalRequested' AND key = ?
-                ORDER BY seq DESC LIMIT 1
-                """,
-                (workflow_id, event_key),
-            ).fetchone()
-            existing_decision = con.execute(
-                """
-                SELECT payload_json, idempotency_key
-                FROM workflow_events
-                WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
-                ORDER BY seq DESC LIMIT 1
-                """,
-                (workflow_id, f"signal:approval.decision:{key}"),
-            ).fetchone()
+        if con is None:
+            with self._connect() as read_con:
+                self._validate_approval_decision_signal(
+                    workflow_id,
+                    key,
+                    payload,
+                    source,
+                    idempotency_key,
+                    con=read_con,
+                    require_existing=require_existing,
+                )
+            return
+
+        row = con.execute(
+            """
+            SELECT payload_json
+            FROM workflow_events
+            WHERE workflow_id = ? AND type = 'ApprovalRequested' AND key = ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (workflow_id, event_key),
+        ).fetchone()
+        existing_decision = con.execute(
+            """
+            SELECT payload_json, idempotency_key
+            FROM workflow_events
+            WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (workflow_id, f"signal:approval.decision:{key}"),
+        ).fetchone()
 
         if existing_decision is not None:
             if existing_decision["idempotency_key"] == idempotency_key:
@@ -475,6 +513,9 @@ class WorkflowEngine:
                     return
                 raise ValueError(f"approval {key} idempotency key was reused with a different decision")
             raise ValueError(f"approval {key} already has a recorded decision")
+
+        if require_existing:
+            raise ValueError(f"approval {key} has no recorded decision to replay")
 
         if row is None:
             raise ValueError(f"approval {key} has no matching ApprovalRequested event")
@@ -1647,6 +1688,10 @@ class WorkflowEngine:
                   UNIQUE(workflow_id, seq),
                   UNIQUE(workflow_id, idempotency_key)
                 );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_one_approval_decision
+                ON workflow_events(workflow_id, key)
+                WHERE type = 'SignalReceived' AND key LIKE 'signal:approval.decision:%';
 
                 CREATE TABLE IF NOT EXISTS workflow_commands_outbox(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,

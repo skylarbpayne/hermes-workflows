@@ -100,6 +100,18 @@ def _looks_like_path(value: str) -> bool:
     return value.startswith(("/", "./", "../", "~")) or os.sep in value or value.endswith((".db", ".sqlite", ".sqlite3"))
 
 
+def _normalized_path(value: str) -> str:
+    return str(Path(value).expanduser().resolve(strict=False))
+
+
+def _db_alias_for_path(db_path: str) -> str | None:
+    normalized = _normalized_path(db_path)
+    for alias, configured_path in _configured_dbs().items():
+        if _normalized_path(configured_path) == normalized:
+            return alias
+    return None
+
+
 def resolve_db(db: Any = None) -> str:
     configured = _configured_dbs()
     if db is None or str(db).strip() == "":
@@ -114,6 +126,18 @@ def resolve_db(db: Any = None) -> str:
     if _looks_like_path(raw):
         return str(Path(raw).expanduser())
     raise ValueError(f"Unknown workflow DB alias {raw!r}. Provide a configured name or a path.")
+
+
+def resolve_gateway_token_db(db: Any) -> str:
+    raw = str(db or "").strip()
+    if not raw:
+        raise ValueError("Approval token missing DB alias.")
+    if _looks_like_path(raw):
+        raise ValueError("explicit DB paths are not accepted from gateway tokens; use a configured DB alias")
+    configured = _configured_dbs()
+    if raw not in configured:
+        raise ValueError(f"Unknown workflow DB alias in approval token: {raw!r}")
+    return configured[raw]
 
 
 def _redact(value: Any) -> Any:
@@ -145,11 +169,15 @@ def _b64url_encode(payload: dict[str, Any]) -> str:
 
 
 def _b64url_decode(payload: str) -> dict[str, Any]:
+    if not payload or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in payload):
+        raise ValueError("Approval token payload is not strict base64url.")
     padded = payload + "=" * (-len(payload) % 4)
     decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     data = json.loads(decoded)
     if not isinstance(data, dict):
         raise ValueError("Approval token payload is not an object.")
+    if _b64url_encode(data) != payload:
+        raise ValueError("Approval token payload is not canonical base64url.")
     return data
 
 
@@ -192,10 +220,14 @@ def approval_view_to_dict(approval: Any) -> dict[str, Any]:
     workflow_id = str(payload.get("workflow_id") or "")
     key = str(payload.get("key") or "")
     allowed = payload.get("allowed") or []
+    db_ref = _db_alias_for_path(db_path)
+    if not db_ref:
+        payload["decision_token_error"] = "decision tokens require a configured workflow DB alias"
+        return payload
     if "approve" in allowed:
-        payload["decision_token_approve"] = decision_token("approve", db_path, workflow_id, key)
+        payload["decision_token_approve"] = decision_token("approve", db_ref, workflow_id, key)
     if "reject" in allowed:
-        payload["decision_token_reject"] = decision_token("reject", db_path, workflow_id, key)
+        payload["decision_token_reject"] = decision_token("reject", db_ref, workflow_id, key)
     return payload
 
 
@@ -285,16 +317,26 @@ def _event_message_id(event: Any, source: Any) -> str | None:
     return None
 
 
+def _gateway_rejected(error: str) -> dict[str, Any]:
+    return {"action": "skip", "reason": "workflow approval token rejected", "error": error}
+
+
 def _handle_gateway_message(*, event: Any, gateway: Any = None, session_store: Any = None, **_: Any) -> dict[str, Any] | None:
     text = str(getattr(event, "text", "") or "").strip()
     if not text:
         return None
     try:
         parsed = parse_decision_token(text)
-    except Exception:
-        return None
+    except Exception as exc:
+        return _gateway_rejected(f"{type(exc).__name__}: {exc}")
     if parsed is None:
+        if text.startswith(f"{_TOKEN_PREFIX}:"):
+            return _gateway_rejected("invalid approval token")
         return None
+    try:
+        db_path = resolve_gateway_token_db(parsed["db"])
+    except Exception as exc:
+        return _gateway_rejected(f"{type(exc).__name__}: {exc}")
     source_obj = getattr(event, "source", None)
     platform = _platform_value(getattr(source_obj, "platform", "unknown"))
     chat_id = getattr(source_obj, "chat_id", None)
@@ -302,7 +344,7 @@ def _handle_gateway_message(*, event: Any, gateway: Any = None, session_store: A
     channel = f"{platform}:{chat_id}" if chat_id else platform
     message_id = _event_message_id(event, source_obj)
     args: dict[str, Any] = {
-        "db": parsed["db"],
+        "db": db_path,
         "workflow_id": parsed["workflow_id"],
         "key": parsed["key"],
         "action": parsed["action"],
@@ -316,7 +358,7 @@ def _handle_gateway_message(*, event: Any, gateway: Any = None, session_store: A
     raw = _handle_workflow_approval_decide(args)
     result = json.loads(raw)
     if not result.get("success"):
-        return None
+        return _gateway_rejected(str(result.get("error") or "approval decision failed"))
     return {
         "action": "skip",
         "reason": "workflow approval decision recorded",

@@ -189,7 +189,7 @@ def test_approval_decision_cannot_arrive_before_approval_request(tmp_path):
     assert [event["type"] for event in status["events"]].count("ApprovalRequested") == 1
     assert not [event for event in status["events"] if event["type"] == "SignalReceived"]
 
-def test_completed_workflow_ignores_late_approval_signal(tmp_path):
+def test_completed_workflow_rejects_conflicting_late_approval_signal(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
     approved = engine.signal(
@@ -204,17 +204,16 @@ def test_completed_workflow_ignores_late_approval_signal(tmp_path):
     before = engine.workflow_status("wf_approval", recent_events=20)
     before_event_count = before["event_count"]
 
-    late = engine.signal(
-        "wf_approval",
-        "approval.decision",
-        key="approve_test_plan",
-        payload=reject_payload(),
-        source=human_source("789"),
-        idempotency_key="late-reject",
-    )
+    with pytest.raises(ValueError, match="already has a recorded decision"):
+        engine.signal(
+            "wf_approval",
+            "approval.decision",
+            key="approve_test_plan",
+            payload=reject_payload(),
+            source=human_source("789"),
+            idempotency_key="late-reject",
+        )
 
-    assert late.status == "completed"
-    assert late.result["decision"]["action"] == "approve"
     after = engine.workflow_status("wf_approval", recent_events=20)
     assert after["event_count"] == before_event_count
     assert after["result"]["decision"]["action"] == "approve"

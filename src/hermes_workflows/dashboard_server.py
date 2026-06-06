@@ -28,15 +28,17 @@ class DashboardServer(ThreadingHTTPServer):
         handler_class: type[BaseHTTPRequestHandler],
         *,
         db_path: Path,
-        workflow: Callable[..., Any],
+        workflow: Callable[..., Any] | None,
         workflow_ref: str,
         once: bool = False,
+        approval_actions: bool = False,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.db_path = db_path
         self.workflow = workflow
         self.workflow_ref = workflow_ref
         self.once = once
+        self.approval_actions = approval_actions
 
     @property
     def url(self) -> str:
@@ -59,10 +61,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             out = Path(tmp) / "dashboard.html"
             render_dashboard(engine, out)
             html = out.read_text(encoding="utf-8")
-        html = self._inject_approval_forms(html)
+        if server.approval_actions:
+            html = self._inject_approval_forms(html)
+        else:
+            html = self._inject_read_only_notice(html)
         self._send_html(html)
 
     def do_POST(self) -> None:
+        server = _dashboard_server(self)
+        if not server.approval_actions:
+            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "approval actions are disabled for this dashboard")
+            return
         parsed = urlparse(self.path)
         if parsed.path != "/approve":
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -149,6 +158,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 """
         return html.replace("</main>", form + "</main>")
 
+    def _inject_read_only_notice(self, html: str) -> str:
+        notice = """
+<section class="card">
+  <h2>Approval actions disabled</h2>
+  <p class="muted">This served dashboard is read-only. Use <code>hermes-workflows approve</code>/<code>reject</code>, or restart with <code>--enable-approval-actions</code> for local POST approval forms.</p>
+</section>
+"""
+        return html.replace("</main>", notice + "</main>")
+
 
 def _required(fields: dict[str, list[str]], key: str) -> str:
     value = fields.get(key, [""])[0].strip()
@@ -166,11 +184,12 @@ def _escape(value: Any) -> str:
 def serve_dashboard(
     *,
     db_path: Path,
-    workflow: Callable[..., Any],
+    workflow: Callable[..., Any] | None,
     workflow_ref: str,
     host: str = "127.0.0.1",
     port: int = 8765,
     once: bool = False,
+    approval_actions: bool = False,
 ) -> str:
     server = DashboardServer(
         (host, port),
@@ -179,6 +198,7 @@ def serve_dashboard(
         workflow=workflow,
         workflow_ref=workflow_ref,
         once=once,
+        approval_actions=approval_actions,
     )
     print(json.dumps({"url": server.url, "db": str(db_path), "workflow_ref": workflow_ref}), flush=True)
     server.serve_forever()
