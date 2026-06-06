@@ -9,3 +9,10 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# Private/local workflow run inputs and outputs. Never commit real participant exports.
+.local-data/
+private-data/
+*-real-run*/
+*share-token*.txt
+*.csv

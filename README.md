@@ -29,6 +29,50 @@ For operator debugging, use the read-only [`docs/operations/inspectability-cookb
 
 Dynamic sub-workflow generation now uses Python as the workflow language: an `AgentStep` can return a typed `Workflow` value backed by generated Python source, and the parent can call or `ctx.map_workflow(...)` it as a durable child workflow. See [`docs/architecture/dynamic-sub-workflows.md`](docs/architecture/dynamic-sub-workflows.md) for the implemented first slice.
 
+## Hackathon participant-email demo
+
+The current production-shaped demo is a Hack the Valley follow-up workflow:
+
+```text
+registration roster -> project submissions -> prize lookup -> personalized email drafts
+  -> generated child workflow source + hash
+  -> agent email-quality approval
+  -> human draft-batch approval
+  -> final review packet with zero sends / zero Gmail draft creation
+```
+
+Synthetic public demo, no network/auth required:
+
+```bash
+PYTHONPATH=src:. pytest tests/test_workflows_demo_2026_06_05.py -q
+PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
+  --db /tmp/workflows-demo-2026-06-05.sqlite \
+  --id wf_workflows_demo_2026_06_05 \
+  --artifact dist/workflows-demo-2026-06-05/index.html
+```
+
+Real-data dry runs must use local snapshots and stay private. The snapshot builder defaults to checked-in participants only; pass `--include-unchecked` only for a separate all-active follow-up campaign.
+
+```bash
+PYTHONPATH=src:. python examples/build_hackathon_email_snapshot.py \
+  --registration-csv /path/to/private-registration-export.csv \
+  --submissions-json /path/to/private-submissions-export.json \
+  --out /tmp/workflows-real-run/snapshot.json
+
+HERMES_WORKFLOWS_HACKATHON_SNAPSHOT=/tmp/workflows-real-run/snapshot.json \
+PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
+  --db /tmp/workflows-real-run/workflow.sqlite \
+  --id wf_htv_real_snapshot_dry_run \
+  --artifact /tmp/workflows-real-run/review-packet/index.html \
+  --receipt-json /tmp/workflows-real-run/receipt.json
+```
+
+The CLI prints a redacted summary by default. Use `--full-receipt` only with synthetic data; real receipts and review packets may contain participant PII.
+
+For a fuller agent setup walkthrough, see [`docs/setup-for-agents.md`](docs/setup-for-agents.md). For a redacted output example from a real dry run, see [`docs/output/hackathon-redacted-packet-2026-06-05/`](docs/output/hackathon-redacted-packet-2026-06-05/) and [`examples/outputs/hackathon-real-dry-run.redacted.json`](examples/outputs/hackathon-real-dry-run.redacted.json).
+
+Redacted output packets intentionally keep counts, approval keys, side-effect receipts, generated workflow hashes, and blocker summaries while omitting names, emails, raw project content, URLs, raw draft bodies, raw event payloads, and private file paths.
+
 ## The core runtime idea
 
 A workflow function is a **decider**, not a daemon.

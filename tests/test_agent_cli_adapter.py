@@ -111,7 +111,8 @@ def test_agent_cli_adapter_turns_agentstep_request_into_provider_prompt_and_reco
     assert provenance["rendered_prompt_sha256"] == "rendered-sha"
     assert provenance["agent_command"]["argv0"] == Path(sys.executable).name
     assert provenance["agent_command"]["argv"][0] == Path(sys.executable).name
-    assert provenance["agent_command"]["argv"][1] == str(FAKE_AGENT)
+    assert provenance["agent_command"]["argv"][1].endswith("examples/runners/fake_json_cli_agent.py")
+    assert "skylar" not in provenance["agent_command"]["argv"][1].lower()
     assert provenance["provider_provenance"]["model"] == "fake-1"
     assert provenance["exit_code"] == 0
     assert isinstance(provenance["duration_ms"], int)

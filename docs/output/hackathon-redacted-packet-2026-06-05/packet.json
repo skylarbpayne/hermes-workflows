@@ -1,0 +1,879 @@
+{
+  "coverage": {
+    "drafts": [
+      {
+        "draft_ref": "Draft 001",
+        "email_token": "redacted-ba16f171be",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 001",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 001",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 002",
+        "email_token": "redacted-8e305f52e0",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 002",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 002",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 003",
+        "email_token": "redacted-22fcc3d063",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 003",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 003",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 004",
+        "email_token": "redacted-09bc04b31e",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 004",
+        "prize_claim_count": 0,
+        "project_ref": "Project 007",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 005",
+        "email_token": "redacted-53b8628c5f",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 005",
+        "prize_claim_count": 0,
+        "project_ref": "Project 008",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 006",
+        "email_token": "redacted-408a5ca624",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 006",
+        "prize_claim_count": 0,
+        "project_ref": "Project 016",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 007",
+        "email_token": "redacted-3bb9156dcb",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 007",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 004",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 008",
+        "email_token": "redacted-973fa8e37e",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 008",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 005",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 009",
+        "email_token": "redacted-0cbfddc872",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 009",
+        "prize_claim_count": 0,
+        "project_ref": "Project 015",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 010",
+        "email_token": "redacted-d25ada370b",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 010",
+        "prize_claim_count": 0,
+        "project_ref": "Project 012",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 011",
+        "email_token": "redacted-abad0b2018",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 011",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 006",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 012",
+        "email_token": "redacted-5140764913",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 012",
+        "prize_claim_count": 0,
+        "project_ref": "Project 004",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 013",
+        "email_token": "redacted-54fc335b89",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 013",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 007",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 014",
+        "email_token": "redacted-b1245a7231",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 12,
+        "participant_ref": "Participant 014",
+        "prize_claim_count": 0,
+        "project_ref": "Project 003",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 015",
+        "email_token": "redacted-157d256d06",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 12,
+        "participant_ref": "Participant 015",
+        "prize_claim_count": 0,
+        "project_ref": "Project 006",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 016",
+        "email_token": "redacted-3c78fb90ad",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 016",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 008",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 017",
+        "email_token": "redacted-51e6b79fce",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 017",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 009",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 018",
+        "email_token": "redacted-5aab030eae",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 018",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 010",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 019",
+        "email_token": "redacted-6c2fe61f96",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 019",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 011",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 020",
+        "email_token": "redacted-815e2a1cb6",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 020",
+        "prize_claim_count": 0,
+        "project_ref": "Project 010",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 021",
+        "email_token": "redacted-944be23793",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 021",
+        "prize_claim_count": 0,
+        "project_ref": "Project 008",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 022",
+        "email_token": "redacted-f84192eb04",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 022",
+        "prize_claim_count": 0,
+        "project_ref": "Project 008",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 023",
+        "email_token": "redacted-6c8ae44978",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 023",
+        "prize_claim_count": 0,
+        "project_ref": "Project 005",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 024",
+        "email_token": "redacted-d5cce7edd5",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 024",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 012",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 025",
+        "email_token": "redacted-4705d13935",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 025",
+        "prize_claim_count": 0,
+        "project_ref": "Project 008",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 026",
+        "email_token": "redacted-154358aab4",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 026",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 013",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 027",
+        "email_token": "redacted-16ad631add",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 027",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 014",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      },
+      {
+        "draft_ref": "Draft 028",
+        "email_token": "redacted-ca0553a3bb",
+        "has_judge_note": true,
+        "has_next_step": true,
+        "has_project_link": true,
+        "line_count": 11,
+        "participant_ref": "Participant 028",
+        "prize_claim_count": 0,
+        "project_ref": "Unmatched project 015",
+        "raw_body_omitted": true,
+        "risk_flags": [],
+        "subject_shape": "Hack the Valley follow-up: [project redacted]"
+      }
+    ],
+    "participants": [
+      {
+        "checked_in": true,
+        "email_token": "redacted-1f090247e9",
+        "first_hackathon": true,
+        "participant_ref": "Participant 001",
+        "project_ref": "Unmatched project 001",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-f4cc273418",
+        "first_hackathon": true,
+        "participant_ref": "Participant 002",
+        "project_ref": "Unmatched project 002",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-4999626558",
+        "first_hackathon": true,
+        "participant_ref": "Participant 003",
+        "project_ref": "Unmatched project 003",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-d1ce30622a",
+        "first_hackathon": true,
+        "participant_ref": "Participant 004",
+        "project_ref": "Project 007",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-375f1e8858",
+        "first_hackathon": false,
+        "participant_ref": "Participant 005",
+        "project_ref": "Project 008",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-b21c0a0bd2",
+        "first_hackathon": true,
+        "participant_ref": "Participant 006",
+        "project_ref": "Project 016",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-16cfcdf03d",
+        "first_hackathon": true,
+        "participant_ref": "Participant 007",
+        "project_ref": "Unmatched project 004",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-b767255dca",
+        "first_hackathon": true,
+        "participant_ref": "Participant 008",
+        "project_ref": "Unmatched project 005",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-f949639d15",
+        "first_hackathon": true,
+        "participant_ref": "Participant 009",
+        "project_ref": "Project 015",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-5c1dfde68d",
+        "first_hackathon": true,
+        "participant_ref": "Participant 010",
+        "project_ref": "Project 012",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-b5fe663cc8",
+        "first_hackathon": true,
+        "participant_ref": "Participant 011",
+        "project_ref": "Unmatched project 006",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-102c006507",
+        "first_hackathon": true,
+        "participant_ref": "Participant 012",
+        "project_ref": "Project 004",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-4ce28fbeb1",
+        "first_hackathon": true,
+        "participant_ref": "Participant 013",
+        "project_ref": "Unmatched project 007",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-81c157af13",
+        "first_hackathon": true,
+        "participant_ref": "Participant 014",
+        "project_ref": "Project 003",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-d89bc8dd92",
+        "first_hackathon": false,
+        "participant_ref": "Participant 015",
+        "project_ref": "Project 006",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-df0ed67021",
+        "first_hackathon": true,
+        "participant_ref": "Participant 016",
+        "project_ref": "Unmatched project 008",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-c793b68216",
+        "first_hackathon": true,
+        "participant_ref": "Participant 017",
+        "project_ref": "Unmatched project 009",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-82b2d8d959",
+        "first_hackathon": true,
+        "participant_ref": "Participant 018",
+        "project_ref": "Unmatched project 010",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-a7f3c4f7ac",
+        "first_hackathon": true,
+        "participant_ref": "Participant 019",
+        "project_ref": "Unmatched project 011",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-e9659693cc",
+        "first_hackathon": true,
+        "participant_ref": "Participant 020",
+        "project_ref": "Project 010",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-fb654f105b",
+        "first_hackathon": true,
+        "participant_ref": "Participant 021",
+        "project_ref": "Project 008",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-8729b68fad",
+        "first_hackathon": true,
+        "participant_ref": "Participant 022",
+        "project_ref": "Project 008",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-61dbbff8ef",
+        "first_hackathon": true,
+        "participant_ref": "Participant 023",
+        "project_ref": "Project 005",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-0ae05135a9",
+        "first_hackathon": true,
+        "participant_ref": "Participant 024",
+        "project_ref": "Unmatched project 012",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-231b7ae9b3",
+        "first_hackathon": true,
+        "participant_ref": "Participant 025",
+        "project_ref": "Project 008",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-51fc394a70",
+        "first_hackathon": true,
+        "participant_ref": "Participant 026",
+        "project_ref": "Unmatched project 013",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-e3541aa65b",
+        "first_hackathon": true,
+        "participant_ref": "Participant 027",
+        "project_ref": "Unmatched project 014",
+        "track_present": true
+      },
+      {
+        "checked_in": true,
+        "email_token": "redacted-2ff6395a48",
+        "first_hackathon": true,
+        "participant_ref": "Participant 028",
+        "project_ref": "Unmatched project 015",
+        "track_present": true
+      }
+    ],
+    "projects": [
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 001",
+        "raw_content_omitted": true,
+        "team_member_count": 1,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 002",
+        "raw_content_omitted": true,
+        "team_member_count": 3,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": false,
+        "prize_claim_count": 0,
+        "project_ref": "Project 003",
+        "raw_content_omitted": true,
+        "team_member_count": 3,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 004",
+        "raw_content_omitted": true,
+        "team_member_count": 2,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 005",
+        "raw_content_omitted": true,
+        "team_member_count": 2,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 006",
+        "raw_content_omitted": true,
+        "team_member_count": 3,
+        "track_present": true
+      },
+      {
+        "has_demo_url": false,
+        "has_repo_url": false,
+        "prize_claim_count": 0,
+        "project_ref": "Project 007",
+        "raw_content_omitted": true,
+        "team_member_count": 3,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 008",
+        "raw_content_omitted": true,
+        "team_member_count": 4,
+        "track_present": true
+      },
+      {
+        "has_demo_url": false,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 009",
+        "raw_content_omitted": true,
+        "team_member_count": 5,
+        "track_present": true
+      },
+      {
+        "has_demo_url": false,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 010",
+        "raw_content_omitted": true,
+        "team_member_count": 4,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 011",
+        "raw_content_omitted": true,
+        "team_member_count": 1,
+        "track_present": true
+      },
+      {
+        "has_demo_url": false,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 012",
+        "raw_content_omitted": true,
+        "team_member_count": 2,
+        "track_present": true
+      },
+      {
+        "has_demo_url": false,
+        "has_repo_url": false,
+        "prize_claim_count": 0,
+        "project_ref": "Project 013",
+        "raw_content_omitted": true,
+        "team_member_count": 2,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": false,
+        "prize_claim_count": 0,
+        "project_ref": "Project 016",
+        "raw_content_omitted": true,
+        "team_member_count": 2,
+        "track_present": true
+      },
+      {
+        "has_demo_url": false,
+        "has_repo_url": true,
+        "prize_claim_count": 0,
+        "project_ref": "Project 015",
+        "raw_content_omitted": true,
+        "team_member_count": 2,
+        "track_present": true
+      },
+      {
+        "has_demo_url": true,
+        "has_repo_url": false,
+        "prize_claim_count": 0,
+        "project_ref": "Project 016",
+        "raw_content_omitted": true,
+        "team_member_count": 1,
+        "track_present": false
+      }
+    ],
+    "quality_review": {
+      "approved": true,
+      "checks": [
+        {
+          "detail": "28 participant drafts generated.",
+          "name": "roster coverage",
+          "status": "pass"
+        },
+        {
+          "detail": "Winner emails mention only prizes tied to their project_id.",
+          "name": "winner accuracy",
+          "status": "pass"
+        },
+        {
+          "detail": "Non-winner emails avoid consolation language and mention the project showcase.",
+          "name": "non-winner tone",
+          "status": "pass"
+        },
+        {
+          "detail": "No Gmail drafts created and no emails sent before human approval.",
+          "name": "side effects",
+          "status": "pass"
+        }
+      ],
+      "required_human_review": [
+        "Spot-check prize names",
+        "Approve Gmail draft creation",
+        "Confirm no participant should be excluded"
+      ],
+      "reviewer": "agent:email_quality_reviewer"
+    }
+  },
+  "inputs": {
+    "input_hashes": {
+      "prizes_json_sha256": null,
+      "registration_csv_sha256": "991d64f4fbd5707c523bb25db930300243e2c1d6d168a8836a80a157d7275127",
+      "submissions_json_sha256": "595554fc8fad8b8c4e544ea538030132361353ab20719c2b93c46ae04445bf15"
+    },
+    "stats": {
+      "duplicate_email_rows_skipped": 3,
+      "invalid_email_rows_skipped": 0,
+      "participants_without_project_match": 15,
+      "prizes": 0,
+      "projects": 16,
+      "registration_rows": 62,
+      "submission_rows": 16,
+      "unchecked_rows_skipped": 19,
+      "unique_active_participants": 28,
+      "withdrawn_rows_skipped": 12
+    }
+  },
+  "kind": "hackathon_email_public_review_packet.v1",
+  "next_gates": [
+    "Organizer fixes unmatched participant/project rows before project-specific messaging.",
+    "Reviewed prize/winner data must be supplied before prize claims appear in drafts.",
+    "Gmail draft creation requires explicit human approval after packet review.",
+    "Sending/scheduling requires a separate explicit approval gate."
+  ],
+  "privacy": {
+    "classification": "public-safe redacted derivative",
+    "kept": [
+      "counts",
+      "approval keys",
+      "side-effect counts",
+      "generated workflow symbol and hash",
+      "draft coverage shape",
+      "review blockers"
+    ],
+    "omitted": [
+      "participant names",
+      "participant email addresses",
+      "raw project titles and descriptions",
+      "team/member names",
+      "repo/demo URLs",
+      "raw generated email body text",
+      "raw workflow event payloads",
+      "input file paths"
+    ]
+  },
+  "review_findings": [
+    "28 checked-in participant drafts were generated from the snapshot.",
+    "15 checked-in participant rows lacked a confident project match.",
+    "0 reviewed prize claims were available for draft personalization.",
+    "Skipped rows stayed explicit: 19 unchecked, 12 withdrawn, 3 duplicate emails.",
+    "External side effects stayed zero: Gmail drafts=0, emails sent=0.",
+    "Organizer data cleanup is required before project-specific follow-up copy is safe.",
+    "No reviewed prize data was supplied, so prize-specific claims were disabled."
+  ],
+  "source": "redacted from a private Hack the Valley snapshot dry run",
+  "workflow": {
+    "agent_calls": 7,
+    "approvals": [
+      "generated_workflow_execution",
+      "agent_email_quality_approval",
+      "human_email_batch_approval"
+    ],
+    "event_count": 41,
+    "generated_workflow": {
+      "agent_call": "workflow_architect_agent",
+      "approval_key": "generated_workflow_execution",
+      "source_sha256": "0c3177522fcbcaf74efafdb9296da555fcaf11b7c3c723e15975670d8b43d071",
+      "symbol": "participant_email_personalization_workflow"
+    },
+    "side_effects": {
+      "emails_sent": 0,
+      "gmail_drafts_created": 0
+    },
+    "status": "completed",
+    "workflow_id": "wf_htv_real_snapshot_dry_run_2026_06_05"
+  }
+}
