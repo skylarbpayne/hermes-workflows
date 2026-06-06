@@ -332,6 +332,9 @@ class WorkflowEngine:
                 source=decision.source,
                 idempotency_key=dedupe,
             )
+            with self._connect() as con:
+                row = con.execute("SELECT workflow_ref FROM workflow_instances WHERE id = ?", (decision.workflow_id,)).fetchone()
+                workflow_ref = row["workflow_ref"] if row is not None else None
             return ApprovalReceipt(
                 workflow_id=decision.workflow_id,
                 key=decision.key,
@@ -341,6 +344,7 @@ class WorkflowEngine:
                 status=result.status,
                 waiting_on=result.waiting_on,
                 result_summary=result.result if isinstance(result.result, dict) else None,
+                workflow_ref=workflow_ref,
             )
 
         self._validate_approval_decision_signal(decision.workflow_id, decision.key, payload, decision.source, dedupe)
@@ -360,6 +364,7 @@ class WorkflowEngine:
                     status=result.status,
                     waiting_on=result.waiting_on,
                     result_summary=result.result if isinstance(result.result, dict) else None,
+                    workflow_ref=row["workflow_ref"],
                 )
             inserted = self._append_event(
                 con,
@@ -390,6 +395,7 @@ class WorkflowEngine:
             status="decision_recorded",
             waiting_on=row["waiting_on"],
             result_summary=None,
+            workflow_ref=row["workflow_ref"],
         )
 
     def _approval_views_for_workflow(self, row: sqlite3.Row) -> list[ApprovalView]:

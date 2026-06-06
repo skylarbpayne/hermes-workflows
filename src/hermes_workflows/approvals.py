@@ -53,3 +53,4 @@ class ApprovalReceipt:
     status: str
     waiting_on: str | None
     result_summary: dict[str, Any] | None
+    workflow_ref: str | None = None

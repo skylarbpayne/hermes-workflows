@@ -78,11 +78,14 @@ The underlying signal payload remains boring for lower-level integrations:
 
 - CLI: `hermes-workflows approve|reject`.
 - Static dashboard: `hermes-workflows dashboard` renders status and approval shortcut commands.
-- Local approval server: `hermes-workflows serve-dashboard` exposes a small local form and POSTs into the canonical signal path.
+- Local approval server: `hermes-workflows serve-dashboard` exposes a small local form and posts through `submit_approval_decision(...)`.
+- Hermes Agent plugin: discovered via the `hermes_agent.plugins` entry point and exposes `workflow_approvals_list` / `workflow_approval_decide`.
 
-## Hermes plugin target
+See [`../integrations/hermes-plugin.md`](../integrations/hermes-plugin.md) for install/config details.
 
-A Hermes plugin should add profile-aware workflow approval operations without changing core:
+## Hermes plugin MVP
+
+The plugin MVP adds profile-aware workflow approval operations without changing core:
 
 - configure one or more workflow DBs per Hermes profile
 - list waiting approvals
@@ -92,16 +95,21 @@ A Hermes plugin should add profile-aware workflow approval operations without ch
 - post a workflow receipt after resume
 - optionally register/update a Workspaces/Artifact dashboard Thing
 
-Proposed tool names:
+Implemented tool names:
 
 ```text
-workflows_list_approvals(db?: string)
-workflows_get_status(workflow_id: string, db?: string)
-workflows_approve(workflow_id, key, action, human_id, channel, provenance)
-workflows_render_dashboard(db, slug?)
+workflow_approvals_list(db?: string, status?: string, limit?: int)
+workflow_approval_decide(db, workflow_id, key, action, by, channel?, message_id?, resume?=false)
 ```
 
-The plugin should be a thin adapter over `hermes_workflows`. It should not own replay, validation, or workflow execution.
+Exact-token gateway hook format:
+
+```text
+hwf-approval:v1:approve:<structured-token>
+hwf-approval:v1:reject:<structured-token>
+```
+
+The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, or workflow execution. `resume=false` is the safe default for plugin/gateway calls.
 
 ## Other agent/runtime adapters
 

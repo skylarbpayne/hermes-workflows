@@ -180,6 +180,7 @@ cp dist/workflows-real-run-output/packet.json examples/outputs/hackathon-real-dr
 - Invalid approval decisions fail closed before they are appended to workflow history or used to complete approval notification commands.
 - Approval to execute generated code is separate from approval to create drafts or send email.
 - The static dashboard is read-only; `serve-dashboard` can approve, but only through `submit_approval_decision()` / canonical `approval.decision` validation with human provenance.
+- Hermes Agent integration lives behind the `hermes-workflows-approvals` plugin entry point; see `docs/integrations/hermes-plugin.md`. Plugin/gateway approvals default to `resume=false` so chat callbacks record decisions without running downstream workflow code.
 - The CLI prints redacted summaries by default.
 - Public packets omit raw draft bodies, raw event payloads, private file paths, participant names/emails, project text, and URLs.
 - Raw snapshots, receipts, workflow DBs, and real review packets stay private.

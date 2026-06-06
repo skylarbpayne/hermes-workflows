@@ -17,6 +17,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - JSON-over-stdin subprocess agent runners through `SubprocessAgentRunner([...])`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
 - typed approval adapter API through `ApprovalView`, `ApprovalDecisionInput`, and `ApprovalReceipt`
+- Hermes Agent plugin adapter via `hermes_agent.plugins` entry point: `workflow_approvals_list` + `workflow_approval_decide`
 - manual `signal()` resume API for lower-level integrations
 - tiny cross-process CLI: `hermes-workflows start|run|worker|signal|approve|reject|status|list|events|outbox|dashboard|serve-dashboard|doctor`
 
@@ -58,7 +59,7 @@ The quickstart intentionally stops on approval before returning a final result. 
 
 See [`docs/architecture/runtime-vs-skills-subagents.md`](docs/architecture/runtime-vs-skills-subagents.md) for the accepted boundary.
 
-For operator debugging, use the read-only [`docs/operations/inspectability-cookbook.md`](docs/operations/inspectability-cookbook.md) path before mutating a workflow DB. For approval surfaces and the future Hermes plugin path, see [`docs/architecture/approval-adapters-and-hermes-plugin.md`](docs/architecture/approval-adapters-and-hermes-plugin.md).
+For operator debugging, use the read-only [`docs/operations/inspectability-cookbook.md`](docs/operations/inspectability-cookbook.md) path before mutating a workflow DB. For approval surfaces and the Hermes plugin path, see [`docs/architecture/approval-adapters-and-hermes-plugin.md`](docs/architecture/approval-adapters-and-hermes-plugin.md) and [`docs/integrations/hermes-plugin.md`](docs/integrations/hermes-plugin.md).
 
 Dynamic sub-workflow generation now uses Python as the workflow language: an `AgentStep` can return a typed `Workflow` value backed by generated Python source, and the parent can call or `ctx.map_workflow(...)` it as a durable child workflow. See [`docs/architecture/dynamic-sub-workflows.md`](docs/architecture/dynamic-sub-workflows.md) for the implemented first slice.
 
