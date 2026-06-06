@@ -8,8 +8,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from urllib.parse import quote
 
 from .workflow_values import Workflow
+
+
+TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
 
 
 class WorkflowWaiting(Exception):
@@ -62,13 +66,24 @@ class WorkflowEngine:
         db_path: Union[Path, str],
         *,
         agent_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        read_only: bool = False,
     ):
         self.db_path = Path(db_path)
         self.agent_runner = agent_runner
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self.read_only = read_only
+        if read_only:
+            if not self.db_path.exists():
+                raise FileNotFoundError(f"workflow DB does not exist: {self.db_path}")
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
+
+    def _ensure_writable(self, operation: str) -> None:
+        if self.read_only:
+            raise RuntimeError(f"WorkflowEngine is read-only; cannot {operation}")
 
     def start(self, workflow_fn: Callable[..., Any], inputs: Any, *, workflow_id: str) -> RunResult:
+        self._ensure_writable("start workflows")
         workflow_name = getattr(workflow_fn, "__workflow_name__", workflow_fn.__name__)
         with self._connect() as con:
             existing = con.execute("SELECT id FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
@@ -99,12 +114,14 @@ class WorkflowEngine:
         durable waits.
         """
 
+        self._ensure_writable("run workflows")
         result = self.start(workflow_fn, inputs, workflow_id=workflow_id)
         return self.drain(workflow_id, initial=result)
 
     def drain(self, workflow_id: str, *, initial: Optional[RunResult] = None) -> RunResult:
         """Execute pending local run_step commands until no runnable command remains."""
 
+        self._ensure_writable("drain workflow commands")
         result = initial or self._result_from_instance(workflow_id)
         while True:
             command = self.claim_command(workflow_id, worker_id="local-drain", lease_seconds=30, command_type=None)
@@ -124,8 +141,9 @@ class WorkflowEngine:
         *,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> RunResult:
+        self._ensure_writable("complete workflow steps")
         instance = self._instance(workflow_id)
-        if instance["status"] == "cancelled":
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES:
             return self._result_from_instance(workflow_id)
 
         workflow_fn = self._workflow_fn_for_instance(instance)
@@ -134,7 +152,7 @@ class WorkflowEngine:
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
-            if row["status"] == "cancelled":
+            if row["status"] in TERMINAL_WORKFLOW_STATUSES:
                 return self._result_from_row(row)
 
             payload = {"output": output}
@@ -177,19 +195,22 @@ class WorkflowEngine:
         source: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> RunResult:
+        self._ensure_writable("record workflow signals")
         instance = self._instance(workflow_id)
-        if instance["status"] == "cancelled":
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES:
             return self._result_from_instance(workflow_id)
 
         workflow_fn = self._workflow_fn_for_instance(instance)
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
+        if signal_type == "approval.decision":
+            self._validate_approval_decision_signal(workflow_id, key, payload, source, dedupe)
         inserted = False
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
-            if row["status"] == "cancelled":
+            if row["status"] in TERMINAL_WORKFLOW_STATUSES:
                 return self._result_from_row(row)
 
             inserted = self._append_event(
@@ -222,6 +243,65 @@ class WorkflowEngine:
         result = self._run_decider(workflow_id, workflow_fn) if inserted else self._result_from_instance(workflow_id)
         return self.drain(workflow_id, initial=result)
 
+    def _validate_approval_decision_signal(
+        self,
+        workflow_id: str,
+        key: str,
+        payload: Any,
+        source: Any,
+        idempotency_key: str,
+    ) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError(f"approval {key} decision payload must be an object")
+
+        event_key = f"approval:{key}"
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT payload_json
+                FROM workflow_events
+                WHERE workflow_id = ? AND type = 'ApprovalRequested' AND key = ?
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (workflow_id, event_key),
+            ).fetchone()
+            existing_decision = con.execute(
+                """
+                SELECT payload_json, idempotency_key
+                FROM workflow_events
+                WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (workflow_id, f"signal:approval.decision:{key}"),
+            ).fetchone()
+
+        if existing_decision is not None:
+            if existing_decision["idempotency_key"] == idempotency_key:
+                existing_payload = JsonCodec.loads(existing_decision["payload_json"])
+                expected_payload = {"signal_type": "approval.decision", "key": key, "payload": payload, "source": source}
+                if existing_payload == expected_payload:
+                    return
+                raise ValueError(f"approval {key} idempotency key was reused with a different decision")
+            raise ValueError(f"approval {key} already has a recorded decision")
+
+        if row is None:
+            raise ValueError(f"approval {key} has no matching ApprovalRequested event")
+
+        request_payload = JsonCodec.loads(row["payload_json"])
+        if not isinstance(request_payload, dict):
+            raise ValueError(f"approval {key} has invalid ApprovalRequested payload")
+
+        allowed = request_payload.get("allowed") or ["approve", "reject"]
+        if payload.get("action") not in allowed:
+            raise ValueError(f"approval {key} action is not allowed: {payload.get('action')}")
+
+        _validate_approval_source(
+            key,
+            str(request_payload.get("approver") or "human"),
+            payload,
+            source,
+        )
+
     def cancel_workflow(
         self,
         workflow_id: str,
@@ -231,6 +311,8 @@ class WorkflowEngine:
         superseded_by: Optional[str] = None,
     ) -> RunResult:
         """Mark a workflow terminal-cancelled while preserving an audit event."""
+
+        self._ensure_writable("cancel workflows")
 
         payload = {
             "type": "cancelled",
@@ -300,6 +382,8 @@ class WorkflowEngine:
         command_type: Optional[str] = "run_step",
     ) -> Optional[Dict[str, Any]]:
         """Claim one pending or lease-expired command for a worker."""
+
+        self._ensure_writable("claim workflow commands")
 
         now = _now()
         type_clause = "AND c.type = ?" if command_type is not None else "AND c.type IN ('run_step', 'start_child_workflow')"
@@ -1364,7 +1448,11 @@ class WorkflowEngine:
             self._ensure_command_columns(con)
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path)
+        if self.read_only:
+            uri_path = quote(str(self.db_path.resolve()), safe="/")
+            con = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
+        else:
+            con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
         return con
 

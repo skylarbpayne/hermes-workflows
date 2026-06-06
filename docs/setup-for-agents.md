@@ -20,6 +20,23 @@ hermes-workflows --help
 python -m hermes_workflows --help
 ```
 
+Render a local read-only dashboard for any existing workflow DB:
+
+```bash
+hermes-workflows dashboard --db /tmp/workflow.sqlite --out /tmp/workflows-dashboard.html
+```
+
+Or run a local approval server that still routes every button through the canonical `approval.decision` signal path:
+
+```bash
+hermes-workflows serve-dashboard my_package.workflow:main \
+  --db /tmp/workflow.sqlite \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+That local server is intentionally boring: it is not an agent runtime, and it does not invent a second approval model. It only captures human provenance and calls the same engine signal API that Discord, Telegram, a Hermes plugin, or another runtime adapter should call.
+
 ## The mental model
 
 A workflow function is a decider. It replays from the top on every run, resolves completed steps from SQLite history, and exits cleanly whenever it needs a step, signal, or approval.
@@ -152,7 +169,10 @@ cp dist/workflows-real-run-output/packet.json examples/outputs/hackathon-real-dr
 ## Safety defaults
 
 - Generated workflow code is inspectable, not silently trusted.
+- Approval decisions are accepted only after the matching approval request exists.
+- Invalid approval decisions fail closed before they are appended to workflow history or used to complete approval notification commands.
 - Approval to execute generated code is separate from approval to create drafts or send email.
+- The dashboard is read-only; it surfaces approval keys and diagnostics but does not approve anything itself.
 - The CLI prints redacted summaries by default.
 - Public packets omit raw draft bodies, raw event payloads, private file paths, participant names/emails, project text, and URLs.
 - Raw snapshots, receipts, workflow DBs, and real review packets stay private.
