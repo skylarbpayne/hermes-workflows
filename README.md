@@ -25,7 +25,9 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 
 ```bash
 python -m pip install -e '.[dev]'
-hermes-workflows doctor --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
+hermes-workflows doctor \
+  --db /tmp/hermes-workflows-doctor.sqlite \
+  --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
 
 hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
   --db /tmp/hermes-workflows-quickstart.sqlite \
@@ -36,11 +38,18 @@ hermes-workflows dashboard \
   --db /tmp/hermes-workflows-quickstart.sqlite \
   --out /tmp/hermes-workflows-dashboard.html
 
-# Optional: run a local approval UI instead of hand-typing the approve command.
+# Optional: run a read-only local status UI. It will not mutate workflow state.
 hermes-workflows serve-dashboard hermes_workflows.examples.trip:trip_planning_workflow \
   --db /tmp/hermes-workflows-quickstart.sqlite \
   --host 127.0.0.1 \
   --port 8765
+
+# To approve from the local dashboard button path, restart with explicit mutation enabled.
+hermes-workflows serve-dashboard hermes_workflows.examples.trip:trip_planning_workflow \
+  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --enable-approval-actions
 
 hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
   --db /tmp/hermes-workflows-quickstart.sqlite \
