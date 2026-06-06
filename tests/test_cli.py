@@ -335,6 +335,7 @@ def test_cli_status_and_list_expose_inspectable_workflow_state(tmp_path):
             {
                 "workflow_id": "wf_cli",
                 "workflow_name": "demo_workflow",
+                "workflow_ref": "demo_wf:demo_workflow",
                 "status": "waiting",
                 "waiting_on": "signal:approval.decision:approve_plan",
             }
@@ -416,6 +417,10 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "approver": "human:skylar",
             "prompt": "Approve plan?",
             "artifact": {"summary": "Plan for NYC"},
+            "allowed": ["approve", "reject"],
+            "authority": [],
+            "timeout": None,
+            "requested_seq": 5,
             "decision": None,
             "source": None,
         }
@@ -431,6 +436,10 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "approver": "human:skylar",
             "prompt": "Approve plan?",
             "artifact": {"summary": "Plan for LA"},
+            "allowed": ["approve", "reject"],
+            "authority": [],
+            "timeout": None,
+            "requested_seq": 5,
             "decision": {"action": "approve", "by": "skylar"},
             "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/3"},
         }
@@ -558,3 +567,363 @@ def test_cli_outbox_flags_stale_completed_workflow_approval_rows_without_mutatin
         "matching_signal_exists",
         "terminal_workflow_has_pending_command",
     ]
+
+
+def test_cli_dashboard_renders_workflows_and_approvals_without_mutating_db(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    out = tmp_path / "dashboard.html"
+
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_waiting",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+    with sqlite3.connect(db) as con:
+        before = {
+            "events": con.execute("SELECT COUNT(*) FROM workflow_events").fetchone()[0],
+            "commands": con.execute("SELECT COUNT(*) FROM workflow_commands_outbox").fetchone()[0],
+        }
+
+    payload = json.loads(run_cli(tmp_path, "dashboard", "--db", str(db), "--out", str(out)).stdout)
+
+    assert payload == {"dashboard": str(out)}
+    html = out.read_text(encoding="utf-8")
+    assert "Hermes Workflows Dashboard" in html
+    assert "Read-only local dashboard" in html
+    assert "wf_waiting" in html
+    assert "approval:approve_plan" in html
+    assert "Approve plan?" in html
+    assert "hermes-workflows approve" in html
+    assert "--key approve_plan" in html
+    assert "active_wait" in html
+    with sqlite3.connect(db) as con:
+        after = {
+            "events": con.execute("SELECT COUNT(*) FROM workflow_events").fetchone()[0],
+            "commands": con.execute("SELECT COUNT(*) FROM workflow_commands_outbox").fetchone()[0],
+        }
+    assert after == before
+
+
+def test_cli_dashboard_rejects_missing_db_without_creating_it(tmp_path):
+    missing_db = tmp_path / "missing.sqlite"
+    with pytest.raises(subprocess.CalledProcessError):
+        run_cli(tmp_path, "dashboard", "--db", str(missing_db), "--out", str(tmp_path / "dashboard.html"))
+    assert not missing_db.exists()
+
+def test_cli_approve_shortcut_sends_human_provenance_signal(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_cli_approve",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    payload = json.loads(
+        run_cli(
+            tmp_path,
+            "approve",
+            "demo_wf:demo_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_cli_approve",
+            "--key",
+            "approve_plan",
+            "--by",
+            "skylar",
+            "--channel",
+            "discord",
+            "--message-url",
+            "discord://thread/1/message/2",
+            "--note",
+            "reviewed in cli shortcut",
+        ).stdout
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"]["approved_by"] == "skylar"
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli_approve").stdout)
+    approval = status_payload["approvals"][0]
+    assert approval["decision"]["action"] == "approve"
+    assert approval["source"] == {
+        "kind": "human",
+        "id": "skylar",
+        "channel": "discord",
+        "message_url": "discord://thread/1/message/2",
+    }
+
+
+def test_cli_doctor_reports_importable_packaged_example(tmp_path):
+    payload = json.loads(
+        run_cli(
+            tmp_path,
+            "doctor",
+            "--db",
+            str(tmp_path / "workflow.sqlite"),
+            "--workflow-ref",
+            "hermes_workflows.examples.trip:trip_planning_workflow",
+        ).stdout
+    )
+
+    assert payload["doctor"]["ok"] is True
+    assert payload["doctor"]["workflow_ref_importable"] is True
+    assert payload["doctor"]["db_exists"] is False
+
+
+def test_packaged_trip_example_runs_without_repo_examples_path(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    run_payload = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "hermes_workflows.examples.trip:trip_planning_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_trip_quickstart",
+            "--input-json",
+            '{"destination":"NYC","approver":"human:operator"}',
+        ).stdout
+    )
+    assert run_payload["status"] == "waiting"
+    assert run_payload["waiting_on"] == "signal:approval.decision:approve_trip_plan"
+
+    approved = json.loads(
+        run_cli(
+            tmp_path,
+            "approve",
+            "hermes_workflows.examples.trip:trip_planning_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_trip_quickstart",
+            "--key",
+            "approve_trip_plan",
+            "--by",
+            "operator",
+            "--channel",
+            "cli",
+            "--message-id",
+            "manual-approval-1",
+        ).stdout
+    )
+    assert approved["status"] == "completed"
+    assert approved["result"]["approved"] is True
+    assert approved["result"]["approved_by"] == "operator"
+
+
+def test_cli_serve_dashboard_is_read_only_without_approval_actions(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_web_read_only",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_workflows",
+            "serve-dashboard",
+            "demo_wf:demo_workflow",
+            "--db",
+            str(db),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ],
+        cwd=Path.cwd(),
+        env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        line = proc.stdout.readline().strip()
+        payload = json.loads(line)
+
+        from urllib.error import HTTPError
+        from urllib.parse import urlencode
+        from urllib.request import Request, urlopen
+
+        html = urlopen(payload["url"], timeout=5).read().decode("utf-8")
+        assert "Hermes Workflows Dashboard" in html
+        assert "Local approval form" not in html
+
+        body = urlencode(
+            {
+                "workflow_id": "wf_web_read_only",
+                "key": "approve_plan",
+                "by": "skylar",
+                "channel": "local-dashboard",
+                "message_id": "web-click-1",
+            }
+        ).encode("utf-8")
+        request = Request(payload["url"] + "/approve", data=body, method="POST")
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(request, timeout=5)
+        assert exc_info.value.code == 405
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_web_read_only").stdout)
+    assert status_payload["status"] == "waiting"
+
+
+def test_cli_serve_dashboard_read_only_does_not_import_workflow_module(tmp_path):
+    marker = tmp_path / "imported.txt"
+    (tmp_path / "side_effect_wf.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('imported')\n"
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def side_effect_workflow(ctx, inputs):\n"
+        "    return {'ok': True}\n"
+    )
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_import_guard",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_workflows",
+            "serve-dashboard",
+            "side_effect_wf:side_effect_workflow",
+            "--db",
+            str(db),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ],
+        cwd=Path.cwd(),
+        env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        json.loads(proc.stdout.readline().strip())
+        assert not marker.exists()
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
+def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
+    (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    run_cli(
+        tmp_path,
+        "run",
+        "demo_wf:demo_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_web_approval",
+        "--input-json",
+        '{"destination":"NYC"}',
+    )
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hermes_workflows",
+            "serve-dashboard",
+            "demo_wf:demo_workflow",
+            "--db",
+            str(db),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--once",
+            "--enable-approval-actions",
+        ],
+        cwd=Path.cwd(),
+        env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        line = proc.stdout.readline().strip()
+        payload = json.loads(line)
+        assert payload["url"].startswith("http://127.0.0.1:")
+
+        from urllib.parse import urlencode
+        from urllib.request import Request, urlopen
+
+        html = urlopen(payload["url"], timeout=5).read().decode("utf-8")
+        assert "Hermes Workflows Dashboard" in html
+        assert "approve_plan" in html
+
+        body = urlencode(
+            {
+                "workflow_id": "wf_web_approval",
+                "key": "approve_plan",
+                "by": "skylar",
+                "channel": "local-dashboard",
+                "message_id": "web-click-1",
+            }
+        ).encode("utf-8")
+        request = Request(payload["url"] + "/approve", data=body, method="POST")
+        response = urlopen(request, timeout=5)
+        assert response.status == 200
+        assert "Approval recorded" in response.read().decode("utf-8")
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_web_approval").stdout)
+    assert status_payload["status"] == "completed"
+    assert status_payload["result"]["approved_by"] == "skylar"
+    approval = status_payload["approvals"][0]
+    assert approval["source"] == {
+        "kind": "human",
+        "id": "skylar",
+        "channel": "local-dashboard",
+        "message_id": "web-click-1",
+    }

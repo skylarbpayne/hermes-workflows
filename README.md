@@ -16,8 +16,42 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - render-only prompt-file steps through `AgentPrompt("prompt.md", **vars)`
 - JSON-over-stdin subprocess agent runners through `SubprocessAgentRunner([...])`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
-- manual `signal()` resume API
-- tiny cross-process CLI: `python -m hermes_workflows start|run|worker|signal|status|list|events|outbox`
+- typed approval adapter API through `ApprovalView`, `ApprovalDecisionInput`, and `ApprovalReceipt`
+- Hermes Agent plugin adapter via `hermes_agent.plugins` entry point: `workflow_approvals_list` + `workflow_approval_decide`
+- manual `signal()` resume API for lower-level integrations
+- tiny cross-process CLI: `hermes-workflows start|run|worker|signal|approve|reject|status|list|events|outbox|dashboard|serve-dashboard|doctor`
+
+## 60-second quickstart
+
+```bash
+python -m pip install -e '.[dev]'
+hermes-workflows doctor --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
+
+hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
+  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --id wf_trip_quickstart \
+  --input-json '{"destination":"NYC","approver":"human:operator"}'
+
+hermes-workflows dashboard \
+  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --out /tmp/hermes-workflows-dashboard.html
+
+# Optional: run a local approval UI instead of hand-typing the approve command.
+hermes-workflows serve-dashboard hermes_workflows.examples.trip:trip_planning_workflow \
+  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --host 127.0.0.1 \
+  --port 8765
+
+hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
+  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --id wf_trip_quickstart \
+  --key approve_trip_plan \
+  --by operator \
+  --channel cli \
+  --message-id manual-approval-1
+```
+
+The quickstart intentionally stops on approval before returning a final result. That is the point: approval is a durable gate, not a comment the agent gets to reinterpret later.
 
 ## Architecture boundary
 
@@ -25,7 +59,7 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 
 See [`docs/architecture/runtime-vs-skills-subagents.md`](docs/architecture/runtime-vs-skills-subagents.md) for the accepted boundary.
 
-For operator debugging, use the read-only [`docs/operations/inspectability-cookbook.md`](docs/operations/inspectability-cookbook.md) path before mutating a workflow DB.
+For operator debugging, use the read-only [`docs/operations/inspectability-cookbook.md`](docs/operations/inspectability-cookbook.md) path before mutating a workflow DB. For approval surfaces and the Hermes plugin path, see [`docs/architecture/approval-adapters-and-hermes-plugin.md`](docs/architecture/approval-adapters-and-hermes-plugin.md) and [`docs/integrations/hermes-plugin.md`](docs/integrations/hermes-plugin.md).
 
 Dynamic sub-workflow generation now uses Python as the workflow language: an `AgentStep` can return a typed `Workflow` value backed by generated Python source, and the parent can call or `ctx.map_workflow(...)` it as a durable child workflow. See [`docs/architecture/dynamic-sub-workflows.md`](docs/architecture/dynamic-sub-workflows.md) for the implemented first slice.
 
@@ -69,7 +103,7 @@ PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
 
 The CLI prints a redacted summary by default. Use `--full-receipt` only with synthetic data; real receipts and review packets may contain participant PII.
 
-For a fuller agent setup walkthrough, see [`docs/setup-for-agents.md`](docs/setup-for-agents.md). For a redacted output example from a real dry run, see [`docs/output/hackathon-redacted-packet-2026-06-05/`](docs/output/hackathon-redacted-packet-2026-06-05/) and [`examples/outputs/hackathon-real-dry-run.redacted.json`](examples/outputs/hackathon-real-dry-run.redacted.json).
+For a fuller agent setup walkthrough, see [`docs/setup-for-agents.md`](docs/setup-for-agents.md). Agents can also load the in-repo skill at [`skills/devops/hermes-workflows/SKILL.md`](skills/devops/hermes-workflows/SKILL.md) for the approval-safe operating loop. The launch-hardening architecture/adoption review lives at [`docs/architecture/launch-hardening-review-2026-06-05.md`](docs/architecture/launch-hardening-review-2026-06-05.md). For a redacted output example from a real dry run, see [`docs/output/hackathon-redacted-packet-2026-06-05/`](docs/output/hackathon-redacted-packet-2026-06-05/) and [`examples/outputs/hackathon-real-dry-run.redacted.json`](examples/outputs/hackathon-real-dry-run.redacted.json).
 
 Redacted output packets intentionally keep counts, approval keys, side-effect receipts, generated workflow hashes, and blocker summaries while omitting names, emails, raw project content, URLs, raw draft bodies, raw event payloads, and private file paths.
 
@@ -93,7 +127,14 @@ So this looks like normal Python:
 async def trip_planning(ctx, inputs):
     constraints = await collect_constraints(ctx, inputs)
     options = await draft_options(ctx, constraints)
-    approval = await ctx.wait_for("approval.granted", key="approve_trip_plan")
+    approval = await ctx.approval.request(
+        "Approve trip plan?",
+        key="approve_trip_plan",
+        artifact={"options": options},
+        approver="human:skylar",
+        allowed=["approve", "reject"],
+        authority=["book_travel"],
+    )
     return {"options": options, "approved_by": approval["by"]}
 ```
 
@@ -118,7 +159,14 @@ async def draft_options(ctx, constraints):
 async def trip_planning(ctx, inputs):
     constraints = await collect_constraints(ctx, inputs)
     options = await draft_options(ctx, constraints)
-    approval = await ctx.wait_for("approval.granted", key="approve_trip_plan")
+    approval = await ctx.approval.request(
+        "Approve trip plan?",
+        key="approve_trip_plan",
+        artifact={"options": options},
+        approver="human:skylar",
+        allowed=["approve", "reject"],
+        authority=["book_travel"],
+    )
     return {"options": options, "approved_by": approval["by"]}
 
 engine = WorkflowEngine("workflow.sqlite")
@@ -126,15 +174,20 @@ engine = WorkflowEngine("workflow.sqlite")
 # Start and drain local step commands until approval is needed.
 print(engine.run_until_idle(trip_planning, {"destination": "NYC"}, workflow_id="wf_trip"))
 
-# Manual signal resumes the decider after a process restart and drains downstream steps.
+# Typed approval resumes the decider after a process restart and drains downstream steps.
+from hermes_workflows import ApprovalDecisionInput
+
 engine = WorkflowEngine("workflow.sqlite")
-print(engine.signal(
-    "wf_trip",
-    "approval.decision",
-    key="approve_trip_plan",
-    payload={"action": "approve", "by": "skylar"},
-    source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
-    idempotency_key="discord-message-1",
+print(engine.submit_approval_decision(
+    ApprovalDecisionInput(
+        workflow_id="wf_trip",
+        key="approve_trip_plan",
+        action="approve",
+        by="skylar",
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+        idempotency_key="discord-message-1",
+    ),
+    resume=True,
 ))
 ```
 
@@ -333,19 +386,35 @@ The PR workflow should end waiting on `signal:approval.decision:approve_pr_landi
 
 ## Human approval provenance
 
-`ctx.approval.request(..., approver="human:...")` now requires `approval.decision` signals to include human provenance. Agent-authored or missing-source approval signals fail closed instead of quietly advancing the workflow.
+`ctx.approval.request(..., approver="human:...")` now requires human provenance. Adapters should normally use `ApprovalDecisionInput` plus `WorkflowEngine.submit_approval_decision(...)`; lower-level integrations can still emit the underlying `approval.decision` signal directly. Agent-authored or missing-source approval decisions fail closed instead of quietly advancing the workflow.
 
 ```python
-engine.signal(
-    "wf_trip",
-    "approval.decision",
-    key="approve_trip_plan",
-    payload={"action": "approve", "by": "skylar"},
-    source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+from hermes_workflows import ApprovalDecisionInput
+
+engine.submit_approval_decision(
+    ApprovalDecisionInput(
+        workflow_id="wf_trip",
+        key="approve_trip_plan",
+        action="approve",
+        by="skylar",
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+    )
 )
 ```
 
-The decision returned to workflow code includes the validated `source` so final reports can show who approved, where, and with what provenance.
+The decision returned to workflow code includes the validated `source` so final reports can show who approved, where, and with what provenance. Approval decisions are single-use per key: a later/different decision for the same approval key is rejected while the workflow is still active, and terminal workflows ignore late signals so completed results cannot be rewritten after the fact.
+
+Shortcut commands are available for the common human path:
+
+```bash
+hermes-workflows approve examples.first_real_trip_workflow:first_real_trip_workflow \
+  --db /tmp/hermes-workflows.sqlite \
+  --id wf_first_real_trip \
+  --key approve_trip_plan \
+  --by skylar \
+  --channel discord \
+  --message-url discord://...
+```
 
 ## Minimal CLI
 

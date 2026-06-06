@@ -28,8 +28,11 @@ Issues = "https://github.com/skylarbpayne/hermes-workflows/issues"
 hermes-workflows = "hermes_workflows.cli:main"
 hermes-workflows-agent-cli-adapter = "hermes_workflows.agent_cli_adapter:main"
 
+[project.entry-points."hermes_agent.plugins"]
+hermes-workflows-approvals = "hermes_workflows.hermes_plugin_approvals"
+
 [project.optional-dependencies]
-dev = ["pytest>=7", "build>=1"]
+dev = ["pytest>=7", "build>=1", "tomli>=2; python_version<'3.11'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

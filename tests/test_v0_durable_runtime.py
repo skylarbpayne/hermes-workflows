@@ -107,3 +107,23 @@ def test_completed_steps_are_memoized_and_manual_signal_resumes_workflow(tmp_pat
     )
     assert duplicate.status == "completed"
     assert [event["type"] for event in restarted.events("wf_trip")].count("SignalReceived") == 1
+
+
+def test_read_only_engine_rejects_mutation_methods_before_sqlite_write(tmp_path):
+    db = tmp_path / "wf.sqlite"
+    writer = WorkflowEngine(db)
+    writer.start(trip_planning, {"destination": "NYC"}, workflow_id="wf_trip")
+
+    reader = WorkflowEngine(db, read_only=True)
+    assert reader.workflow_status("wf_trip")["waiting_on"] == "step:collect_constraints:0"
+
+    with pytest.raises(RuntimeError, match="WorkflowEngine is read-only"):
+        reader.start(trip_planning, {"destination": "LA"}, workflow_id="wf_other")
+    with pytest.raises(RuntimeError, match="WorkflowEngine is read-only"):
+        reader.complete_step("wf_trip", "step:collect_constraints:0", {"hard": ["no red eyes"]})
+    with pytest.raises(RuntimeError, match="WorkflowEngine is read-only"):
+        reader.signal("wf_trip", "approval.granted", key="approve_trip_plan", payload={"by": "skylar"})
+    with pytest.raises(RuntimeError, match="WorkflowEngine is read-only"):
+        reader.claim_command("wf_trip", worker_id="read-only-worker")
+
+    assert [event["type"] for event in writer.events("wf_trip")] == ["WorkflowStarted", "StepRequested"]

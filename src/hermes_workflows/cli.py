@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from .approvals import ApprovalDecisionInput
+from .dashboard import render_dashboard
+from .dashboard_server import serve_dashboard
 from .engine import JsonCodec, RunResult, WorkflowEngine
 
 
@@ -37,6 +40,51 @@ def positive_int(value: str) -> int:
 
 def print_json(payload: Any) -> None:
     print(JsonCodec.dumps(payload))
+
+
+def human_source_from_args(args: argparse.Namespace) -> dict[str, str]:
+    source = {"kind": "human", "id": args.by, "channel": args.channel}
+    if args.message_url:
+        source["message_url"] = args.message_url
+    if args.message_id:
+        source["message_id"] = args.message_id
+    if args.event_id:
+        source["event_id"] = args.event_id
+    if not any(key in source for key in ("message_url", "message_id", "event_id")):
+        raise SystemExit("approval shortcuts require --message-url, --message-id, or --event-id for provenance")
+    return source
+
+
+def approval_payload_from_args(args: argparse.Namespace, action: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {"action": action, "by": args.by}
+    if args.note:
+        payload["note"] = args.note
+    if getattr(args, "reason", None):
+        payload["reason"] = args.reason
+    return payload
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    import sqlite3
+    import sys
+
+    checks = {
+        "python": sys.version.split()[0],
+        "sqlite": sqlite3.sqlite_version,
+        "db_exists": args.db.exists() if args.db else None,
+        "db_parent_writable": args.db.parent.exists() and args.db.parent.is_dir() if args.db else None,
+    }
+    if args.workflow_ref:
+        try:
+            load_workflow(args.workflow_ref)
+        except Exception as exc:  # pragma: no cover - exact import errors are environment-specific.
+            checks["workflow_ref_importable"] = False
+            checks["workflow_ref_error"] = str(exc)
+        else:
+            checks["workflow_ref_importable"] = True
+    checks["ok"] = bool(checks["python"] and checks["sqlite"] and checks["db_parent_writable"])
+    print_json({"doctor": checks})
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,15 +162,63 @@ def main(argv: list[str] | None = None) -> int:
     outbox.add_argument("--id", dest="workflow_id", help="Only include commands for this workflow id")
     outbox.add_argument("--status", help="Only include commands with this status")
 
+    dashboard = sub.add_parser("dashboard", help="Render a read-only local HTML workflow dashboard")
+    dashboard.add_argument("--db", required=True, type=Path)
+    dashboard.add_argument("--out", required=True, type=Path)
+    dashboard.add_argument("--status", help="Only include workflow instances with this status")
+    dashboard.add_argument("--recent-events", type=positive_int, default=5)
+
+    serve_dashboard_cmd = sub.add_parser(
+        "serve-dashboard",
+        help="Serve a read-only local workflow dashboard; approval POST forms require --enable-approval-actions",
+    )
+    serve_dashboard_cmd.add_argument("workflow_ref", help="module:function; imported so explicit approval actions can resume the workflow")
+    serve_dashboard_cmd.add_argument("--db", required=True, type=Path)
+    serve_dashboard_cmd.add_argument("--host", default="127.0.0.1")
+    serve_dashboard_cmd.add_argument("--port", type=int, default=8765)
+    serve_dashboard_cmd.add_argument("--once", action="store_true", help="Stop after one approval POST; useful for tests/smokes")
+    serve_dashboard_cmd.add_argument(
+        "--enable-approval-actions",
+        action="store_true",
+        help="Enable local /approve POST forms; omitted by default so serve-dashboard stays read-only.",
+    )
+
+    doctor = sub.add_parser("doctor", help="Check local install, SQLite, DB path, and optional workflow import")
+    doctor.add_argument("--db", type=Path, default=Path(".hermes/workflows.sqlite"))
+    doctor.add_argument("--workflow-ref", help="Optional module:function import smoke")
+
+    for action_name in ("approve", "reject"):
+        approval = sub.add_parser(action_name, help=f"Send a human-provenance {action_name} decision to an approval gate")
+        approval.add_argument("workflow_ref", help="module:function; imported so the decider is registered")
+        approval.add_argument("--db", required=True, type=Path)
+        approval.add_argument("--id", required=True, dest="workflow_id")
+        approval.add_argument("--key", required=True)
+        approval.add_argument("--by", required=True, help="Human id; must match human:<id> approver when specified")
+        approval.add_argument("--channel", required=True, help="Where this approval was captured, e.g. discord, cli, local-dashboard")
+        approval.add_argument("--message-url")
+        approval.add_argument("--message-id")
+        approval.add_argument("--event-id")
+        approval.add_argument("--note")
+        approval.add_argument("--idempotency-key")
+        if action_name == "reject":
+            approval.add_argument("--reason")
+
     args = parser.parse_args(argv)
-    engine = WorkflowEngine(args.db)
-    workflow = load_workflow(args.workflow_ref) if hasattr(args, "workflow_ref") else None
+    if args.command == "doctor":
+        return run_doctor(args)
+
+    read_only_commands = {"status", "list", "events", "outbox", "dashboard", "serve-dashboard"}
+    engine = WorkflowEngine(args.db, read_only=args.command in read_only_commands)
+    workflow = None
+    if hasattr(args, "workflow_ref") and not (args.command == "serve-dashboard" and not args.enable_approval_actions):
+        workflow = load_workflow(args.workflow_ref)
 
     if args.command == "start":
         result = engine.start(
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
+            workflow_ref=args.workflow_ref,
         )
         print_json(result_payload(result))
     elif args.command == "run":
@@ -130,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
+            workflow_ref=args.workflow_ref,
         )
         print_json(result_payload(result))
     elif args.command == "worker":
@@ -157,6 +254,36 @@ def main(argv: list[str] | None = None) -> int:
             idempotency_key=args.idempotency_key,
         )
         print_json(result_payload(result))
+    elif args.command in {"approve", "reject"}:
+        receipt = engine.submit_approval_decision(
+            ApprovalDecisionInput(
+                workflow_id=args.workflow_id,
+                key=args.key,
+                action=args.command,
+                by=args.by,
+                source=human_source_from_args(args),
+                note=args.note,
+                reason=getattr(args, "reason", None),
+                idempotency_key=args.idempotency_key
+                or f"{args.channel}:{args.workflow_id}:{args.key}:{args.command}:{args.message_url or args.message_id or args.event_id}",
+            ),
+            resume=True,
+        )
+        print_json(
+            {
+                "workflow_id": receipt.workflow_id,
+                "status": receipt.status,
+                "waiting_on": receipt.waiting_on,
+                "approval": {
+                    "key": receipt.key,
+                    "action": receipt.action,
+                    "by": receipt.by,
+                    "source": receipt.source,
+                },
+                "result": receipt.result_summary,
+                "error": None,
+            }
+        )
     elif args.command == "reconcile-child":
         result = engine.reconcile_child_result(args.workflow_id, args.child_key)
         print_json(result_payload(result))
@@ -187,6 +314,21 @@ def main(argv: list[str] | None = None) -> int:
         print_json({"events": engine.events(args.workflow_id, limit=args.limit)})
     elif args.command == "outbox":
         print_json({"commands": engine.outbox_commands(workflow_id=args.workflow_id, status=args.status)})
+    elif args.command == "dashboard":
+        out_path = render_dashboard(engine, args.out, status=args.status, recent_events=args.recent_events)
+        print_json({"dashboard": str(out_path)})
+    elif args.command == "serve-dashboard":
+        if args.enable_approval_actions and workflow is None:  # pragma: no cover - argparse always supplies workflow_ref here.
+            raise SystemExit("serve-dashboard approval actions require workflow_ref")
+        serve_dashboard(
+            db_path=args.db,
+            workflow=workflow,
+            workflow_ref=args.workflow_ref,
+            host=args.host,
+            port=args.port,
+            once=args.once,
+            approval_actions=args.enable_approval_actions,
+        )
     else:  # pragma: no cover - argparse prevents this.
         raise SystemExit(f"unknown command: {args.command}")
 

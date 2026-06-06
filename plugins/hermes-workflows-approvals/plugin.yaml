@@ -1,0 +1,9 @@
+name: hermes-workflows-approvals
+version: "0.1.0"
+description: Hermes Agent adapter for hermes-workflows human approvals
+kind: standalone
+provides_tools:
+  - workflow_approvals_list
+  - workflow_approval_decide
+provides_hooks:
+  - pre_gateway_dispatch

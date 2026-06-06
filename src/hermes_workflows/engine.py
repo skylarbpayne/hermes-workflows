@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import json
 import sqlite3
@@ -8,8 +9,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from urllib.parse import quote
 
+from .approvals import ApprovalDecisionInput, ApprovalReceipt, ApprovalView
 from .workflow_values import Workflow
+
+
+TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
 
 
 class WorkflowWaiting(Exception):
@@ -62,13 +68,31 @@ class WorkflowEngine:
         db_path: Union[Path, str],
         *,
         agent_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        read_only: bool = False,
     ):
         self.db_path = Path(db_path)
         self.agent_runner = agent_runner
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self.read_only = read_only
+        if read_only:
+            if not self.db_path.exists():
+                raise FileNotFoundError(f"workflow DB does not exist: {self.db_path}")
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
 
-    def start(self, workflow_fn: Callable[..., Any], inputs: Any, *, workflow_id: str) -> RunResult:
+    def _ensure_writable(self, operation: str) -> None:
+        if self.read_only:
+            raise RuntimeError(f"WorkflowEngine is read-only; cannot {operation}")
+
+    def start(
+        self,
+        workflow_fn: Callable[..., Any],
+        inputs: Any,
+        *,
+        workflow_id: str,
+        workflow_ref: str | None = None,
+    ) -> RunResult:
+        self._ensure_writable("start workflows")
         workflow_name = getattr(workflow_fn, "__workflow_name__", workflow_fn.__name__)
         with self._connect() as con:
             existing = con.execute("SELECT id FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
@@ -76,22 +100,38 @@ class WorkflowEngine:
                 now = _now()
                 con.execute(
                     """
-                    INSERT INTO workflow_instances(id, workflow_name, status, input_json, created_at, updated_at)
-                    VALUES (?, ?, 'running', ?, ?, ?)
+                    INSERT INTO workflow_instances(id, workflow_name, workflow_ref, status, input_json, created_at, updated_at)
+                    VALUES (?, ?, ?, 'running', ?, ?, ?)
                     """,
-                    (workflow_id, workflow_name, JsonCodec.dumps(inputs), now, now),
+                    (workflow_id, workflow_name, workflow_ref, JsonCodec.dumps(inputs), now, now),
                 )
                 self._append_event(
                     con,
                     workflow_id,
                     "WorkflowStarted",
                     key="workflow:start",
-                    payload={"workflow_name": workflow_name, "input": inputs},
+                    payload={"workflow_name": workflow_name, "workflow_ref": workflow_ref, "input": inputs},
                     idempotency_key="workflow:start",
+                )
+            elif workflow_ref:
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET workflow_ref = COALESCE(workflow_ref, ?), updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (workflow_ref, _now(), workflow_id),
                 )
         return self._run_decider(workflow_id, workflow_fn)
 
-    def run_until_idle(self, workflow_fn: Callable[..., Any], inputs: Any, *, workflow_id: str) -> RunResult:
+    def run_until_idle(
+        self,
+        workflow_fn: Callable[..., Any],
+        inputs: Any,
+        *,
+        workflow_id: str,
+        workflow_ref: str | None = None,
+    ) -> RunResult:
         """Start a workflow and execute local run_step commands until blocked.
 
         This is the first practical test-drive runner: it proves real step bodies
@@ -99,12 +139,14 @@ class WorkflowEngine:
         durable waits.
         """
 
-        result = self.start(workflow_fn, inputs, workflow_id=workflow_id)
+        self._ensure_writable("run workflows")
+        result = self.start(workflow_fn, inputs, workflow_id=workflow_id, workflow_ref=workflow_ref)
         return self.drain(workflow_id, initial=result)
 
     def drain(self, workflow_id: str, *, initial: Optional[RunResult] = None) -> RunResult:
         """Execute pending local run_step commands until no runnable command remains."""
 
+        self._ensure_writable("drain workflow commands")
         result = initial or self._result_from_instance(workflow_id)
         while True:
             command = self.claim_command(workflow_id, worker_id="local-drain", lease_seconds=30, command_type=None)
@@ -124,8 +166,9 @@ class WorkflowEngine:
         *,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> RunResult:
+        self._ensure_writable("complete workflow steps")
         instance = self._instance(workflow_id)
-        if instance["status"] == "cancelled":
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES:
             return self._result_from_instance(workflow_id)
 
         workflow_fn = self._workflow_fn_for_instance(instance)
@@ -134,7 +177,7 @@ class WorkflowEngine:
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
-            if row["status"] == "cancelled":
+            if row["status"] in TERMINAL_WORKFLOW_STATUSES:
                 return self._result_from_row(row)
 
             payload = {"output": output}
@@ -177,20 +220,33 @@ class WorkflowEngine:
         source: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
     ) -> RunResult:
+        self._ensure_writable("record workflow signals")
         instance = self._instance(workflow_id)
-        if instance["status"] == "cancelled":
+        dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type != "approval.decision":
             return self._result_from_instance(workflow_id)
 
-        workflow_fn = self._workflow_fn_for_instance(instance)
-        dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
+        workflow_fn = None if instance["status"] in TERMINAL_WORKFLOW_STATUSES else self._workflow_fn_for_instance(instance)
         inserted = False
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
-            if row["status"] == "cancelled":
+            if row["status"] in TERMINAL_WORKFLOW_STATUSES:
+                if signal_type == "approval.decision":
+                    self._validate_approval_decision_signal(
+                        workflow_id,
+                        key,
+                        payload,
+                        source,
+                        dedupe,
+                        con=con,
+                        require_existing=row["status"] == "completed",
+                    )
                 return self._result_from_row(row)
+            if signal_type == "approval.decision":
+                self._validate_approval_decision_signal(workflow_id, key, payload, source, dedupe, con=con)
 
             inserted = self._append_event(
                 con,
@@ -219,8 +275,265 @@ class WorkflowEngine:
                         """,
                         (_now(), workflow_id, f"approval:{key}"),
                     )
-        result = self._run_decider(workflow_id, workflow_fn) if inserted else self._result_from_instance(workflow_id)
+        if inserted:
+            assert workflow_fn is not None
+            result = self._run_decider(workflow_id, workflow_fn)
+        else:
+            result = self._result_from_instance(workflow_id)
         return self.drain(workflow_id, initial=result)
+
+    def resume(self, workflow_fn: Callable[..., Any], workflow_id: str) -> RunResult:
+        """Resume a workflow decider without recording a new external event."""
+
+        self._ensure_writable("resume workflows")
+        instance = self._instance(workflow_id)
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES:
+            return self._result_from_row(instance)
+        result = self._run_decider(workflow_id, workflow_fn)
+        return self.drain(workflow_id, initial=result)
+
+    def list_approvals(self, *, status: str | None = "waiting") -> list[ApprovalView]:
+        """Return approval-card views for plugins, dashboards, CLIs, and chat adapters."""
+
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT id, workflow_name, workflow_ref, status, waiting_on
+                FROM workflow_instances
+                ORDER BY updated_at DESC, created_at DESC, id ASC
+                """
+            ).fetchall()
+        approvals: list[ApprovalView] = []
+        for row in rows:
+            workflow_approvals = self._approval_views_for_workflow(row)
+            if status is not None:
+                workflow_approvals = [approval for approval in workflow_approvals if approval.status == status]
+            approvals.extend(workflow_approvals)
+        return approvals
+
+    def get_approval(self, workflow_id: str, key: str) -> ApprovalView:
+        row = self._instance(workflow_id)
+        for approval in self._approval_views_for_workflow(row):
+            if approval.key == key:
+                return approval
+        raise KeyError(f"unknown approval {key} for workflow_id: {workflow_id}")
+
+    def submit_approval_decision(
+        self,
+        decision: ApprovalDecisionInput,
+        *,
+        resume: bool = True,
+    ) -> ApprovalReceipt:
+        """Validate and record a human approval decision through the canonical signal path."""
+
+        self._ensure_writable("submit approval decisions")
+        payload: dict[str, Any] = {"action": decision.action, "by": decision.by}
+        if decision.note is not None:
+            payload["note"] = decision.note
+        if decision.reason is not None:
+            payload["reason"] = decision.reason
+        dedupe = decision.idempotency_key or (
+            f"approval:{decision.workflow_id}:{decision.key}:{decision.action}:"
+            f"{decision.source.get('message_url') or decision.source.get('message_id') or decision.source.get('event_id')}"
+        )
+
+        if resume:
+            result = self.signal(
+                decision.workflow_id,
+                "approval.decision",
+                key=decision.key,
+                payload=payload,
+                source=decision.source,
+                idempotency_key=dedupe,
+            )
+            with self._connect() as con:
+                row = con.execute("SELECT workflow_ref FROM workflow_instances WHERE id = ?", (decision.workflow_id,)).fetchone()
+                workflow_ref = row["workflow_ref"] if row is not None else None
+            return ApprovalReceipt(
+                workflow_id=decision.workflow_id,
+                key=decision.key,
+                action=decision.action,
+                by=decision.by,
+                source=decision.source,
+                status=result.status,
+                waiting_on=result.waiting_on,
+                result_summary=result.result if isinstance(result.result, dict) else None,
+                workflow_ref=workflow_ref,
+            )
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (decision.workflow_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown workflow_id: {decision.workflow_id}")
+            if row["status"] in TERMINAL_WORKFLOW_STATUSES:
+                self._validate_approval_decision_signal(
+                    decision.workflow_id,
+                    decision.key,
+                    payload,
+                    decision.source,
+                    dedupe,
+                    con=con,
+                    require_existing=row["status"] == "completed",
+                )
+                result = self._result_from_row(row)
+                return ApprovalReceipt(
+                    workflow_id=decision.workflow_id,
+                    key=decision.key,
+                    action=decision.action,
+                    by=decision.by,
+                    source=decision.source,
+                    status=result.status,
+                    waiting_on=result.waiting_on,
+                    result_summary=result.result if isinstance(result.result, dict) else None,
+                    workflow_ref=row["workflow_ref"],
+                )
+            self._validate_approval_decision_signal(decision.workflow_id, decision.key, payload, decision.source, dedupe, con=con)
+            inserted = self._append_event(
+                con,
+                decision.workflow_id,
+                "SignalReceived",
+                key=f"signal:approval.decision:{decision.key}",
+                payload={"signal_type": "approval.decision", "key": decision.key, "payload": payload, "source": decision.source},
+                idempotency_key=dedupe,
+                ignore_duplicate=True,
+            )
+            if inserted:
+                con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                    WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
+                    """,
+                    (_now(), decision.workflow_id, f"approval:{decision.key}"),
+                )
+            row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (decision.workflow_id,)).fetchone()
+
+        return ApprovalReceipt(
+            workflow_id=decision.workflow_id,
+            key=decision.key,
+            action=decision.action,
+            by=decision.by,
+            source=decision.source,
+            status="decision_recorded",
+            waiting_on=row["waiting_on"],
+            result_summary=None,
+            workflow_ref=row["workflow_ref"],
+        )
+
+    def _approval_views_for_workflow(self, row: sqlite3.Row) -> list[ApprovalView]:
+        events = self.events(row["id"])
+        summaries = self._approval_summaries(events)
+        active_commands = self._active_commands(row["id"])
+        diagnostics_by_approval_key: dict[str, list[dict[str, Any]]] = {}
+        for diagnostic in self._command_diagnostics(active_commands):
+            command_key = str(diagnostic.get("command_key") or "")
+            if command_key.startswith("approval:"):
+                approval_key = command_key.split(":", 1)[1]
+                diagnostics_by_approval_key.setdefault(approval_key, []).append(diagnostic)
+
+        views: list[ApprovalView] = []
+        for summary in summaries:
+            key = str(summary.get("key") or "")
+            views.append(
+                ApprovalView(
+                    db_path=str(self.db_path),
+                    workflow_id=row["id"],
+                    workflow_name=row["workflow_name"],
+                    workflow_ref=row["workflow_ref"],
+                    key=key,
+                    status=str(summary.get("status") or "waiting"),
+                    prompt=summary.get("prompt"),
+                    artifact=summary.get("artifact"),
+                    approver=summary.get("approver"),
+                    allowed=list(summary.get("allowed") or ["approve", "reject"]),
+                    authority=summary.get("authority"),
+                    timeout=summary.get("timeout"),
+                    waiting_on=row["waiting_on"],
+                    requested_seq=summary.get("requested_seq"),
+                    source=summary.get("source"),
+                    decision=summary.get("decision"),
+                    diagnostics=diagnostics_by_approval_key.get(key, []),
+                )
+            )
+        return views
+
+    def _validate_approval_decision_signal(
+        self,
+        workflow_id: str,
+        key: str,
+        payload: Any,
+        source: Any,
+        idempotency_key: str,
+        *,
+        con: sqlite3.Connection | None = None,
+        require_existing: bool = False,
+    ) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError(f"approval {key} decision payload must be an object")
+
+        event_key = f"approval:{key}"
+        if con is None:
+            with self._connect() as read_con:
+                self._validate_approval_decision_signal(
+                    workflow_id,
+                    key,
+                    payload,
+                    source,
+                    idempotency_key,
+                    con=read_con,
+                    require_existing=require_existing,
+                )
+            return
+
+        row = con.execute(
+            """
+            SELECT payload_json
+            FROM workflow_events
+            WHERE workflow_id = ? AND type = 'ApprovalRequested' AND key = ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (workflow_id, event_key),
+        ).fetchone()
+        existing_decision = con.execute(
+            """
+            SELECT payload_json, idempotency_key
+            FROM workflow_events
+            WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (workflow_id, f"signal:approval.decision:{key}"),
+        ).fetchone()
+
+        if existing_decision is not None:
+            if existing_decision["idempotency_key"] == idempotency_key:
+                existing_payload = JsonCodec.loads(existing_decision["payload_json"])
+                expected_payload = {"signal_type": "approval.decision", "key": key, "payload": payload, "source": source}
+                if existing_payload == expected_payload:
+                    return
+                raise ValueError(f"approval {key} idempotency key was reused with a different decision")
+            raise ValueError(f"approval {key} already has a recorded decision")
+
+        if require_existing:
+            raise ValueError(f"approval {key} has no recorded decision to replay")
+
+        if row is None:
+            raise ValueError(f"approval {key} has no matching ApprovalRequested event")
+
+        request_payload = JsonCodec.loads(row["payload_json"])
+        if not isinstance(request_payload, dict):
+            raise ValueError(f"approval {key} has invalid ApprovalRequested payload")
+
+        allowed = request_payload.get("allowed") or ["approve", "reject"]
+        if payload.get("action") not in allowed:
+            raise ValueError(f"approval {key} action is not allowed: {payload.get('action')}")
+
+        _validate_approval_source(
+            key,
+            str(request_payload.get("approver") or "human"),
+            payload,
+            source,
+        )
 
     def cancel_workflow(
         self,
@@ -231,6 +544,8 @@ class WorkflowEngine:
         superseded_by: Optional[str] = None,
     ) -> RunResult:
         """Mark a workflow terminal-cancelled while preserving an audit event."""
+
+        self._ensure_writable("cancel workflows")
 
         payload = {
             "type": "cancelled",
@@ -300,6 +615,8 @@ class WorkflowEngine:
         command_type: Optional[str] = "run_step",
     ) -> Optional[Dict[str, Any]]:
         """Claim one pending or lease-expired command for a worker."""
+
+        self._ensure_writable("claim workflow commands")
 
         now = _now()
         type_clause = "AND c.type = ?" if command_type is not None else "AND c.type IN ('run_step', 'start_child_workflow')"
@@ -570,7 +887,7 @@ class WorkflowEngine:
 
     def list_workflows(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
         query = """
-            SELECT id, workflow_name, status, waiting_on
+            SELECT id, workflow_name, workflow_ref, status, waiting_on
             FROM workflow_instances
         """
         params: list[Any] = []
@@ -593,6 +910,8 @@ class WorkflowEngine:
             "status": row["status"],
             "waiting_on": row["waiting_on"],
         }
+        if row["workflow_ref"] is not None:
+            payload["workflow_ref"] = row["workflow_ref"]
         terminal_reason = self._terminal_reason(row["id"])
         if terminal_reason is not None:
             payload["terminal_reason"] = terminal_reason
@@ -637,6 +956,7 @@ class WorkflowEngine:
         status = {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
+            "workflow_ref": row["workflow_ref"],
             "status": row["status"],
             "waiting_on": row["waiting_on"],
             "result": JsonCodec.loads(row["result_json"]),
@@ -752,6 +1072,10 @@ class WorkflowEngine:
                 "approver": payload.get("approver"),
                 "prompt": payload.get("prompt"),
                 "artifact": payload.get("artifact"),
+                "allowed": payload.get("allowed") or ["approve", "reject"],
+                "authority": payload.get("authority"),
+                "timeout": payload.get("timeout"),
+                "requested_seq": event.get("seq"),
                 "decision": decision,
                 "source": source,
             }
@@ -1014,10 +1338,30 @@ class WorkflowEngine:
         if workflow_fn is not None:
             return workflow_fn
 
+        workflow_ref = instance["workflow_ref"]
+        if workflow_ref:
+            workflow_fn = self._workflow_fn_from_ref(str(workflow_ref), expected_workflow_name=workflow_name)
+            if workflow_fn is not None:
+                return workflow_fn
+
         self._load_generated_child_workflow_from_parent_history(instance["id"], expected_workflow_name=workflow_name)
         workflow_fn = _WORKFLOW_REGISTRY.get(workflow_name)
         if workflow_fn is None:
             raise KeyError(workflow_name)
+        return workflow_fn
+
+    def _workflow_fn_from_ref(self, workflow_ref: str, *, expected_workflow_name: str) -> Callable[..., Any] | None:
+        if ":" not in workflow_ref:
+            return None
+        module_name, attr = workflow_ref.split(":", 1)
+        module = importlib.import_module(module_name)
+        workflow_fn = getattr(module, attr, None)
+        if workflow_fn is None:
+            return None
+        registered_name = getattr(workflow_fn, "__workflow_name__", getattr(workflow_fn, "__name__", None))
+        if registered_name != expected_workflow_name:
+            return None
+        _WORKFLOW_REGISTRY.setdefault(expected_workflow_name, workflow_fn)
         return workflow_fn
 
     def _load_generated_child_workflow_from_parent_history(self, child_workflow_id: str, *, expected_workflow_name: str) -> None:
@@ -1322,6 +1666,7 @@ class WorkflowEngine:
                 CREATE TABLE IF NOT EXISTS workflow_instances(
                   id TEXT PRIMARY KEY,
                   workflow_name TEXT NOT NULL,
+                  workflow_ref TEXT,
                   status TEXT NOT NULL,
                   waiting_on TEXT,
                   input_json TEXT NOT NULL,
@@ -1344,6 +1689,10 @@ class WorkflowEngine:
                   UNIQUE(workflow_id, idempotency_key)
                 );
 
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_events_one_approval_decision
+                ON workflow_events(workflow_id, key)
+                WHERE type = 'SignalReceived' AND key LIKE 'signal:approval.decision:%';
+
                 CREATE TABLE IF NOT EXISTS workflow_commands_outbox(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   workflow_id TEXT NOT NULL,
@@ -1361,10 +1710,15 @@ class WorkflowEngine:
                 );
                 """
             )
+            self._ensure_instance_columns(con)
             self._ensure_command_columns(con)
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path)
+        if self.read_only:
+            uri_path = quote(str(self.db_path.resolve()), safe="/")
+            con = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
+        else:
+            con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
         return con
 
@@ -1436,6 +1790,15 @@ class WorkflowEngine:
         )
         return True
 
+
+    def _ensure_instance_columns(self, con: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in con.execute("PRAGMA table_info(workflow_instances)").fetchall()}
+        migrations = {
+            "workflow_ref": "ALTER TABLE workflow_instances ADD COLUMN workflow_ref TEXT",
+        }
+        for column, sql in migrations.items():
+            if column not in existing:
+                con.execute(sql)
 
     def _ensure_command_columns(self, con: sqlite3.Connection) -> None:
         existing = {row["name"] for row in con.execute("PRAGMA table_info(workflow_commands_outbox)").fetchall()}

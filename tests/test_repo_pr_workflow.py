@@ -2,6 +2,8 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from hermes_workflows import WorkflowEngine
 from examples import repo_pr_workflow as pr_module
 from examples.repo_pr_workflow import repo_change_plan_workflow, repo_pr_workflow
@@ -233,17 +235,20 @@ def test_repo_change_plan_workflow_rejects_agent_plan_approval(tmp_path):
         workflow_id="wf_plan",
     )
 
-    result = engine.signal(
-        "wf_plan",
-        "approval.decision",
-        key="approve_implementation_plan",
-        payload={"action": "approve", "by": "palmer"},
-        source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
-        idempotency_key="bad-plan-approval",
-    )
+    with pytest.raises(ValueError, match="requires human approval source"):
+        engine.signal(
+            "wf_plan",
+            "approval.decision",
+            key="approve_implementation_plan",
+            payload={"action": "approve", "by": "palmer"},
+            source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
+            idempotency_key="bad-plan-approval",
+        )
 
-    assert result.status == "failed"
-    assert "requires human approval source" in (result.error or "")
+    status = engine.workflow_status("wf_plan", recent_events=20)
+    assert status["status"] == "waiting"
+    assert status["waiting_on"] == "signal:approval.decision:approve_implementation_plan"
+    assert not [event for event in status["events"] if event["type"] == "SignalReceived"]
 
 
 def test_repo_pr_workflow_hard_requires_plan_approval_before_pr_work(tmp_path):
@@ -380,17 +385,24 @@ def test_repo_pr_workflow_rejects_agent_or_missing_landing_provenance(tmp_path):
     implementation_plan = approve_plan_workflow(engine, repo, tmp_path)
     engine.run_until_idle(repo_pr_workflow, workflow_inputs(repo, tmp_path, implementation_plan=implementation_plan), workflow_id="wf_pr")
 
-    result = engine.signal(
-        "wf_pr",
-        "approval.decision",
-        key="approve_pr_landing",
-        payload={"action": "approve", "by": "palmer"},
-        source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
-        idempotency_key="bad-approval",
-    )
+    with pytest.raises(ValueError, match="requires human approval source"):
+        engine.signal(
+            "wf_pr",
+            "approval.decision",
+            key="approve_pr_landing",
+            payload={"action": "approve", "by": "palmer"},
+            source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
+            idempotency_key="bad-approval",
+        )
 
-    assert result.status == "failed"
-    assert "requires human approval source" in (result.error or "")
+    status = engine.workflow_status("wf_pr", recent_events=20)
+    assert status["status"] == "waiting"
+    assert status["waiting_on"] == "signal:approval.decision:approve_pr_landing"
+    assert not [
+        event
+        for event in status["events"]
+        if event["type"] == "SignalReceived" and event["payload"].get("key") == "approve_pr_landing"
+    ]
 
 
 def test_check_watcher_waits_for_github_to_report_new_branch_checks(tmp_path, monkeypatch):
