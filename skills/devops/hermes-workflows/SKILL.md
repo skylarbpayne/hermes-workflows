@@ -96,7 +96,7 @@ PYTHONPATH=src:. python -m hermes_workflows dashboard \
   --out /tmp/workflows-dashboard.html
 ```
 
-5. If you need a local approval surface, run the dashboard server. It still sends the same validated `approval.decision` signal; it is not a separate approval model:
+5. If you need a local status surface, run the dashboard server read-only first. It should inspect state without approval POST mutations:
 
 ```bash
 PYTHONPATH=src:. python -m hermes_workflows serve-dashboard \
@@ -104,6 +104,17 @@ PYTHONPATH=src:. python -m hermes_workflows serve-dashboard \
   --db /tmp/workflow.sqlite \
   --host 127.0.0.1 \
   --port 8765
+```
+
+If you need local approval buttons, opt in explicitly. Those buttons still send the same validated `approval.decision` signal; they are not a separate approval model:
+
+```bash
+PYTHONPATH=src:. python -m hermes_workflows serve-dashboard \
+  examples.repo_pr_workflow:repo_change_plan_workflow \
+  --db /tmp/workflow.sqlite \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --enable-approval-actions
 ```
 
 ## Approval Rules

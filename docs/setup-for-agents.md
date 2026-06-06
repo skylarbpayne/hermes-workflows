@@ -11,6 +11,9 @@ git clone https://github.com/skylarbpayne/hermes-workflows.git
 cd hermes-workflows
 python -m pip install -e '.[dev]'
 pytest -q
+hermes-workflows doctor \
+  --db /tmp/hermes-workflows-doctor.sqlite \
+  --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
 ```
 
 Run the CLI:
@@ -26,7 +29,7 @@ Render a local read-only dashboard for any existing workflow DB:
 hermes-workflows dashboard --db /tmp/workflow.sqlite --out /tmp/workflows-dashboard.html
 ```
 
-Or run a local approval server that still routes every button through the canonical `approval.decision` signal path:
+Or run a local dashboard server. By default this is read-only and does not import the workflow or mutate the workflow DB:
 
 ```bash
 hermes-workflows serve-dashboard my_package.workflow:main \
@@ -35,7 +38,17 @@ hermes-workflows serve-dashboard my_package.workflow:main \
   --port 8765
 ```
 
-That local server is intentionally boring: it is not an agent runtime, and it does not invent a second approval model. It only captures human provenance and calls the same engine signal API that Discord, Telegram, a Hermes plugin, or another runtime adapter should call.
+To expose local approval POST buttons, opt in explicitly:
+
+```bash
+hermes-workflows serve-dashboard my_package.workflow:main \
+  --db /tmp/workflow.sqlite \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --enable-approval-actions
+```
+
+That local server is intentionally boring: it is not an agent runtime, and it does not invent a second approval model. When `--enable-approval-actions` is present, it only captures human provenance and calls the same engine signal API that Discord, Telegram, a Hermes plugin, or another runtime adapter should call.
 
 ## The mental model
 
@@ -132,7 +145,7 @@ async def agent_workflow(ctx, inputs):
 engine = WorkflowEngine("workflow.sqlite", agent_runner=runner)
 ```
 
-The runner can be deterministic for tests and demos, or it can call a real provider. The boundary is the same: JSON request in, structured response and provenance out.
+The default test/demo runner is deterministic and credential-free. A real-provider smoke is opt-in only: set `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` and provide `HERMES_WORKFLOWS_AGENT_COMMAND` in the caller's environment. Do not report real-provider support as verified unless that explicit smoke was run; the boundary is the same either way: JSON request in, structured response and provenance out.
 
 ## Run the Hack the Valley demo
 
