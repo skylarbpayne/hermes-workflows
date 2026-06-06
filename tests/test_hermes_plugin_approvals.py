@@ -59,7 +59,10 @@ def parse_tool_result(raw: str) -> dict[str, Any]:
 
 
 def test_plugin_entrypoint_and_directory_manifest_are_present():
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.9/3.10 compatibility
+        import tomli as tomllib
 
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
     entry_points = pyproject["project"]["entry-points"]["hermes_agent.plugins"]
