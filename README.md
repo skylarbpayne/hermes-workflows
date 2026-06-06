@@ -16,7 +16,8 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - render-only prompt-file steps through `AgentPrompt("prompt.md", **vars)`
 - JSON-over-stdin subprocess agent runners through `SubprocessAgentRunner([...])`
 - workflow-backed repository PR path through `examples.repo_pr_workflow`
-- manual `signal()` resume API
+- typed approval adapter API through `ApprovalView`, `ApprovalDecisionInput`, and `ApprovalReceipt`
+- manual `signal()` resume API for lower-level integrations
 - tiny cross-process CLI: `hermes-workflows start|run|worker|signal|approve|reject|status|list|events|outbox|dashboard|serve-dashboard|doctor`
 
 ## 60-second quickstart
@@ -172,15 +173,20 @@ engine = WorkflowEngine("workflow.sqlite")
 # Start and drain local step commands until approval is needed.
 print(engine.run_until_idle(trip_planning, {"destination": "NYC"}, workflow_id="wf_trip"))
 
-# Manual signal resumes the decider after a process restart and drains downstream steps.
+# Typed approval resumes the decider after a process restart and drains downstream steps.
+from hermes_workflows import ApprovalDecisionInput
+
 engine = WorkflowEngine("workflow.sqlite")
-print(engine.signal(
-    "wf_trip",
-    "approval.decision",
-    key="approve_trip_plan",
-    payload={"action": "approve", "by": "skylar"},
-    source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
-    idempotency_key="discord-message-1",
+print(engine.submit_approval_decision(
+    ApprovalDecisionInput(
+        workflow_id="wf_trip",
+        key="approve_trip_plan",
+        action="approve",
+        by="skylar",
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+        idempotency_key="discord-message-1",
+    ),
+    resume=True,
 ))
 ```
 
@@ -379,15 +385,19 @@ The PR workflow should end waiting on `signal:approval.decision:approve_pr_landi
 
 ## Human approval provenance
 
-`ctx.approval.request(..., approver="human:...")` now requires `approval.decision` signals to include human provenance. Agent-authored or missing-source approval signals fail closed instead of quietly advancing the workflow.
+`ctx.approval.request(..., approver="human:...")` now requires human provenance. Adapters should normally use `ApprovalDecisionInput` plus `WorkflowEngine.submit_approval_decision(...)`; lower-level integrations can still emit the underlying `approval.decision` signal directly. Agent-authored or missing-source approval decisions fail closed instead of quietly advancing the workflow.
 
 ```python
-engine.signal(
-    "wf_trip",
-    "approval.decision",
-    key="approve_trip_plan",
-    payload={"action": "approve", "by": "skylar"},
-    source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+from hermes_workflows import ApprovalDecisionInput
+
+engine.submit_approval_decision(
+    ApprovalDecisionInput(
+        workflow_id="wf_trip",
+        key="approve_trip_plan",
+        action="approve",
+        by="skylar",
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://..."},
+    )
 )
 ```
 

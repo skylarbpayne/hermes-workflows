@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from .approvals import ApprovalDecisionInput
 from .dashboard import render_dashboard
 from .dashboard_server import serve_dashboard
 from .engine import JsonCodec, RunResult, WorkflowEngine
@@ -210,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
+            workflow_ref=args.workflow_ref,
         )
         print_json(result_payload(result))
     elif args.command == "run":
@@ -217,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow,
             json.loads(args.input_json),
             workflow_id=args.workflow_id,
+            workflow_ref=args.workflow_ref,
         )
         print_json(result_payload(result))
     elif args.command == "worker":
@@ -245,16 +248,35 @@ def main(argv: list[str] | None = None) -> int:
         )
         print_json(result_payload(result))
     elif args.command in {"approve", "reject"}:
-        result = engine.signal(
-            args.workflow_id,
-            "approval.decision",
-            key=args.key,
-            payload=approval_payload_from_args(args, args.command),
-            source=human_source_from_args(args),
-            idempotency_key=args.idempotency_key
-            or f"{args.channel}:{args.workflow_id}:{args.key}:{args.command}:{args.message_url or args.message_id or args.event_id}",
+        receipt = engine.submit_approval_decision(
+            ApprovalDecisionInput(
+                workflow_id=args.workflow_id,
+                key=args.key,
+                action=args.command,
+                by=args.by,
+                source=human_source_from_args(args),
+                note=args.note,
+                reason=getattr(args, "reason", None),
+                idempotency_key=args.idempotency_key
+                or f"{args.channel}:{args.workflow_id}:{args.key}:{args.command}:{args.message_url or args.message_id or args.event_id}",
+            ),
+            resume=True,
         )
-        print_json(result_payload(result))
+        print_json(
+            {
+                "workflow_id": receipt.workflow_id,
+                "status": receipt.status,
+                "waiting_on": receipt.waiting_on,
+                "approval": {
+                    "key": receipt.key,
+                    "action": receipt.action,
+                    "by": receipt.by,
+                    "source": receipt.source,
+                },
+                "result": receipt.result_summary,
+                "error": None,
+            }
+        )
     elif args.command == "reconcile-child":
         result = engine.reconcile_child_result(args.workflow_id, args.child_key)
         print_json(result_payload(result))

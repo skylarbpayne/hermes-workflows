@@ -73,17 +73,17 @@ PYTHONPATH=src:. python -m hermes_workflows status \
   --command-limit 5
 ```
 
-3. If waiting on approval, send a human-provenance signal only after the approval request exists:
+3. If waiting on approval, use the typed approval shortcut/API only after the approval request exists. It records the same validated `approval.decision` event without making every adapter hand-roll payloads:
 
 ```bash
-PYTHONPATH=src:. python -m hermes_workflows signal \
+PYTHONPATH=src:. python -m hermes_workflows approve \
   examples.repo_pr_workflow:repo_change_plan_workflow \
   --db /tmp/workflow.sqlite \
   --id wf_plan \
-  --type approval.decision \
   --key approve_implementation_plan \
-  --payload-json '{"action":"approve","by":"skylar"}' \
-  --source-json '{"kind":"human","id":"skylar","channel":"kanban","message_url":"kanban://task/comment"}' \
+  --by skylar \
+  --channel kanban \
+  --message-url kanban://task/comment \
   --idempotency-key kanban-comment-id
 ```
 
@@ -107,7 +107,7 @@ PYTHONPATH=src:. python -m hermes_workflows serve-dashboard \
 
 ## Approval Rules
 
-Approval is not a vibe. A valid human approval signal needs:
+Approval is not a vibe. A valid human approval decision needs:
 
 - a matching prior `ApprovalRequested` event for the same key
 - `payload.action` in the approval request's allowed actions
@@ -116,7 +116,7 @@ Approval is not a vibe. A valid human approval signal needs:
 - `source.id` matching the approver when specified
 - a channel plus external provenance (`message_url`, `message_id`, or `event_id`)
 
-Invalid approval signals fail closed before they are appended to history or used to complete the approval notification command. That means the workflow should remain waiting and the dashboard/status surfaces should still show the approval as active.
+Invalid approval decisions fail closed before they are appended to history or used to complete the approval notification command. That means the workflow should remain waiting and the dashboard/status surfaces should still show the approval as active.
 
 Separate approval keys for separate gates. Plan approval is not merge approval. Generated-workflow execution approval is not send/publish approval.
 

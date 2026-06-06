@@ -8,6 +8,7 @@ v0 intentionally tiny:
 - External signals append events and wake/replay the decider.
 """
 
+from .approvals import ApprovalDecisionInput, ApprovalReceipt, ApprovalView
 from .decorators import step, workflow
 from .engine import RunResult, WorkflowEngine
 from .prompts import AgentPrompt, AgentStep, render_prompt
@@ -16,6 +17,9 @@ from .workflow_values import Workflow
 
 __all__ = [
     "AgentPrompt",
+    "ApprovalDecisionInput",
+    "ApprovalReceipt",
+    "ApprovalView",
     "AgentRunnerError",
     "AgentStep",
     "RunResult",

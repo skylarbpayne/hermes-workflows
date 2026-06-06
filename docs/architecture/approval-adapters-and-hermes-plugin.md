@@ -27,15 +27,39 @@ Every approval surface should do the same thing:
 
 ```text
 waiting workflow
-  -> adapter reads status/approvals
-  -> adapter displays approval card to human
+  -> adapter calls engine.list_approvals() or engine.get_approval(workflow_id, key)
+  -> adapter displays ApprovalView as an approval card
   -> human clicks/types approve or reject
   -> adapter captures provenance
-  -> adapter calls WorkflowEngine.signal(..., "approval.decision", ...)
-  -> adapter posts receipt/status
+  -> adapter calls engine.submit_approval_decision(ApprovalDecisionInput(...), resume=True|False)
+  -> adapter posts ApprovalReceipt/status
 ```
 
-The signal payload should be boring:
+The canonical adapter API is intentionally boring:
+
+```python
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
+
+engine = WorkflowEngine("/tmp/workflow.sqlite")
+approvals = engine.list_approvals(status="waiting")
+
+receipt = engine.submit_approval_decision(
+    ApprovalDecisionInput(
+        workflow_id="wf_trip",
+        key="approve_trip_plan",
+        action="approve",
+        by="skylar",
+        source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "150828..."},
+        idempotency_key="discord:150828:approve_trip_plan:approve",
+    ),
+    # Use False for chat callbacks that should record the decision but hand resume to a worker.
+    resume=True,
+)
+```
+
+Under the hood this still records the same validated `approval.decision` event; adapters should use the typed API so they do not accidentally invent a parallel approval path.
+
+The underlying signal payload remains boring for lower-level integrations:
 
 ```json
 {

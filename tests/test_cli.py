@@ -335,6 +335,7 @@ def test_cli_status_and_list_expose_inspectable_workflow_state(tmp_path):
             {
                 "workflow_id": "wf_cli",
                 "workflow_name": "demo_workflow",
+                "workflow_ref": "demo_wf:demo_workflow",
                 "status": "waiting",
                 "waiting_on": "signal:approval.decision:approve_plan",
             }
@@ -416,6 +417,10 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "approver": "human:skylar",
             "prompt": "Approve plan?",
             "artifact": {"summary": "Plan for NYC"},
+            "allowed": ["approve", "reject"],
+            "authority": [],
+            "timeout": None,
+            "requested_seq": 5,
             "decision": None,
             "source": None,
         }
@@ -431,6 +436,10 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "approver": "human:skylar",
             "prompt": "Approve plan?",
             "artifact": {"summary": "Plan for LA"},
+            "allowed": ["approve", "reject"],
+            "authority": [],
+            "timeout": None,
+            "requested_seq": 5,
             "decision": {"action": "approve", "by": "skylar"},
             "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/3"},
         }

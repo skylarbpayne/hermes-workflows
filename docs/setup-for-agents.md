@@ -77,18 +77,25 @@ engine = WorkflowEngine("workflow.sqlite")
 print(engine.run_until_idle(approval_gated_workflow, {"topic": "demo"}, workflow_id="wf_demo"))
 ```
 
-When the approval is ready, signal it:
+When the approval is ready, submit a typed decision. This is the adapter seam for CLIs, dashboards, Hermes plugins, Discord, Telegram, or any other runtime:
 
 ```python
-engine.signal(
-    "wf_demo",
-    "approval.decision",
-    key="approve_packet",
-    payload={"action": "approve", "by": "operator"},
-    source={"kind": "human", "id": "operator", "channel": "review-ui", "message_id": "approval-message-1"},
-    idempotency_key="approval-message-1",
+from hermes_workflows import ApprovalDecisionInput
+
+receipt = engine.submit_approval_decision(
+    ApprovalDecisionInput(
+        workflow_id="wf_demo",
+        key="approve_packet",
+        action="approve",
+        by="operator",
+        source={"kind": "human", "id": "operator", "channel": "review-ui", "message_id": "approval-message-1"},
+        idempotency_key="approval-message-1",
+    ),
+    resume=True,
 )
 ```
+
+Use `resume=False` for chat/plugin callbacks that should record the approval but leave downstream work to a separate worker/resumer.
 
 ## Add an agent step
 
@@ -172,7 +179,7 @@ cp dist/workflows-real-run-output/packet.json examples/outputs/hackathon-real-dr
 - Approval decisions are accepted only after the matching approval request exists.
 - Invalid approval decisions fail closed before they are appended to workflow history or used to complete approval notification commands.
 - Approval to execute generated code is separate from approval to create drafts or send email.
-- The dashboard is read-only; it surfaces approval keys and diagnostics but does not approve anything itself.
+- The static dashboard is read-only; `serve-dashboard` can approve, but only through `submit_approval_decision()` / canonical `approval.decision` validation with human provenance.
 - The CLI prints redacted summaries by default.
 - Public packets omit raw draft bodies, raw event payloads, private file paths, participant names/emails, project text, and URLs.
 - Raw snapshots, receipts, workflow DBs, and real review packets stay private.

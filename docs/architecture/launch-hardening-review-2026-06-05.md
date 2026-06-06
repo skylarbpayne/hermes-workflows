@@ -72,7 +72,7 @@ There are now two operator surfaces:
 - `hermes-workflows dashboard --db <workflow.sqlite> --out <dashboard.html>` renders a static read-only dashboard.
 - `hermes-workflows serve-dashboard <workflow_ref> --db <workflow.sqlite>` runs a local approval server for humans who need a button/form instead of hand-typing CLI signals.
 
-The server is deliberately a thin adapter, not a new approval system. Its POST handler calls `WorkflowEngine.signal(..., "approval.decision", ...)` with the same human provenance fields required by CLI/chat adapters. That keeps the core open enough for future Hermes plugin, Discord, Telegram, Kanban, or third-party runtime adapters: they all need to translate a human action into the canonical signal shape.
+The server is deliberately a thin adapter, not a new approval system. Its POST handler calls `WorkflowEngine.submit_approval_decision(ApprovalDecisionInput(...), resume=True)` with the same human provenance fields required by CLI/chat adapters. That keeps the core open enough for future Hermes plugin, Discord, Telegram, Kanban, or third-party runtime adapters: they all need to translate a human action into one canonical approval decision shape.
 
 Current capability:
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
+from .approvals import ApprovalDecisionInput
 from .dashboard import render_dashboard
 from .engine import WorkflowEngine
 
@@ -79,23 +80,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not any(field in source for field in ("message_url", "message_id", "event_id")):
             self.send_error(HTTPStatus.BAD_REQUEST, "approval requires message_url, message_id, or event_id")
             return
-        payload = {"action": fields.get("action", ["approve"])[0], "by": by}
-        note = fields.get("note", [""])[0].strip()
-        if note:
-            payload["note"] = note
+        action = fields.get("action", ["approve"])[0]
+        note = fields.get("note", [""])[0].strip() or None
+        reason = fields.get("reason", [""])[0].strip() or None
         idempotency_key = fields.get("idempotency_key", [""])[0].strip() or (
-            f"{channel}:{workflow_id}:{key}:{payload['action']}:{source.get('message_url') or source.get('message_id') or source.get('event_id')}"
+            f"{channel}:{workflow_id}:{key}:{action}:{source.get('message_url') or source.get('message_id') or source.get('event_id')}"
         )
 
         server = _dashboard_server(self)
         engine = WorkflowEngine(server.db_path)
-        engine.signal(
-            workflow_id,
-            "approval.decision",
-            key=key,
-            payload=payload,
-            source=source,
-            idempotency_key=idempotency_key,
+        engine.submit_approval_decision(
+            ApprovalDecisionInput(
+                workflow_id=workflow_id,
+                key=key,
+                action=action,
+                by=by,
+                source=source,
+                note=note,
+                reason=reason,
+                idempotency_key=idempotency_key,
+            ),
+            resume=True,
         )
         if server.once:
             self._send_html("<h1>Approval recorded</h1>")
@@ -130,8 +135,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
     <label>Human ID <input name="by" required placeholder="operator" /></label>
     <label>Channel <input name="channel" required value="local-dashboard" /></label>
     <label>Message ID <input name="message_id" required placeholder="local-click-1" /></label>
-    <input type="hidden" name="action" value="approve" />
-    <button type="submit">Approve</button>
+    <label>Action
+      <select name="action">
+        <option value="approve">approve</option>
+        <option value="reject">reject</option>
+      </select>
+    </label>
+    <label>Note <input name="note" placeholder="optional operator note" /></label>
+    <label>Reason <input name="reason" placeholder="optional reject reason" /></label>
+    <button type="submit">Record decision</button>
   </form>
 </section>
 """
