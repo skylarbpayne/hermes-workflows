@@ -97,6 +97,13 @@ class WorkflowEngine:
         with self._connect() as con:
             existing = con.execute("SELECT id FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
             if existing is None:
+                input_sanitizer = getattr(workflow_fn, "__workflow_input_sanitizer__", None)
+                if callable(input_sanitizer):
+                    sanitizer_signature = inspect.signature(input_sanitizer)
+                    if "workflow_id" in sanitizer_signature.parameters:
+                        inputs = input_sanitizer(inputs, workflow_id=workflow_id)
+                    else:
+                        inputs = input_sanitizer(inputs)
                 now = _now()
                 con.execute(
                     """
@@ -327,14 +334,15 @@ class WorkflowEngine:
         """Validate and record a human approval decision through the canonical signal path."""
 
         self._ensure_writable("submit approval decisions")
+        sanitized_source = _sanitize_approval_source(decision.source)
         payload: dict[str, Any] = {"action": decision.action, "by": decision.by}
         if decision.note is not None:
-            payload["note"] = decision.note
+            payload["note"] = _sanitize_approval_text(decision.note)
         if decision.reason is not None:
-            payload["reason"] = decision.reason
+            payload["reason"] = _sanitize_approval_text(decision.reason)
         dedupe = decision.idempotency_key or (
             f"approval:{decision.workflow_id}:{decision.key}:{decision.action}:"
-            f"{decision.source.get('message_url') or decision.source.get('message_id') or decision.source.get('event_id')}"
+            f"{sanitized_source.get('message_url') or sanitized_source.get('message_id') or sanitized_source.get('event_id')}"
         )
 
         if resume:
@@ -343,7 +351,7 @@ class WorkflowEngine:
                 "approval.decision",
                 key=decision.key,
                 payload=payload,
-                source=decision.source,
+                source=sanitized_source,
                 idempotency_key=dedupe,
             )
             with self._connect() as con:
@@ -354,7 +362,7 @@ class WorkflowEngine:
                 key=decision.key,
                 action=decision.action,
                 by=decision.by,
-                source=decision.source,
+                source=sanitized_source,
                 status=result.status,
                 waiting_on=result.waiting_on,
                 result_summary=result.result if isinstance(result.result, dict) else None,
@@ -371,7 +379,7 @@ class WorkflowEngine:
                     decision.workflow_id,
                     decision.key,
                     payload,
-                    decision.source,
+                    sanitized_source,
                     dedupe,
                     con=con,
                     require_existing=row["status"] == "completed",
@@ -382,19 +390,19 @@ class WorkflowEngine:
                     key=decision.key,
                     action=decision.action,
                     by=decision.by,
-                    source=decision.source,
+                    source=sanitized_source,
                     status=result.status,
                     waiting_on=result.waiting_on,
                     result_summary=result.result if isinstance(result.result, dict) else None,
                     workflow_ref=row["workflow_ref"],
                 )
-            self._validate_approval_decision_signal(decision.workflow_id, decision.key, payload, decision.source, dedupe, con=con)
+            self._validate_approval_decision_signal(decision.workflow_id, decision.key, payload, sanitized_source, dedupe, con=con)
             inserted = self._append_event(
                 con,
                 decision.workflow_id,
                 "SignalReceived",
                 key=f"signal:approval.decision:{decision.key}",
-                payload={"signal_type": "approval.decision", "key": decision.key, "payload": payload, "source": decision.source},
+                payload={"signal_type": "approval.decision", "key": decision.key, "payload": payload, "source": sanitized_source},
                 idempotency_key=dedupe,
                 ignore_duplicate=True,
             )
@@ -414,7 +422,7 @@ class WorkflowEngine:
             key=decision.key,
             action=decision.action,
             by=decision.by,
-            source=decision.source,
+            source=sanitized_source,
             status="decision_recorded",
             waiting_on=row["waiting_on"],
             result_summary=None,
@@ -2172,6 +2180,36 @@ class ApprovalClient:
 
         source = _validate_approval_source(key, approver, decision, decision_event.get("source"))
         return {**decision, "source": source}
+
+
+_APPROVAL_SOURCE_ALLOWLIST = {"kind", "id", "channel", "message_url", "message_id", "event_id"}
+_APPROVAL_PRIVATE_MARKERS = ("@", "secret", "token", "password", "credential", "raw_", "raw ", "api_key")
+
+
+def _approval_value_looks_private(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower()
+    return any(marker in lowered for marker in _APPROVAL_PRIVATE_MARKERS)
+
+
+def _sanitize_approval_source(source: Any) -> Dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    sanitized: Dict[str, Any] = {}
+    for key in _APPROVAL_SOURCE_ALLOWLIST:
+        value = source.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        if not _approval_value_looks_private(value):
+            sanitized[key] = value
+        elif key in {"message_url", "message_id", "event_id"} and "event_id" not in sanitized:
+            sanitized["event_id"] = f"redacted:{_hash_text(value)[:12]}"
+    return sanitized
+
+
+def _sanitize_approval_text(value: str) -> str:
+    return "[REDACTED]" if value else value
 
 
 def _validate_approval_source(
