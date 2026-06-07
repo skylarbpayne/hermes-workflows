@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
-from hermes_workflows import WorkflowEngine
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
 from hermes_workflows.hermes_plugin_approvals import (
     _configured_dbs,
-    _handle_workflow_approval_decide,
+    _next_step_for_receipt,
     _redact,
-    resolve_db,
+    _receipt_to_payload,
 )
 
 try:  # FastAPI is provided by Hermes Agent's dashboard process.
@@ -69,14 +70,43 @@ def _status_packet(
     return packet
 
 
-def _json_tool_result(raw: str) -> dict[str, Any]:
+def _dashboard_approver_id() -> str | None:
+    """Return the server-configured human identity dashboard decisions may use."""
+    env_value = os.getenv("HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID")
+    if env_value and env_value.strip():
+        return env_value.strip()
     try:
-        payload = json.loads(raw)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"invalid plugin tool response: {exc}") from exc
-    if not payload.get("success"):
-        raise HTTPException(status_code=400, detail=str(payload.get("error") or "approval decision failed"))
-    return payload
+        from hermes_cli.config import cfg_get, load_config  # type: ignore
+
+        config = load_config()
+        for key in ("dashboard_approver_id", "approver_id"):
+            value = cfg_get(config, "plugins", "entries", "hermes-workflows-approvals", key, default=None)
+            if value and str(value).strip():
+                return str(value).strip()
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_dashboard_db(db: Any = None) -> tuple[str, str]:
+    """Resolve dashboard requests through configured aliases only.
+
+    The dashboard runs inside the Hermes process, so accepting explicit paths
+    over HTTP would turn a UI route into arbitrary local SQLite read/write.
+    Operators can add aliases in plugin config instead.
+    """
+    configured = _configured_dbs()
+    raw = str(db or "").strip()
+    if not raw:
+        if len(configured) == 1:
+            alias, path = next(iter(configured.items()))
+            return alias, path
+        if "default" in configured:
+            return "default", configured["default"]
+        raise HTTPException(status_code=400, detail="Select a configured DB alias.")
+    if raw not in configured:
+        raise HTTPException(status_code=400, detail="Dashboard API only accepts configured DB aliases.")
+    return raw, configured[raw]
 
 
 @router.get("/dbs")
@@ -97,7 +127,7 @@ async def overview(
     command_limit: int = 10,
     command_payload_chars: int = 1000,
 ) -> dict[str, Any]:
-    db_path = resolve_db(db)
+    db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     workflow_rows = engine.list_workflows(status=status)[: _int(limit, default=50, maximum=200)]
     workflows = [
@@ -116,6 +146,7 @@ async def overview(
         counts_by_status[str(item.get("status") or "unknown")] = counts_by_status.get(str(item.get("status") or "unknown"), 0) + 1
     return {
         "db": db_path,
+        "db_alias": db_alias,
         "workflow_count": len(workflows),
         "counts_by_status": counts_by_status,
         "workflows": workflows,
@@ -131,7 +162,7 @@ async def workflow_status(
     command_limit: int = 20,
     command_payload_chars: int = 1000,
 ) -> dict[str, Any]:
-    db_path = resolve_db(db)
+    _db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     return _status_packet(
         engine,
@@ -145,8 +176,48 @@ async def workflow_status(
 
 @router.post("/approvals/decision")
 async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
-    # Dashboard approvals intentionally default to record-only. Operators can opt
-    # into resume per click, but the dashboard must not surprise-run workflows.
-    args = dict(body)
-    args.setdefault("resume", False)
-    return _json_tool_result(_handle_workflow_approval_decide(args))
+    # Dashboard approvals are record-only and derive human provenance from
+    # server-side plugin configuration, never from untrusted browser JSON.
+    approver_id = _dashboard_approver_id()
+    if not approver_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Dashboard approvals require server-configured dashboard_approver_id.",
+        )
+    db_alias, db_path = _resolve_dashboard_db(body.get("db"))
+    action = str(body.get("action") or "approve").strip().lower()
+    if action not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="action must be approve or reject")
+    workflow_id = str(body.get("workflow_id") or "").strip()
+    key = str(body.get("key") or "").strip()
+    if not workflow_id or not key:
+        raise HTTPException(status_code=400, detail="workflow_id and key are required")
+
+    message_id = f"dashboard:{uuid.uuid4()}"
+    decision = ApprovalDecisionInput(
+        workflow_id=workflow_id,
+        key=key,
+        action=action,
+        by=approver_id,
+        source={
+            "kind": "human",
+            "id": approver_id,
+            "channel": "hermes-dashboard",
+            "message_id": message_id,
+        },
+        note=body.get("note"),
+        reason=body.get("reason"),
+        idempotency_key=message_id,
+    )
+    try:
+        receipt = WorkflowEngine(db_path).submit_approval_decision(decision, resume=False)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"approval decision failed: {type(exc).__name__}: {exc}") from exc
+    receipt_payload = _receipt_to_payload(receipt, resume_requested=False)
+    return {
+        "success": True,
+        "db": db_path,
+        "db_alias": db_alias,
+        "receipt": receipt_payload,
+        "next_step": _next_step_for_receipt(receipt_payload),
+    }

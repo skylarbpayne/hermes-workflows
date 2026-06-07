@@ -40,6 +40,9 @@ plugins:
       workflow_dbs:
         - name: palmer
           path: /tmp/hermes-workflows-approval-smoke.sqlite
+      # Required only if using the dashboard tab's approve/reject buttons.
+      # The browser cannot assert human identity; the server stamps this id.
+      dashboard_approver_id: skylar
 ```
 
 Environment fallback for tests/scripts:
@@ -47,6 +50,7 @@ Environment fallback for tests/scripts:
 ```bash
 export HERMES_WORKFLOWS_DB=/tmp/hermes-workflows-approval-smoke.sqlite
 export HERMES_WORKFLOWS_DBS='{"palmer":"/tmp/hermes-workflows-approval-smoke.sqlite"}'
+export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=skylar
 ```
 
 ## Hermes dashboard plugin
@@ -83,7 +87,11 @@ The dashboard tab at `/workflows` shows:
 - pending and historical commands
 - diagnostics
 - approval artifacts with secret-looking fields redacted
-- record-only approve/reject decisions (`resume=false` by default)
+- record-only approve/reject decisions (`resume=false` always from the dashboard API)
+
+Dashboard HTTP APIs are intentionally alias-only. They reject explicit SQLite paths, even though the lower-level CLI/tool adapter can accept paths, because dashboard routes run inside the Hermes process and must not become arbitrary local file readers/writers.
+
+Dashboard approve/reject buttons are disabled unless `dashboard_approver_id` (or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID`) is configured server-side. The browser does not send `by`, `channel`, or message provenance; the backend stamps `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision without resuming the workflow.
 
 ## Tools
 

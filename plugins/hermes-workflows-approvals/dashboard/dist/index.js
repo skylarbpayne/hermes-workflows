@@ -76,11 +76,6 @@
       return e("span", { className: "hwf-muted" }, approval && approval.decision ? "decided" : "no actions");
     }
     function submit(action) {
-      const approver = approval && approval.approver ? String(approval.approver) : "human";
-      const defaultBy = approver.startsWith("human:") ? approver.slice("human:".length) : approver;
-      const by = window.prompt("Approver id", defaultBy || "human");
-      if (!by) return;
-      const messageId = "dashboard-" + Date.now() + "-" + Math.random().toString(36).slice(2);
       setUi({ busy: true, error: null, done: null });
       SDK.fetchJSON(API + "/approvals/decision", {
         method: "POST",
@@ -90,9 +85,6 @@
           workflow_id: workflow.workflow_id,
           key: approval.key,
           action: action,
-          by: by,
-          channel: "hermes-dashboard",
-          message_id: messageId,
           resume: false
         })
       }).then(function (data) {
@@ -129,6 +121,7 @@
             e("div", null,
               e("strong", null, approval.key),
               e("span", { className: statusClass(approval.status) }, " " + approval.status),
+              approval.approver && e("p", { className: "hwf-muted" }, "Required approver: " + approval.approver),
               e("p", { className: "hwf-muted" }, approval.prompt || ""),
               e("pre", null, pretty(approval.artifact))),
             e(ApprovalActions, { db: props.db, workflow: wf, approval: approval, onDecided: props.onRefresh }));
