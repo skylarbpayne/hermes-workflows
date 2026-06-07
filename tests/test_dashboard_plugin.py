@@ -152,6 +152,28 @@ def test_dashboard_plugin_api_rejects_explicit_db_paths(tmp_path, monkeypatch):
     assert "configured DB alias" in str(getattr(excinfo.value, "detail", excinfo.value))
 
 
+def test_dashboard_approval_requires_server_configured_approver(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    create_pending_approval(db)
+    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    api = load_dashboard_api()
+
+    with pytest.raises(Exception) as excinfo:
+        run(
+            api.decide_approval(
+                {
+                    "db": "palmer-smoke",
+                    "workflow_id": "wf_plugin",
+                    "key": "approve_plugin_test",
+                    "action": "approve",
+                }
+            )
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 403
+    assert "dashboard_approver_id" in str(getattr(excinfo.value, "detail", excinfo.value))
+
+
 def test_dashboard_approval_identity_is_server_derived_not_client_supplied(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
