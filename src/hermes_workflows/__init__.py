@@ -11,7 +11,10 @@ v0 intentionally tiny:
 from .approvals import ApprovalDecisionInput, ApprovalReceipt, ApprovalView
 from .decorators import step, workflow
 from .engine import RunResult, WorkflowEngine
+from .invocation import InvocationService, TrustedResumer
 from .prompts import AgentPrompt, AgentStep, render_prompt
+from .receipts import build_workflow_receipt, redact_secrets
+from .registry import WorkflowDbConfig, WorkflowRefConfig, WorkflowRegistry
 from .runners import AgentRunnerError, SubprocessAgentRunner
 from .workflow_values import Workflow
 
@@ -23,9 +26,16 @@ __all__ = [
     "AgentRunnerError",
     "AgentStep",
     "RunResult",
+    "InvocationService",
     "SubprocessAgentRunner",
+    "TrustedResumer",
     "Workflow",
+    "WorkflowDbConfig",
     "WorkflowEngine",
+    "WorkflowRefConfig",
+    "WorkflowRegistry",
+    "build_workflow_receipt",
+    "redact_secrets",
     "render_prompt",
     "step",
     "workflow",

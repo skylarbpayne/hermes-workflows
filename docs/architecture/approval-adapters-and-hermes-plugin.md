@@ -111,6 +111,28 @@ hwf-approval:v1:reject:<structured-token>
 
 The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, or workflow execution. `resume=false` is the safe default for plugin/gateway calls.
 
+## Trusted local resume bridge
+
+When an adapter records a decision with `resume=false`, the workflow intentionally remains waiting. The safe follow-up path is a registry-aware local operator command, not gateway-side workflow execution:
+
+```bash
+hermes-workflows resume-trusted <workflow-alias-or-ref> \
+  --config .hermes/workflows.registry.json \
+  --id <workflow-id> \
+  --receipt-json /tmp/workflow-resume-receipt.json
+```
+
+For cron/manual drainers, use:
+
+```bash
+hermes-workflows resume-pending \
+  --config .hermes/workflows.registry.json \
+  --registry-name <trusted-workflow-alias> \
+  --limit 5
+```
+
+`resume-pending` only runs registry entries with `trusted_resume: true`; this keeps bulk resume from accidentally draining old experiments. Receipts should be written back to Kanban/dashboard/artifact surfaces by the adapter or operator script, not by the workflow runtime itself.
+
 ## Other agent/runtime adapters
 
 The same contract should support:
