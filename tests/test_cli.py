@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -77,9 +78,11 @@ async def generated_parent_workflow(ctx, inputs):
 '''
 
 
-def run_cli(tmp_path, *args):
+def run_cli(tmp_path, *args, env_extra=None):
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{Path.cwd() / 'src'}:{tmp_path}:{env.get('PYTHONPATH', '')}"
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
         [sys.executable, "-m", "hermes_workflows", *args],
         cwd=Path.cwd(),
@@ -927,3 +930,460 @@ def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
         "channel": "local-dashboard",
         "message_id": "web-click-1",
     }
+
+
+def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(tmp_path):
+    (tmp_path / "alias_wf.py").write_text(
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def alias_workflow(ctx, inputs):\n"
+        "    return {'message': inputs['message']}\n"
+    )
+    registry = tmp_path / ".hermes" / "workflows.registry.json"
+    registry.parent.mkdir()
+    registry.write_text(
+        json.dumps(
+            {
+                "workflows": {
+                    "alias-demo": {
+                        "workflow_ref": "alias_wf:alias_workflow",
+                        "default_input": {"message": "from-registry"},
+                    }
+                }
+            }
+        )
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "uv-called.json"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, subprocess, sys\n"
+        f"open({str(marker)!r}, 'w').write(json.dumps({{'args': sys.argv[1:], 'cwd': os.getcwd()}}))\n"
+        "args = sys.argv[1:]\n"
+        "assert args[0] == 'run'\n"
+        "raise SystemExit(subprocess.run(args[1:]).returncode)\n"
+    )
+    fake_uv.chmod(0o755)
+
+    payload = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "alias-demo",
+            "--config",
+            str(registry),
+            "--project-root",
+            str(tmp_path),
+            env_extra={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        ).stdout
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"] == {"message": "from-registry"}
+    assert (tmp_path / ".hermes" / "workflows.sqlite").exists()
+    uv_call = json.loads(marker.read_text())
+    uv_args = uv_call["args"]
+    assert uv_call["cwd"] == str(tmp_path)
+    assert uv_args[:4] == ["run", "python", "-m", "hermes_workflows"]
+    assert "_run-engine" in uv_args
+
+
+def test_workflow_run_helper_supports_direct_uv_script_style_and_default_db(tmp_path):
+    if shutil.which("uv") is None:
+        pytest.skip("uv is required for direct uv script smoke")
+    script = tmp_path / "direct_workflow.py"
+    script.write_text(
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def direct_workflow(ctx, inputs):\n"
+        "    return {'ok': inputs.get('ok', False)}\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(direct_workflow.run())\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{Path.cwd() / 'src'}:{env.get('PYTHONPATH', '')}"
+    completed = subprocess.run(
+        [
+            "uv",
+            "run",
+            str(script),
+            "--project-root",
+            str(tmp_path),
+            "--id",
+            "wf_direct_helper",
+            "--input-json",
+            '{"ok":true}',
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "completed"
+    assert payload["result"] == {"ok": True}
+    assert (tmp_path / ".hermes" / "workflows.sqlite").exists()
+
+
+def test_run_no_drain_replays_memoized_step_outputs_from_same_entrypoint_and_db(tmp_path):
+    (tmp_path / "memo_wf.py").write_text(
+        "from hermes_workflows import step, workflow\n"
+        "@step\n"
+        "async def compute(ctx, value):\n"
+        "    return {'computed': value}\n"
+        "@workflow\n"
+        "async def memo_workflow(ctx, inputs):\n"
+        "    result = await compute(ctx, inputs['value'])\n"
+        "    return {'final': result}\n"
+    )
+    db = tmp_path / ".hermes" / "workflows.sqlite"
+    first = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            str(tmp_path / "memo_wf.py"),
+            "--project-root",
+            str(tmp_path),
+            "--id",
+            "wf_memo",
+            "--input-json",
+            '{"value":"from-worker"}',
+            "--no-drain",
+        ).stdout
+    )
+    assert first == {
+        "workflow_id": "wf_memo",
+        "status": "waiting",
+        "waiting_on": "step:compute:0",
+        "result": None,
+        "error": None,
+    }
+
+    # Simulate an out-of-process worker publishing durable output without
+    # relying on an in-memory Python stack from the first run.
+    with sqlite3.connect(db) as con:
+        event_count_before = con.execute("SELECT COUNT(*) FROM workflow_events").fetchone()[0]
+        next_seq = con.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_events WHERE workflow_id = 'wf_memo'").fetchone()[0]
+        con.execute(
+            """
+            INSERT INTO workflow_events(workflow_id, seq, type, key, payload_json, idempotency_key, created_at)
+            VALUES ('wf_memo', ?, 'StepCompleted', 'step:compute:0', ?, 'completed:step:compute:0', 1)
+            """,
+            (next_seq, '{"output":{"computed":"from-worker"}}'),
+        )
+        con.execute("UPDATE workflow_commands_outbox SET status = 'completed' WHERE workflow_id = 'wf_memo' AND key = 'step:compute:0'")
+        con.execute("UPDATE workflow_instances SET status = 'running', waiting_on = NULL WHERE id = 'wf_memo'")
+
+    resumed = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            str(tmp_path / "memo_wf.py"),
+            "--project-root",
+            str(tmp_path),
+            "--id",
+            "wf_memo",
+            "--input-json",
+            '{"value":"from-worker"}',
+            "--no-drain",
+            "--watch",
+            "--poll-interval",
+            "0",
+            "--max-resumes",
+            "1",
+        ).stdout
+    )
+
+    assert resumed["status"] == "completed"
+    assert resumed["result"] == {"final": {"computed": "from-worker"}}
+    with sqlite3.connect(db) as con:
+        requested_count = con.execute(
+            "SELECT COUNT(*) FROM workflow_events WHERE workflow_id = 'wf_memo' AND type = 'StepRequested'"
+        ).fetchone()[0]
+        event_count_after = con.execute("SELECT COUNT(*) FROM workflow_events").fetchone()[0]
+    assert requested_count == 1
+    assert event_count_after > event_count_before
+
+
+def test_registry_discover_lists_workflow_files(tmp_path):
+    workflow_file = tmp_path / "workflows" / "daily_ops.py"
+    workflow_file.parent.mkdir()
+    (workflow_file.parent / "helpers.py").write_text("DEFAULT_OUTPUT = {'from': 'sibling'}\n")
+    workflow_file.write_text(
+        "from hermes_workflows import workflow\n"
+        "from helpers import DEFAULT_OUTPUT\n"
+        "@workflow\n"
+        "async def daily_ops(ctx, inputs):\n"
+        "    return DEFAULT_OUTPUT\n"
+    )
+
+    payload = json.loads(
+        run_cli(
+            tmp_path,
+            "registry",
+            "discover",
+            "--project-root",
+            str(tmp_path),
+        ).stdout
+    )
+
+    assert payload["project_root"] == str(tmp_path)
+    assert payload["workflows"] == [
+        {
+            "name": "daily_ops",
+            "workflow_ref": str(workflow_file) + ":daily_ops",
+            "path": str(workflow_file),
+            "symbol": "daily_ops",
+            "workflow_name": "daily_ops",
+        }
+    ]
+
+
+def run_cli_from(cwd, pythonpath_entries, *args, check=True, env_extra=None):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ":".join(str(entry) for entry in pythonpath_entries) + f":{env.get('PYTHONPATH', '')}"
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, "-m", "hermes_workflows", *args],
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=check,
+    )
+
+
+def test_registry_discover_is_static_and_does_not_execute_workflow_modules(tmp_path):
+    marker = tmp_path / "import-side-effect.txt"
+    workflow_file = tmp_path / "dangerous_workflow.py"
+    workflow_file.write_text(
+        "from pathlib import Path\n"
+        "from hermes_workflows import workflow\n"
+        f"Path({str(marker)!r}).write_text('imported')\n"
+        "@workflow\n"
+        "async def dangerous_workflow(ctx, inputs):\n"
+        "    return inputs\n"
+    )
+
+    payload = json.loads(
+        run_cli(
+            tmp_path,
+            "registry",
+            "discover",
+            "--project-root",
+            str(tmp_path),
+        ).stdout
+    )
+
+    assert not marker.exists()
+    assert payload["workflows"] == [
+        {
+            "name": "dangerous_workflow",
+            "workflow_ref": str(workflow_file) + ":dangerous_workflow",
+            "path": str(workflow_file),
+            "symbol": "dangerous_workflow",
+            "workflow_name": "dangerous_workflow",
+        }
+    ]
+
+
+def test_doctor_reports_bad_workflow_ref_as_json_instead_of_exiting_early(tmp_path):
+    completed = run_cli_from(
+        tmp_path,
+        [Path.cwd() / "src", tmp_path],
+        "doctor",
+        "--db",
+        str(tmp_path / "doctor.sqlite"),
+        "--workflow-ref",
+        "no_such_module:missing",
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    payload = json.loads(completed.stdout)
+    assert payload["doctor"]["workflow_ref_importable"] is False
+    assert payload["doctor"]["ok"] is False
+    assert "No module named" in payload["doctor"]["workflow_ref_error"]
+
+
+def test_run_with_external_config_defaults_db_to_config_project_root(tmp_path):
+    project = tmp_path / "workflow_project"
+    caller = tmp_path / "caller"
+    project.mkdir()
+    caller.mkdir()
+    (project / ".hermes").mkdir()
+    (project / "configured_wf.py").write_text(
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def configured_wf(ctx, inputs):\n"
+        "    return {'project': inputs['project']}\n"
+    )
+    registry = project / ".hermes" / "workflows.registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "workflows": {
+                    "configured": {
+                        "workflow_ref": str(project / "configured_wf.py") + ":configured_wf",
+                        "default_input": {"project": "right-db"},
+                    }
+                }
+            }
+        )
+    )
+
+    payload = json.loads(
+        run_cli_from(
+            caller,
+            [Path.cwd() / "src", project],
+            "run",
+            "configured",
+            "--config",
+            str(registry),
+            "--id",
+            "wf_configured",
+        ).stdout
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"] == {"project": "right-db"}
+    assert (project / ".hermes" / "workflows.sqlite").exists()
+    assert not (caller / ".hermes" / "workflows.sqlite").exists()
+
+
+def test_direct_workflow_run_defaults_db_to_workflow_file_project(tmp_path):
+    if shutil.which("uv") is None:
+        pytest.skip("uv is required for direct uv script smoke")
+    project = tmp_path / "workflow_project"
+    caller = tmp_path / "caller"
+    project.mkdir()
+    caller.mkdir()
+    script = project / "direct_project_workflow.py"
+    script.write_text(
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def direct_project_workflow(ctx, inputs):\n"
+        "    return {'value': inputs['value']}\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(direct_project_workflow.run())\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{Path.cwd() / 'src'}:{env.get('PYTHONPATH', '')}"
+    completed = subprocess.run(
+        ["uv", "run", str(script), "--id", "wf_direct_project", "--input-json", '{"value":"project-db"}'],
+        cwd=caller,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["status"] == "completed"
+    assert payload["result"] == {"value": "project-db"}
+    assert (project / ".hermes" / "workflows.sqlite").exists()
+    assert not (caller / ".hermes" / "workflows.sqlite").exists()
+
+
+def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
+    project = tmp_path / "workflow_project"
+    caller = tmp_path / "caller"
+    project.mkdir()
+    caller.mkdir()
+    (project / ".hermes").mkdir()
+    (project / "configured_wf.py").write_text(
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def configured_wf(ctx, inputs):\n"
+        "    return {'project': inputs['project']}\n"
+    )
+    registry = project / ".hermes" / "workflows.registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "workflows": {
+                    "configured": {
+                        "workflow_ref": str(project / "configured_wf.py") + ":configured_wf",
+                        "default_input": {"project": "uv-cwd"},
+                    }
+                }
+            }
+        )
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "uv-cwd.json"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, subprocess, sys\n"
+        f"open({str(marker)!r}, 'w').write(json.dumps({{'args': sys.argv[1:], 'cwd': os.getcwd()}}))\n"
+        "args = sys.argv[1:]\n"
+        "assert args[0] == 'run'\n"
+        "raise SystemExit(subprocess.run(args[1:]).returncode)\n"
+    )
+    fake_uv.chmod(0o755)
+
+    payload = json.loads(
+        run_cli_from(
+            caller,
+            [Path.cwd() / "src", project],
+            "run",
+            "configured",
+            "--config",
+            str(registry),
+            "--id",
+            "wf_config_uv_cwd",
+            env_extra={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        ).stdout
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"] == {"project": "uv-cwd"}
+    uv_call = json.loads(marker.read_text())
+    assert uv_call["cwd"] == str(project)
+    assert (project / ".hermes" / "workflows.sqlite").exists()
+    assert not (caller / ".hermes" / "workflows.sqlite").exists()
+
+
+def test_module_ref_run_defaults_db_to_imported_module_project(tmp_path):
+    project = tmp_path / "workflow_project"
+    caller = tmp_path / "caller"
+    project.mkdir()
+    caller.mkdir()
+    (project / "module_wf.py").write_text(
+        "from hermes_workflows import workflow\n"
+        "@workflow\n"
+        "async def module_workflow(ctx, inputs):\n"
+        "    return {'ok': True}\n"
+    )
+
+    payload = json.loads(
+        run_cli_from(
+            caller,
+            [Path.cwd() / "src", project],
+            "run",
+            "module_wf:module_workflow",
+            "--direct",
+            "--id",
+            "wf_module_ref",
+        ).stdout
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"] == {"ok": True}
+    assert (project / ".hermes" / "workflows.sqlite").exists()
+    assert not (caller / ".hermes" / "workflows.sqlite").exists()
+
+
+def test_internal_run_engine_command_is_hidden_from_top_level_help(tmp_path):
+    completed = run_cli_from(tmp_path, [Path.cwd() / "src", tmp_path], "--help")
+    assert "_run-engine" not in completed.stdout

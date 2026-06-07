@@ -68,7 +68,7 @@ That local server is intentionally boring: it is not an agent runtime, and it do
 
 ## Agent/operator bridge
 
-For recurring agent-owned workflows, keep aliases in `.hermes/workflows.registry.json` and invoke through the bridge commands:
+For recurring agent-owned workflows, keep aliases in `.hermes/workflows.registry.json` and invoke them with the product-shaped runner:
 
 ```json
 {
@@ -82,6 +82,17 @@ For recurring agent-owned workflows, keep aliases in `.hermes/workflows.registry
   }
 }
 ```
+
+```bash
+hermes-workflows run demo \
+  --config .hermes/workflows.registry.json \
+  --id wf_demo \
+  --input-json '{"destination":"NYC","approver":"human:operator"}'
+```
+
+`run` resolves registry aliases, module refs, and workflow file paths, then re-invokes through `uv`. If no DB is configured or passed, it uses `<project-root>/.hermes/workflows.sqlite` so a runner, worker, and later resume do not accidentally split state across multiple SQLite files. For direct `uv run workflow.py`, the workflow project's uv environment must be able to import `hermes_workflows`.
+
+For adapter surfaces that need redacted receipts and source metadata, use the bridge invocation command:
 
 ```bash
 hermes-workflows invoke demo \
@@ -110,23 +121,20 @@ hermes-workflows resume-pending \
 
 ## The mental model
 
-A workflow function is a decider. It replays from the top on every run, resolves completed steps from SQLite history, and exits cleanly whenever it needs a step, signal, or approval.
+A workflow function is a decider. It replays from the top on every run, resolves completed steps from SQLite history, and exits cleanly whenever it needs a step, signal, or approval. Workers do not resume a suspended Python stack; they publish durable outputs/signals. The runner or supervisor re-runs the same entrypoint against the same DB/run id, and memoized values let control flow advance.
 
 ```text
-agent/user request
-  -> workflow starts
-  -> step commands are recorded
-  -> agent runner completes agent steps
-  -> generated workflow source is recorded + hashed
-  -> approval signal gates generated execution
-  -> output packet is created
-  -> side effects stay blocked until a separate approval
+operator runs `hermes-workflows run <name-or-path>` or `uv run workflow.py`
+  -> workflow emits missing commands and exits when waiting
+worker/adapter publishes output, signal, or approval
+  -> `hermes-workflows run --watch` or another trusted runner re-invokes the entrypoint
+  -> completed calls replay from SQLite, then the decider reaches the next wait or terminal result
 ```
 
 ## Minimal workflow
 
 ```python
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import step, workflow
 
 @step
 async def draft_packet(ctx, inputs):
@@ -144,29 +152,30 @@ async def approval_gated_workflow(ctx, inputs):
     )
     return {"packet": packet, "decision": decision, "side_effects": {"sent": 0}}
 
-engine = WorkflowEngine("workflow.sqlite")
-print(engine.run_until_idle(approval_gated_workflow, {"topic": "demo"}, workflow_id="wf_demo"))
+if __name__ == "__main__":
+    raise SystemExit(approval_gated_workflow.run())
+```
+
+Run it as a normal uv script or through the CLI:
+
+```bash
+uv run workflows/approval_gated.py --id wf_demo --input-json '{"topic":"demo"}'
+hermes-workflows run workflows/approval_gated.py --id wf_demo --input-json '{"topic":"demo"}'
 ```
 
 When the approval is ready, submit a typed decision. This is the adapter seam for CLIs, dashboards, Hermes plugins, Discord, Telegram, or any other runtime:
 
-```python
-from hermes_workflows import ApprovalDecisionInput
-
-receipt = engine.submit_approval_decision(
-    ApprovalDecisionInput(
-        workflow_id="wf_demo",
-        key="approve_packet",
-        action="approve",
-        by="operator",
-        source={"kind": "human", "id": "operator", "channel": "review-ui", "message_id": "approval-message-1"},
-        idempotency_key="approval-message-1",
-    ),
-    resume=True,
-)
+```bash
+hermes-workflows approve workflows/approval_gated.py \
+  --db .hermes/workflows.sqlite \
+  --id wf_demo \
+  --key approve_packet \
+  --by operator \
+  --channel review-ui \
+  --message-id approval-message-1
 ```
 
-Use `resume=False` for chat/plugin callbacks that should record the approval but leave downstream work to a separate worker/resumer.
+Use `resume=False` in embedding/plugin callbacks that should record the approval but leave downstream work to a separate worker/resumer.
 
 ## Add an agent step
 

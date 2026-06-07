@@ -15,20 +15,28 @@ hermes-workflows doctor \
   --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
 
 hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
-  --db /tmp/hermes-workflows-quickstart.sqlite \
   --id wf_trip_quickstart \
   --input-json '{"destination":"NYC","approver":"human:operator"}'
 
 hermes-workflows status \
-  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --db .hermes/workflows.sqlite \
   --id wf_trip_quickstart
 ```
+
+`hermes-workflows run <name-or-path>` is the default operator command. It re-invokes itself through `uv`, resolves registry names, `module:function` refs, or workflow files, and stores state in `<project-root>/.hermes/workflows.sqlite` unless `--db` is explicitly supplied. A workflow file can also opt into the same behavior directly:
+
+```python
+if __name__ == "__main__":
+    trip_planning_workflow.run()
+```
+
+Then `uv run workflow.py --id wf_demo --input-json '{...}'` uses the same memoized runtime without embedding engine plumbing in the workflow definition. The workflow project's uv environment must be able to import `hermes_workflows` — add this package as a dependency or run from a source checkout with `PYTHONPATH=src` during development.
 
 The quickstart stops at `approve_trip_plan`. That is intentional: a workflow can do deterministic local work, persist the wait state, and exit cleanly before a human-authorized side effect. To resume it from the CLI, record a human-sourced approval:
 
 ```bash
 hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
-  --db /tmp/hermes-workflows-quickstart.sqlite \
+  --db .hermes/workflows.sqlite \
   --id wf_trip_quickstart \
   --key approve_trip_plan \
   --by operator \
@@ -95,12 +103,15 @@ print(receipt.status)
 ## Runtime model in one screen
 
 ```text
-Hermes/operator invokes workflow
-  -> WorkflowEngine appends/replays SQLite history
-  -> local steps or worker processes complete durable commands
-  -> AgentStep calls run only through configured trusted runners
-  -> approvals/signals are recorded with provenance
-  -> trusted local resume replays the decider and emits receipts/status
+operator runs `hermes-workflows run <name-or-path>` or `uv run workflow.py`
+  -> the same workflow entrypoint opens the same SQLite DB/run id
+  -> completed steps/signals/approvals replay as memoized values
+  -> missing work is emitted as durable commands and the process can exit
+workers/adapters
+  -> publish step outputs, signals, and approval decisions durably
+runner/supervisor
+  -> re-invokes the same entrypoint/DB/run (`hermes-workflows run --watch` when desired)
+  -> control flow advances until the workflow is waiting again or terminal
 ```
 
 Workflow code runs in the Python process that imports it: the CLI, a worker, a trusted resumer, or an embedding Hermes adapter. Agent steps are not magic in-process model calls; they execute through configured runner seams such as `SubprocessAgentRunner`, which sends bounded JSON to a trusted local command and fails closed on timeout, invalid JSON, non-zero exit, or oversized output.

@@ -61,10 +61,27 @@ class DurableStepCall:
 
 
 def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    """Mark a plain async function as a durable workflow decider."""
+    """Mark a plain async function as a durable workflow decider.
+
+    The returned function is still just the user's async decider, with a small
+    direct-run helper attached so a workflow file can end with:
+
+        if __name__ == "__main__":
+            my_workflow.run()
+
+    Running that file with ``uv run workflow.py`` uses the same durable runtime
+    and default DB as the ``hermes-workflows run`` CLI.
+    """
 
     workflow_name = f"{_REGISTRATION_NAMESPACE}:{fn.__name__}" if _REGISTRATION_NAMESPACE else fn.__name__
     setattr(fn, "__workflow_name__", workflow_name)
+
+    def run(argv: list[str] | None = None) -> int:
+        from .runner_api import workflow_run_cli
+
+        return workflow_run_cli(fn, argv, workflow_ref=workflow_name)
+
+    setattr(fn, "run", run)
     from .engine import register_workflow
 
     return register_workflow(fn)

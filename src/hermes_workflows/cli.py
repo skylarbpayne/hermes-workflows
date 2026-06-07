@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
+import os
+import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,16 +15,13 @@ from .dashboard import render_dashboard
 from .dashboard_server import serve_dashboard
 from .engine import JsonCodec, RunResult, WorkflowEngine
 from .invocation import InvocationService, TrustedResumer
-from .registry import WorkflowRegistry
+from .registry import WorkflowRegistry, looks_like_path
+from .runner_api import default_db_path, default_workflow_id, infer_project_root, run_workflow_function
+from .workflow_loading import canonical_workflow_ref, discover_workflow_refs, load_workflow_ref, resolve_discovered_workflow
 
 
 def load_workflow(ref: str) -> Callable[..., Any]:
-    if ":" not in ref:
-        raise SystemExit("workflow ref must look like module:function")
-    module_name, attr = ref.split(":", 1)
-    module = importlib.import_module(module_name)
-    workflow = getattr(module, attr)
-    return workflow
+    return load_workflow_ref(ref)
 
 
 def result_payload(result: RunResult) -> dict[str, Any]:
@@ -75,7 +76,6 @@ def approval_payload_from_args(args: argparse.Namespace, action: str) -> dict[st
 
 def run_doctor(args: argparse.Namespace) -> int:
     import sqlite3
-    import sys
 
     checks = {
         "python": sys.version.split()[0],
@@ -91,14 +91,152 @@ def run_doctor(args: argparse.Namespace) -> int:
             checks["workflow_ref_error"] = str(exc)
         else:
             checks["workflow_ref_importable"] = True
-    checks["ok"] = bool(checks["python"] and checks["sqlite"] and checks["db_parent_writable"])
+    checks["ok"] = bool(
+        checks["python"]
+        and checks["sqlite"]
+        and checks["db_parent_writable"]
+        and checks.get("workflow_ref_importable", True)
+    )
     print_json({"doctor": checks})
     return 0
 
 
+def _uv_cwd_for_run(args: argparse.Namespace) -> Path:
+    if args.project_root is not None:
+        return infer_project_root(args.project_root)
+    if args.config is not None:
+        return infer_project_root(start=args.config)
+    ref = str(args.workflow_ref)
+    path_candidate = ref.rsplit(":", 1)[0] if ":" in ref and ref.rsplit(":", 1)[0].endswith(".py") else ref
+    path = Path(path_candidate).expanduser()
+    if path.suffix == ".py" or path.exists():
+        return infer_project_root(start=path)
+    return Path.cwd()
+
+
+def run_via_uv(raw_argv: list[str], args: argparse.Namespace) -> int:
+    uv = shutil.which("uv")
+    if uv is None:
+        # Keep the CLI usable in minimal environments; tests and normal installs
+        # with uv still exercise the blessed uv path.
+        return main(["_run-engine", *raw_argv[1:]])
+    child_args = ["_run-engine", *raw_argv[1:]]
+    cmd = [uv, "run", "python", "-m", "hermes_workflows", *child_args]
+    env = os.environ.copy()
+    env.pop("VIRTUAL_ENV", None)
+    env["HERMES_WORKFLOWS_UV_CHILD"] = "1"
+    completed = subprocess.run(cmd, env=env, cwd=_uv_cwd_for_run(args))
+    return int(completed.returncode)
+
+
+def resolve_run_invocation(args: argparse.Namespace) -> tuple[Callable[..., Any], str, Path, str, Any]:
+    config_path = args.config
+    if args.project_root is not None:
+        project_root = infer_project_root(args.project_root)
+    elif config_path is not None:
+        project_root = infer_project_root(start=config_path)
+    else:
+        project_root = infer_project_root()
+    default_registry = project_root / ".hermes" / "workflows.registry.json"
+    if config_path is None and default_registry.exists():
+        config_path = default_registry
+    registry_obj = WorkflowRegistry.from_sources(config_path=config_path)
+    workflow_config = None
+    workflow_ref = args.workflow_ref
+    default_input: Any = {}
+
+    try:
+        resolved_config = registry_obj.resolve_workflow(args.workflow_ref)
+    except ValueError:
+        discovered = resolve_discovered_workflow(args.workflow_ref, project_root=project_root)
+        if discovered is not None:
+            workflow_ref = discovered
+        elif looks_like_path(args.workflow_ref) or args.workflow_ref.endswith(".py") or ":" in args.workflow_ref:
+            workflow_ref = args.workflow_ref
+        else:
+            raise SystemExit(f"Unknown workflow alias or path {args.workflow_ref!r}")
+    else:
+        if args.workflow_ref in registry_obj.workflows:
+            workflow_config = resolved_config
+            workflow_ref = workflow_config.workflow_ref
+            default_input = dict(workflow_config.default_input)
+        else:
+            workflow_ref = resolved_config.workflow_ref
+
+    workflow = load_workflow(workflow_ref)
+    workflow_ref = canonical_workflow_ref(workflow_ref, workflow)
+    module = sys.modules.get(getattr(workflow, "__module__", ""))
+    module_file = getattr(module, "__file__", None)
+    db_project_root = project_root
+    if args.project_root is None and workflow_config is None:
+        ref_path = Path(workflow_ref.split(":", 1)[0]).expanduser()
+        if ref_path.suffix == ".py" or ref_path.exists():
+            db_project_root = infer_project_root(start=ref_path)
+        elif module_file:
+            db_project_root = infer_project_root(start=module_file)
+
+    if args.db:
+        try:
+            db_path = Path(registry_obj.resolve_db(args.db).path)
+        except ValueError:
+            if looks_like_path(args.db):
+                db_path = Path(args.db).expanduser()
+            else:
+                raise
+    elif workflow_config is not None and workflow_config.db:
+        db_path = Path(registry_obj.resolve_db(workflow_config.db).path)
+    else:
+        db_path = default_db_path(db_project_root)
+
+    input_payload = default_input
+    if args.input_json is not None:
+        loaded_input = json.loads(args.input_json)
+        if isinstance(input_payload, dict) and isinstance(loaded_input, dict):
+            input_payload = {**input_payload, **loaded_input}
+        else:
+            input_payload = loaded_input
+    if workflow_config is not None and isinstance(input_payload, dict):
+        input_payload.setdefault("_registry_name", workflow_config.name)
+
+    workflow_id = args.workflow_id or default_workflow_id(workflow_ref)
+    return workflow, workflow_ref, db_path, workflow_id, input_payload
+
+
+def run_engine_cli(args: argparse.Namespace) -> int:
+    workflow, workflow_ref, db_path, workflow_id, input_payload = resolve_run_invocation(args)
+    drain = not args.no_drain
+    result = run_workflow_function(
+        workflow,
+        input_payload=input_payload,
+        db=db_path,
+        workflow_id=workflow_id,
+        workflow_ref=workflow_ref,
+        drain=drain,
+    )
+    resumes = 0
+    while args.watch and result.status not in {"completed", "failed", "cancelled"}:
+        if args.max_resumes is not None and resumes >= args.max_resumes:
+            break
+        time.sleep(args.poll_interval)
+        engine = WorkflowEngine(db_path)
+        if drain:
+            result = engine.resume(workflow, workflow_id)
+        else:
+            result = engine.start(workflow, input_payload, workflow_id=workflow_id, workflow_ref=workflow_ref)
+        resumes += 1
+    print_json(result_payload(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(prog="hermes-workflows")
-    sub = parser.add_subparsers(dest="command", required=True)
+    visible_commands = (
+        "{registry,invoke,resume-trusted,resume-pending,start,run,worker,signal,"
+        "reconcile-child,reconcile-children,cancel,status,list,events,outbox,"
+        "dashboard,serve-dashboard,doctor,approve,reject}"
+    )
+    sub = parser.add_subparsers(dest="command", required=True, metavar=visible_commands)
 
     registry = sub.add_parser("registry", help="Inspect workflow registry aliases")
     registry_sub = registry.add_subparsers(dest="registry_command", required=True)
@@ -106,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
     registry_list.add_argument("--config", type=Path)
     registry_doctor = registry_sub.add_parser("doctor", help="Validate configured workflow refs and DB aliases")
     registry_doctor.add_argument("--config", type=Path)
+    registry_discover = registry_sub.add_parser("discover", help="Crawl a project for @workflow files")
+    registry_discover.add_argument("--project-root", type=Path)
 
     invoke = sub.add_parser("invoke", help="Registry-aware workflow invocation with receipt output")
     invoke.add_argument("workflow", help="workflow alias or module:function ref")
@@ -138,11 +278,31 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--id", required=True, dest="workflow_id")
     start.add_argument("--input-json", required=True)
 
-    run = sub.add_parser("run", help="Run a workflow until idle")
-    run.add_argument("workflow_ref", help="module:function")
-    run.add_argument("--db", required=True, type=Path)
-    run.add_argument("--id", required=True, dest="workflow_id")
-    run.add_argument("--input-json", required=True)
+    run = sub.add_parser("run", help="Run or resume a workflow through uv using a registry name, module ref, or file path")
+    run.add_argument("workflow_ref", help="registry alias, module:function, workflow.py, or workflow.py:function")
+    run.add_argument("--config", type=Path)
+    run.add_argument("--db", help="configured DB alias or explicit local DB path; defaults to <project-root>/.hermes/workflows.sqlite")
+    run.add_argument("--id", dest="workflow_id", help="workflow instance id; defaults to a stable id derived from the workflow ref")
+    run.add_argument("--input-json", default="{}")
+    run.add_argument("--project-root", type=Path, help="Root used for registry discovery and the default DB")
+    run.add_argument("--no-drain", action="store_true", help="Only run the decider; leave emitted step commands for workers")
+    run.add_argument("--watch", action="store_true", help="Keep re-invoking the same workflow entrypoint/DB until terminal or --max-resumes")
+    run.add_argument("--poll-interval", type=float, default=1.0)
+    run.add_argument("--max-resumes", type=positive_int)
+    run.add_argument("--direct", action="store_true", help=argparse.SUPPRESS)
+
+    run_engine = sub.add_parser("_run-engine", help=argparse.SUPPRESS)
+    run_engine.add_argument("workflow_ref", help=argparse.SUPPRESS)
+    run_engine.add_argument("--config", type=Path)
+    run_engine.add_argument("--db")
+    run_engine.add_argument("--id", dest="workflow_id")
+    run_engine.add_argument("--input-json", default="{}")
+    run_engine.add_argument("--project-root", type=Path)
+    run_engine.add_argument("--no-drain", action="store_true")
+    run_engine.add_argument("--watch", action="store_true")
+    run_engine.add_argument("--poll-interval", type=float, default=1.0)
+    run_engine.add_argument("--max-resumes", type=positive_int)
+    sub._choices_actions = [action for action in sub._choices_actions if action.dest != "_run-engine"]
 
     worker = sub.add_parser("worker", help="Execute leased run_step commands for a workflow")
     worker.add_argument("workflow_ref", help="module:function; imported so the decider and steps are registered")
@@ -246,6 +406,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "registry":
+        if args.registry_command == "discover":
+            project_root = infer_project_root(args.project_root)
+            print_json({"project_root": str(project_root), "workflows": discover_workflow_refs(project_root)})
+            return 0
         registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
         if args.registry_command == "list":
             print_json(registry_obj.to_payload())
@@ -302,6 +466,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "doctor":
         return run_doctor(args)
+    if args.command == "run":
+        if args.direct:
+            args.command = "_run-engine"
+            return run_engine_cli(args)
+        return run_via_uv(raw_argv, args)
+    if args.command == "_run-engine":
+        return run_engine_cli(args)
 
     read_only_commands = {"status", "list", "events", "outbox", "dashboard", "serve-dashboard"}
     engine = WorkflowEngine(args.db, read_only=args.command in read_only_commands)
