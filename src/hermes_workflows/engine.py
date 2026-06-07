@@ -229,6 +229,9 @@ class WorkflowEngine:
     ) -> RunResult:
         self._ensure_writable("record workflow signals")
         instance = self._instance(workflow_id)
+        if signal_type == "approval.decision":
+            payload = _sanitize_approval_decision_payload(payload)
+            source = _sanitize_approval_source(source)
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
         if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type != "approval.decision":
             return self._result_from_instance(workflow_id)
@@ -2182,7 +2185,7 @@ class ApprovalClient:
         return {**decision, "source": source}
 
 
-_APPROVAL_SOURCE_ALLOWLIST = {"kind", "id", "channel", "message_url", "message_id", "event_id"}
+_APPROVAL_SOURCE_ALLOWLIST = ("kind", "id", "channel", "message_url", "message_id", "event_id")
 _APPROVAL_PRIVATE_MARKERS = ("@", "secret", "token", "password", "credential", "raw_", "raw ", "api_key")
 
 
@@ -2191,6 +2194,21 @@ def _approval_value_looks_private(value: Any) -> bool:
         return False
     lowered = value.lower()
     return any(marker in lowered for marker in _APPROVAL_PRIVATE_MARKERS)
+
+
+def _sanitize_approval_decision_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    sanitized: Dict[str, Any] = {}
+    for key in ("action", "by"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            sanitized[key] = value
+    for key in ("note", "reason", "message", "comment"):
+        value = payload.get(key)
+        if value is not None:
+            sanitized[key] = _sanitize_approval_text(str(value))
+    return sanitized
 
 
 def _sanitize_approval_source(source: Any) -> Dict[str, Any]:

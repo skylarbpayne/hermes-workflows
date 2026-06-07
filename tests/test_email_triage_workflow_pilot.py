@@ -623,6 +623,71 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     assert "subject" not in persisted_source
     assert "token" not in persisted_source
 
+
+def test_direct_approval_signal_sanitizes_metadata_before_resume_and_artifact_writes(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        email_triage_workflow,
+        {"fixture": "synthetic", "approver": "human:operator"},
+        workflow_id="wf-email-triage-direct-signal-private-approval",
+        workflow_ref=WORKFLOW_REF,
+    )
+
+    result = engine.signal(
+        "wf-email-triage-direct-signal-private-approval",
+        "approval.decision",
+        key=APPROVAL_KEY,
+        payload={
+            "action": "approve",
+            "by": "operator",
+            "note": "Ordinary private note body without marker words",
+            "reason": "ordinary private subject line",
+            "message": "another private approval message",
+            "raw_extra": "private.person@example.com",
+        },
+        source={
+            "kind": "human",
+            "id": "operator",
+            "channel": "discord",
+            "message_id": "approval-direct-private-metadata",
+            "sender": "private.person@example.com",
+            "subject": "ordinary private subject line",
+            "token": "secret-token-value",
+        },
+        idempotency_key="discord://thread/email-triage-demo/direct-signal-private-metadata",
+    )
+
+    assert result.status == "completed"
+    triage_packet = json.loads(Path(result.result["created_or_updated_paths"]["triage_packet"]).read_text(encoding="utf-8"))
+    with sqlite3.connect(db) as con:
+        rows = con.execute("SELECT result_json FROM workflow_instances WHERE id = ?", ("wf-email-triage-direct-signal-private-approval",)).fetchall()
+        rows += con.execute("SELECT payload_json FROM workflow_events WHERE workflow_id = ?", ("wf-email-triage-direct-signal-private-approval",)).fetchall()
+    persisted_and_written = json.dumps(result.result, sort_keys=True) + "\n" + json.dumps(triage_packet, sort_keys=True) + "\n" + "\n".join(row[0] or "" for row in rows)
+
+    assert "private.person@example.com" not in persisted_and_written
+    assert "secret-token-value" not in persisted_and_written
+    assert "ordinary private subject line" not in persisted_and_written
+    assert "Ordinary private note body without marker words" not in persisted_and_written
+    assert "another private approval message" not in persisted_and_written
+    assert "raw_extra" not in persisted_and_written
+    signal_event = [event for event in WorkflowEngine(db, read_only=True).events("wf-email-triage-direct-signal-private-approval") if event["type"] == "SignalReceived"][-1]
+    assert signal_event["payload"]["payload"] == {
+        "action": "approve",
+        "by": "operator",
+        "note": "[REDACTED]",
+        "reason": "[REDACTED]",
+        "message": "[REDACTED]",
+    }
+    assert signal_event["payload"]["source"] == {
+        "kind": "human",
+        "id": "operator",
+        "channel": "discord",
+        "message_id": "approval-direct-private-metadata",
+    }
+
+
 def test_trusted_resume_creates_local_demo_receipt_with_zero_dangerous_side_effects(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = tmp_path / "workflow.sqlite"
