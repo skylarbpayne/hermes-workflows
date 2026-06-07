@@ -1,19 +1,35 @@
+---
+layout: page
+title: Set up hermes-workflows for an agent
+---
+
 # Set up `hermes-workflows` for an agent
 
 `hermes-workflows` is a small durable runtime you put underneath an agent when the work needs memory, approval gates, generated child workflows, and receipts.
 
 Use it when the agent should prepare work and stop before side effects.
 
-## Install locally
+## Install locally inside a Hermes workspace
+
+Use a trusted Hermes workspace (or another local operator workspace) to own the source checkout, virtualenv, workflow DBs, and registry files. This repository does **not** currently implement a `hermes workflows` subcommand; use the tested CLI entry point `hermes-workflows` or `python -m hermes_workflows`.
 
 ```bash
 git clone https://github.com/skylarbpayne/hermes-workflows.git
 cd hermes-workflows
-python -m pip install -e '.[dev]'
-pytest -q
+
+# Runtime/user install. Do not require dev extras for user setup.
+python -m pip install .
+
 hermes-workflows doctor \
   --db /tmp/hermes-workflows-doctor.sqlite \
   --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
+```
+
+For contributor work, install development extras separately and run tests:
+
+```bash
+python -m pip install -e '.[dev]'
+pytest -q
 ```
 
 Run the CLI:
