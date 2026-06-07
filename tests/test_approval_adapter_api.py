@@ -138,7 +138,7 @@ def test_submit_approval_decision_resume_true_returns_receipt_and_completes_work
     assert receipt.source == human_source()
     assert receipt.status == "completed"
     assert receipt.waiting_on is None
-    assert receipt.result_summary == {"decision": {"action": "approve", "by": "skylar", "note": "looks safe", "source": human_source()}}
+    assert receipt.result_summary == {"decision": {"action": "approve", "by": "skylar", "note": "[REDACTED]", "source": human_source()}}
 
 
 def test_submit_approval_decision_resume_false_records_without_running_next_step(tmp_path):

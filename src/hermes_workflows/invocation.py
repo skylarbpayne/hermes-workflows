@@ -49,14 +49,20 @@ class InvocationService:
             workflow_id=workflow_id,
             workflow_ref=workflow_config.workflow_ref,
         )
+        stored_input = self._stored_input_for_instance(engine, workflow_id)
+        effective_input = stored_input if stored_input is not None else merged_input
         dashboard_path = self._render_dashboard(engine, dashboard_out)
+        if stored_input is not None:
+            receipt_source = stored_input.get("_source") if isinstance(stored_input, dict) else None
+        else:
+            receipt_source = source
         receipt = build_workflow_receipt(
             engine=engine,
             result=result,
             workflow_config=workflow_config,
             db_config=db_config,
-            input_payload=merged_input,
-            source=source,
+            input_payload=effective_input,
+            source=receipt_source if isinstance(receipt_source, dict) else None,
             dashboard_path=dashboard_path,
         )
         if receipt_path is not None:
@@ -72,6 +78,16 @@ class InvocationService:
         if dashboard_out is None:
             return None
         return str(render_dashboard(engine, Path(dashboard_out)))
+
+    @staticmethod
+    def _stored_input_for_instance(engine: WorkflowEngine, workflow_id: str) -> dict[str, Any] | None:
+        for event in engine.events(workflow_id):
+            if event.get("type") != "WorkflowStarted":
+                continue
+            payload = event.get("payload") or {}
+            stored_input = payload.get("input") if isinstance(payload, dict) else None
+            return stored_input if isinstance(stored_input, dict) else None
+        return None
 
 
 class TrustedResumer:
