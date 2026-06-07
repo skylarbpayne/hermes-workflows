@@ -34,6 +34,9 @@ hermes-workflows-approvals = "hermes_workflows.hermes_plugin_approvals"
 [project.optional-dependencies]
 dev = ["pytest>=7", "build>=1", "tomli>=2; python_version<'3.11'"]
 
+[dependency-groups]
+dev = ["pytest>=7", "build>=1", "tomli>=2; python_version<'3.11'"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
