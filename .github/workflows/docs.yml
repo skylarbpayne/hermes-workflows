@@ -24,7 +24,7 @@ jobs:
       - name: Build docs with Jekyll
         uses: actions/jekyll-build-pages@v1
         with:
-          source: ./docs
+          source: ./
           destination: ./_site
       - name: Upload Pages artifact
         if: github.event_name == 'workflow_dispatch'

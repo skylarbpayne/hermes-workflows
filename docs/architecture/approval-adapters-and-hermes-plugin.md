@@ -53,8 +53,8 @@ receipt = engine.submit_approval_decision(
         workflow_id="wf_trip",
         key="approve_trip_plan",
         action="approve",
-        by="skylar",
-        source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "150828..."},
+        by="operator",
+        source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "150828..."},
         idempotency_key="discord:150828:approve_trip_plan:approve",
     ),
     # Use False for chat callbacks that should record the decision but hand resume to a worker.
@@ -68,10 +68,10 @@ The underlying signal payload remains boring for lower-level integrations:
 
 ```json
 {
-  "payload": {"action": "approve", "by": "skylar"},
+  "payload": {"action": "approve", "by": "operator"},
   "source": {
     "kind": "human",
-    "id": "skylar",
+    "id": "operator",
     "channel": "discord",
     "message_id": "150828..."
   },

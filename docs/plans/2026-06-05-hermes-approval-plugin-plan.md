@@ -2,7 +2,7 @@
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
-**Goal:** Give Skylar a reliable way to approve `hermes-workflows` gates from a real operator surface now, while tracking cleanly toward a Hermes plugin and keeping the core runtime open for other agent runtimes.
+**Goal:** Give the maintainer a reliable way to approve `hermes-workflows` gates from a real operator surface now, while tracking cleanly toward a Hermes plugin and keeping the core runtime open for other agent runtimes.
 
 **Architecture:** Keep `hermes-workflows` as the runtime-agnostic approval state machine. Extract a small approval adapter API from core, then let CLI, local dashboard, Hermes plugin, Discord/Telegram, Kanban, MCP, or other runtimes translate human actions into the same canonical `approval.decision` signal. Hermes-specific identity, delivery, dashboard tabs, gateway hooks, and message provenance belong in a plugin/adapter, not in core.
 
@@ -68,7 +68,7 @@ Gaps found by research:
 2. Approval summaries omit useful fields: `allowed`, `authority`, `timeout`, request event seq, notification status.
 3. `WorkflowEngine.signal()` both records the decision and resumes/drains workflow work in the caller process. A Hermes chat callback should not accidentally execute arbitrary downstream workflow work.
 4. Workflow instances do not persist an importable `workflow_ref`; CLI solves this by passing it on every `signal`, but a plugin needs a registry or persisted ref.
-5. Generated-workflow approval still has a hard-coded `human:skylar` path in core that should become policy/config.
+5. Generated-workflow approval still has a hard-coded `human:operator` path in core that should become policy/config.
 6. Notification delivery lifecycle is under-modeled: delivered card IDs, retries, stale cards, fanout, and receipts need a home.
 7. Hermes plugin hooks exist, but `pre_gateway_dispatch` runs before normal auth/pairing, so chat approval adapters must do their own exact pending-approval matching and auth checks.
 
@@ -258,7 +258,7 @@ engine.resume(workflow_fn, workflow_id)
 
 ## Milestone 2 — Better local Approval Inbox
 
-**Acceptance criteria:** Skylar can open a local approval surface, see pending workflow approvals, approve/reject exact gates, and get receipts. This remains useful even before the Hermes plugin.
+**Acceptance criteria:** the maintainer can open a local approval surface, see pending workflow approvals, approve/reject exact gates, and get receipts. This remains useful even before the Hermes plugin.
 
 ### Task 2.1: Make `serve-dashboard` render bound approval cards
 
@@ -305,7 +305,7 @@ Each pending approval row renders:
 
 ### Task 2.3: Add local inbox command
 
-**Objective:** Provide a one-command approval inbox Skylar can run.
+**Objective:** Provide a one-command approval inbox the maintainer can run.
 
 **Files:**
 
@@ -343,10 +343,10 @@ plugins/hermes-workflows-approvals/
   __init__.py
 ```
 
-- User plugin directory for Palmer profile:
+- User plugin directory for operator agent profile:
 
 ```text
-/Users/skylarpayne/.hermes/profiles/palmer/plugins/hermes-workflows-approvals/
+~/.hermes/profiles/<profile>/plugins/hermes-workflows-approvals/
 ```
 
 - Required plugin function:
@@ -376,7 +376,7 @@ plugins:
   entries:
     hermes-workflows-approvals:
       workflow_dbs:
-        - name: palmer
+        - name: default
           path: /tmp/workflow.sqlite
 ```
 
@@ -433,11 +433,11 @@ provides_hooks:
 
 ```json
 {
-  "db": "palmer",
+  "db": "default",
   "workflow_id": "wf_...",
   "key": "approve_...",
   "action": "approve",
-  "by": "skylar",
+  "by": "operator",
   "channel": "discord",
   "message_id": "...",
   "message_url": "...",
@@ -445,7 +445,7 @@ provides_hooks:
 }
 ```
 
-**Important default:** `resume=false` for plugin tools until a worker/resumer story exists. The plugin should record the decision and tell Palmer what needs to resume, not execute arbitrary downstream workflow work inside a chat/tool call.
+**Important default:** `resume=false` for plugin tools until a worker/resumer story exists. The plugin should record the decision and tell the operator surface what needs to resume, not execute arbitrary downstream workflow work inside a chat/tool call.
 
 ### Task 3.4: Add gateway hook for explicit approval replies only
 
@@ -463,7 +463,7 @@ provides_hooks:
 
 ### Task 3.5: Add plugin README and install notes
 
-**Objective:** Make plugin usage obvious without requiring Skylar to remember Hermes internals.
+**Objective:** Make plugin usage obvious without requiring the maintainer to remember Hermes internals.
 
 **Docs:**
 
@@ -513,7 +513,7 @@ provides_hooks:
 
 ## Milestone 5 — Chat approval cards
 
-**Acceptance criteria:** Skylar can approve from Discord/Telegram where supported, but chat remains a convenience surface over the canonical approval record.
+**Acceptance criteria:** the maintainer can approve from Discord/Telegram where supported, but chat remains a convenience surface over the canonical approval record.
 
 ### Task 5.1: Telegram first if adapter supports buttons cleanly
 

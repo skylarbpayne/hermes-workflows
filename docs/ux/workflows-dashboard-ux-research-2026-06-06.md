@@ -6,7 +6,7 @@ title: /workflows UX research and product direction
 # /workflows UX research and product direction
 
 Date: 2026-06-06
-Task: Palmer Kanban `t_9f597139`
+Task: operator Kanban `t_9f597139`
 Scope: dashboard UX for Hermes Workflows: runnable workflow catalog, run initiation, run status, run history, outputs/artifacts, active approvals, and high-trust single approval review.
 
 ## Bottom line
@@ -15,11 +15,11 @@ The current `/workflows` tab is an observability card pile. That was fine for pr
 
 The right model is a **workflow operator console** with three primary objects:
 
-1. **Workflow definitions** — things Skylar can run.
+1. **Workflow definitions** — things the maintainer can run.
 2. **Runs** — execution instances with status, logs, events, approvals, and artifacts.
 3. **Approvals** — pending human decisions with risk, consequence, evidence, and provenance.
 
-Do not make Skylar start from SQLite DB aliases or raw workflow IDs. Those are backend details. The default screen should answer: **what can I run, what is running, what needs me, and what changed?**
+Do not make the maintainer start from SQLite DB aliases or raw workflow IDs. Those are backend details. The default screen should answer: **what can I run, what is running, what needs me, and what changed?**
 
 ## JTBD mapping
 
@@ -229,7 +229,7 @@ Goal: make the existing plugin stop feeling like a debug dump.
 
 Acceptance:
 
-- Skylar can open `/workflows` and immediately see pending approvals without reading workflow IDs.
+- the maintainer can open `/workflows` and immediately see pending approvals without reading workflow IDs.
 - One approval opens into a detail view with consequence, policy, artifact preview, and provenance.
 
 ### Phase 2 — Add runnable workflow catalog
@@ -251,7 +251,7 @@ Definition payload should include:
   "id": "email-triage-dry-run",
   "name": "Email triage dry run",
   "description": "Find action-bearing email without sending or archiving.",
-  "owner": "palmer",
+  "owner": "default",
   "domain": "email",
   "version": "0.1.0",
   "run_modes": ["dry_run", "manual"],

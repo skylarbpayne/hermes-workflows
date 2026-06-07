@@ -5,12 +5,12 @@ title: "Repo launch packet: hermes-workflows"
 
 # Repo launch packet: hermes-workflows
 
-Approved by: skylar-current-chat-approval
+Approved by: maintainer-approval
 Decision: approve
 
 ## Status
 
-- Repo: `/Users/skylarpayne/code/hermes-workflows`
+- Repo: `/path/to/hermes-workflows`
 - Branch: `main`
 - HEAD: `f3be8a1`
 - Git clean: yes

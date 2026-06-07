@@ -189,7 +189,7 @@ Generated-code approvals are exposed through the normal workflow status shape:
 }
 ```
 
-Approval signals use the existing human provenance check. For generated workflows the approval client currently asks for `human:skylar`; tests can satisfy that with a human source record containing `id`, `channel`, and an external event/message id.
+Approval signals use the existing human provenance check. For generated workflows the approval client currently asks for `human:operator`; tests can satisfy that with a human source record containing `id`, `channel`, and an external event/message id.
 
 ## Resuming waiting children
 

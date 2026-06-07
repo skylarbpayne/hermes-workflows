@@ -40,7 +40,7 @@ A workflow runtime is valuable because it preserves state across crashes, model 
 
 Those mechanics get weaker when the runtime also carries subjective agent judgment. A big custom orchestrator brain would be a worse agent with a database strapped to it. Bad trade.
 
-Skills and subagent loops are the right place for operating taste because they can evolve quickly as Skylar corrects us:
+Skills and subagent loops are the right place for operating taste because they can evolve quickly as the maintainer corrects us:
 
 - implementation-plan quality bars
 - TDD and red/green discipline
@@ -74,7 +74,7 @@ Skills and subagent loops are the right place for operating taste because they c
 - Code review taste and repo conventions.
 - Artifact quality and presentation standards.
 - Model/tool-specific operating prompts such as Codex `/goal`.
-- Lessons learned from failed runs and Skylar corrections.
+- Lessons learned from failed runs and the maintainer corrections.
 
 ## Design rule
 

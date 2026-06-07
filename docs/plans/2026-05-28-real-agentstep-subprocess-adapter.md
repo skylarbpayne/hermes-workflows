@@ -1,6 +1,6 @@
 # Real Hermes/Codex AgentStep Subprocess Adapter Implementation Plan
 
-> **For Hermes:** This is an approval artifact. Do not implement until Skylar explicitly approves this plan. After approval, use the `subagent-driven-development` skill to implement task-by-task with review after each slice.
+> **For Hermes:** This is an approval artifact. Do not implement until the maintainer explicitly approves this plan. After approval, use the `subagent-driven-development` skill to implement task-by-task with review after each slice.
 
 **Goal:** Add the first real CLI-backed AgentStep adapter so `WorkflowEngine(agent_runner=SubprocessAgentRunner(...))` can call a Hermes/Codex-style subprocess through the existing JSON stdin/stdout boundary instead of only static fixture scripts.
 
@@ -12,7 +12,7 @@
 
 ## Approval scope
 
-Approved by this plan, if Skylar says yes:
+Approved by this plan, if the maintainer says yes:
 
 1. Create a generic CLI adapter command for Hermes/Codex-style agents.
 2. Add fake CLI tests proving request transformation, strict JSON response parsing, provenance, redaction, timeout/error behavior, and generated-workflow approval behavior.
@@ -23,7 +23,7 @@ Approved by this plan, if Skylar says yes:
 Not approved by this plan:
 
 - No credential creation, mutation, import, or provider login.
-- No default use of Skylar's real Codex/Hermes auth.
+- No default use of the maintainer's real Codex/Hermes auth.
 - No production workflow execution.
 - No network calls in default tests.
 - No autonomous generated-code execution; existing generated-workflow approval gates stay in front of imports/child workflows.
@@ -488,7 +488,7 @@ HERMES_WORKFLOWS_AGENT_COMMAND='codex exec --json' \
 PYTHONPATH=src:. pytest tests/test_agent_cli_adapter.py::test_real_agent_cli_adapter_smoke -q
 ```
 
-Do not run this unless Skylar explicitly approves using the local provider command/auth.
+Do not run this unless the maintainer explicitly approves using the local provider command/auth.
 
 ### Task 6: Update docs
 
@@ -564,7 +564,7 @@ This slice is done only when all default acceptance criteria are true:
 
 ## Anti-patterns / loopholes
 
-- Do not teach the adapter to scrape arbitrary chatty prose unless Skylar approves a separate parser design. v1 should be strict JSON or fail closed.
+- Do not teach the adapter to scrape arbitrary chatty prose unless the maintainer approves a separate parser design. v1 should be strict JSON or fail closed.
 - Do not move provider-specific model/auth config into `WorkflowEngine` or `SubprocessAgentRunner`.
 - Do not make default tests depend on a local Codex/Hermes install.
 - Do not weaken generated-workflow approval gates for a smoother demo.

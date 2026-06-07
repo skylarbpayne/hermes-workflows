@@ -8,7 +8,7 @@ title: hermes-workflows invocation audit receipt — 2026-06-06
 Generated: 2026-06-06 14:02 PDT
 Task: t_83bc39d0
 Repo HEAD at audit start: `1005f8cc9f15d9e52c745d812335fd36b8882431`
-Workspace: `/Users/skylarpayne/code/hermes-workflows`
+Workspace: `/path/to/hermes-workflows`
 
 ## Verdict
 
@@ -24,7 +24,7 @@ Command shape:
 
 ```bash
 AUDIT_ROOT=$(mktemp -d /tmp/hermes-workflows-audit.XXXXXX)
-git clone --depth 1 git@github.com:skylarbpayne/hermes-workflows.git "$AUDIT_ROOT/repo"
+git clone --depth 1 git@github.com:<owner>/hermes-workflows.git "$AUDIT_ROOT/repo"
 cd "$AUDIT_ROOT/repo"
 git rev-parse HEAD
 uv venv .venv
@@ -150,9 +150,9 @@ approval_source={kind: human, id: operator, channel: local-dashboard, message_id
 SignalReceived.payload.signal_type=approval.decision
 ```
 
-## Hermes plugin approval path in Palmer context
+## Hermes plugin approval path in operator agent context
 
-Created waiting trip workflow in an explicit DB, then used the live Hermes plugin tools available to Palmer:
+Created waiting trip workflow in an explicit DB, then used the live Hermes plugin tools available to operator agent:
 
 ```text
 workflow_approvals_list(db=/tmp/hermes-workflows-plugin-audit.XXXXXX.sqlite, status=waiting)
@@ -164,7 +164,7 @@ workflow_approval_decide(
   key=approve_trip_plan,
   action=approve,
   by=operator,
-  channel=palmer-plugin-smoke,
+  channel=plugin-smoke,
   message_id=plugin-smoke-1,
   resume=false
 )
@@ -178,7 +178,7 @@ workflow status=waiting
 waiting_on=signal:approval.decision:approve_trip_plan
 pending_commands=[]
 approval_status=approve
-approval_source={kind: human, id: operator, channel: palmer-plugin-smoke, message_id: plugin-smoke-1}
+approval_source={kind: human, id: operator, channel: plugin-smoke, message_id: plugin-smoke-1}
 recent_events include SignalReceived(signal:approval.decision:approve_trip_plan)
 ```
 

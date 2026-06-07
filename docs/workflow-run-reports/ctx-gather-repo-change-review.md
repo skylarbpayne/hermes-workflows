@@ -5,13 +5,13 @@ title: Repo change review — ctx.gather and dogfood repo_change_review
 
 # Repo change review: Add ctx.gather for parallel durable step execution and dogfood repo_change_review
 
-Plan approved by: skylar-current-chat
-Landing approved by: skylar-current-chat
+Plan approved by: maintainer-chat
+Landing approved by: maintainer-chat
 Recommendation: approve
 
 ## Repo
 
-- Path: `/Users/skylarpayne/code/hermes-workflows`
+- Path: `/path/to/hermes-workflows`
 - Branch: `main`
 - Baseline HEAD: `79ce9a1`
 
