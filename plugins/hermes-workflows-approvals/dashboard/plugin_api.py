@@ -78,12 +78,13 @@ def _strip_internal_fields(value: Any) -> Any:
 
 
 _ARTIFACT_PATH_KEYS = {"path", "file_path", "local_path", "absolute_path", "filesystem_path"}
+_ARTIFACT_REF_KEYS = _ARTIFACT_PATH_KEYS | {"uri", "href", "url"}
 _MEDIA_KINDS = {"image", "audio", "video"}
 
 
 def _looks_like_local_path(value: str) -> bool:
     cleaned = value.strip()
-    return cleaned.startswith(("/", "./", "../", "~")) or re.match(r"^[A-Za-z]:[\\/]", cleaned) is not None
+    return cleaned.startswith(("/", "./", "../", "~", "file://")) or re.match(r"^[A-Za-z]:[\\/]", cleaned) is not None
 
 
 def _redact_artifact_local_refs(value: Any) -> Any:
@@ -98,13 +99,16 @@ def _redact_artifact_local_refs(value: Any) -> Any:
         out: dict[str, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if key_str.lower() in _ARTIFACT_PATH_KEYS and isinstance(item, str) and _looks_like_local_path(item):
+            key_lower = key_str.lower()
+            if key_lower in _ARTIFACT_REF_KEYS and isinstance(item, str) and _looks_like_local_path(item):
                 out[key_str] = "[REDACTED_LOCAL_PATH]"
             else:
                 out[key_str] = _redact_artifact_local_refs(item)
         return out
     if isinstance(value, list):
         return [_redact_artifact_local_refs(item) for item in value]
+    if isinstance(value, str) and _looks_like_local_path(value):
+        return "[REDACTED_LOCAL_PATH]"
     return value
 
 
@@ -207,9 +211,10 @@ def _status_packet(
             command_payload_chars=command_payload_chars,
         )
     )
+    packet = _redact_artifact_local_refs(_strip_internal_fields(packet))
     packet["recent_events"] = packet.get("events", [])
     packet["run_id"] = packet.get("workflow_id")
-    return _strip_internal_fields(packet)
+    return packet
 
 
 def _dashboard_approver_id() -> str | None:
@@ -626,10 +631,10 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
     if not workflow_id or not key:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
     engine = WorkflowEngine(db_path, read_only=True)
-    approval = _strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key)))
+    approval = _redact_artifact_local_refs(_strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key))))
     status = _status_packet(engine, workflow_id, recent_events=100, commands="recent", command_limit=20, command_payload_chars=5000)
     timeline = [event for event in engine.events(workflow_id) if event.get("seq", 0) <= (approval.get("requested_seq") or 10**9)]
-    timeline = _redact(timeline)
+    timeline = _redact_artifact_local_refs(_redact(timeline))
     card = _approval_card(approval, db_alias=db_alias)
     return {
         "db_alias": db_alias,
