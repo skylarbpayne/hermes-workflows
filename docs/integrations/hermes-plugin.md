@@ -49,6 +49,42 @@ export HERMES_WORKFLOWS_DB=/tmp/hermes-workflows-approval-smoke.sqlite
 export HERMES_WORKFLOWS_DBS='{"palmer":"/tmp/hermes-workflows-approval-smoke.sqlite"}'
 ```
 
+## Hermes dashboard plugin
+
+The same plugin directory also ships a Hermes dashboard extension under `plugins/hermes-workflows-approvals/dashboard/`:
+
+```text
+plugins/hermes-workflows-approvals/
+  plugin.yaml
+  __init__.py
+  dashboard/
+    manifest.json
+    plugin_api.py
+    dist/index.js
+    dist/style.css
+```
+
+Install it into a Hermes profile by copying or symlinking the plugin directory into that profile's plugin root:
+
+```bash
+mkdir -p /Users/skylarpayne/.hermes/profiles/palmer/plugins
+cp -R plugins/hermes-workflows-approvals /Users/skylarpayne/.hermes/profiles/palmer/plugins/
+hermes -p palmer plugins enable hermes-workflows-approvals
+```
+
+Dashboard discovery is runtime-only: Hermes scans `$HERMES_HOME/plugins/<name>/dashboard/manifest.json`, serves the JS/CSS bundle, and mounts `plugin_api.py` under `/api/plugins/hermes-workflows-approvals`. No dashboard source fork or npm build is required.
+
+The dashboard tab at `/workflows` shows:
+
+- configured workflow DB aliases
+- status counts
+- workflow waiting/running/completed state
+- recent events
+- pending and historical commands
+- diagnostics
+- approval artifacts with secret-looking fields redacted
+- record-only approve/reject decisions (`resume=false` by default)
+
 ## Tools
 
 ### `workflow_approvals_list`
