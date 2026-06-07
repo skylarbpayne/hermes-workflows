@@ -83,6 +83,15 @@
     return e(Badge, { className: "hwf-pill " + (props.className || "") }, props.children || props.label);
   }
 
+  function ArtifactRenderSummary(props) {
+    const render = props.render || {};
+    if (!render.kind) return null;
+    return e("div", { className: "hwf-artifact-render" },
+      e(Pill, { label: "artifact: " + render.kind }),
+      e(Pill, { label: "render: " + render.render }),
+      render.warning && e("span", { className: "hwf-muted" }, render.warning));
+  }
+
   function Tabs(props) {
     return e("div", { className: "hwf-tabs", role: "tablist" }, props.tabs.map(function (tab) {
       return e("button", {
@@ -162,6 +171,7 @@
             e("p", { className: "hwf-muted" }, "Workflow: " + (approval.workflow_id || "—"))),
           e("div", null,
             e("div", { className: "hwf-section-title" }, "Artifact preview"),
+            e(ArtifactRenderSummary, { render: approval.artifact_render }),
             e("pre", null, pretty(approval.artifact_preview || approval.artifact)))),
         e(ApprovalActions, { db: props.db, approval: approval, onDecided: props.onRefresh })));
   }
@@ -187,6 +197,7 @@
         e("div", null,
           e("div", { className: "hwf-section-title" }, "What you are approving"),
           e("p", null, what.prompt || approval.prompt || approval.key),
+          e(ArtifactRenderSummary, { render: what.artifact_render || approval.artifact_render }),
           e("pre", null, pretty(what.artifact || approval.artifact_preview))),
         e("div", null,
           e("div", { className: "hwf-section-title" }, "Consequence"),
@@ -302,7 +313,7 @@
               e(Pill, { label: "artifacts: " + status.data.artifacts.length })),
             e("div", { className: "hwf-section-title" }, "Artifacts / outputs"),
             status.data.artifacts.length ? status.data.artifacts.map(function (artifact) {
-              return e("details", { key: artifact.id, open: true }, e("summary", null, artifact.title), e("pre", null, pretty(artifact.preview)));
+              return e("details", { key: artifact.id, open: true }, e("summary", null, artifact.title), e(ArtifactRenderSummary, { render: artifact.artifact_render }), e("pre", null, pretty(artifact.preview)));
             }) : e("p", { className: "hwf-muted" }, "No artifacts captured yet."),
             e("div", { className: "hwf-section-title" }, "Recent events"),
             e("pre", null, pretty(status.data.run.recent_events || []))))));
@@ -335,7 +346,7 @@
           e(CardHeader, null,
             e(CardTitle, null, artifact.title || artifact.kind),
             e("div", { className: "hwf-meta" }, e(Pill, { label: artifact.kind }), e("code", null, artifact.workflow_id))),
-          e(CardContent, null, e("pre", null, pretty(artifact.preview))));
+          e(CardContent, null, e(ArtifactRenderSummary, { render: artifact.artifact_render }), e("pre", null, pretty(artifact.preview))));
       }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No artifacts yet.")));
   }
 
@@ -378,10 +389,19 @@
           e("h1", null, "Hermes Workflows"),
           e("p", { className: "hwf-muted" }, "Run workflows, track status/history, review artifacts, and make high-context record-only approvals.")),
         e("div", { className: "hwf-controls" },
-          e(Select, { value: activeDb, onValueChange: function (value) { setSelectedDb(value); } },
-            (dbs.data.dbs || []).map(function (db) { return e(SelectOption, { key: db.name, value: db.name }, db.name + (db.exists ? "" : " (missing)")); })),
+          e("div", { className: "hwf-db-control" },
+            e("label", null, "Workflow DB alias"),
+            e(Select, { value: activeDb, onValueChange: function (value) { setSelectedDb(value); } },
+              (dbs.data.dbs || []).map(function (db) { return e(SelectOption, { key: db.name, value: db.name }, db.name + (db.exists ? "" : " (missing)")); })),
+            e("p", { className: "hwf-muted" }, "Configured SQLite alias; not a registry, branch, or deployment environment.")),
           e(Button, { onClick: refresh }, "Refresh"))),
       e(Tabs, { tabs: ["Overview", "Workflows", "Runs", "Approvals", "Artifacts"], active: activeTab, setActive: setActiveTab }),
+      e("div", { className: "hwf-runtime-note" },
+        e("strong", null, "Runtime: "),
+        "workflow code runs in the local WorkflowEngine process for the selected DB alias. Dashboard approval buttons record only; a trusted local resumer continues execution."),
+      approvals.length > 0 && e("div", { className: "hwf-attention", role: "alert" },
+        e("strong", null, approvals.length + " approval" + (approvals.length === 1 ? "" : "s") + " waiting. "),
+        "Open Approvals or a card below to review consequence, evidence, and record-only decision semantics."),
       (overview.loading || definitionsData.loading || runsData.loading || approvalsData.loading) && e("p", { className: "hwf-muted" }, "Loading workflow console…"),
       (overview.error || definitionsData.error || runsData.error || approvalsData.error) && e("p", { className: "hwf-bad" }, overview.error || definitionsData.error || runsData.error || approvalsData.error),
       activeTab === "Overview" && e(OverviewPanel, { db: activeDb, definitions: definitions, runs: runs, approvals: approvals, artifacts: artifacts, counts: counts, onViewApproval: setSelectedApproval, onRefresh: refresh }),

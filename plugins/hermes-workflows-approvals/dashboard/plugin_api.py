@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import mimetypes
 import os
 import re
 import time
@@ -76,6 +77,122 @@ def _strip_internal_fields(value: Any) -> Any:
     return value
 
 
+_ARTIFACT_PATH_KEYS = {"path", "file_path", "local_path", "absolute_path", "filesystem_path"}
+_ARTIFACT_REF_KEYS = _ARTIFACT_PATH_KEYS | {"uri", "href", "url"}
+_MEDIA_KINDS = {"image", "audio", "video"}
+
+
+def _looks_like_local_path(value: str) -> bool:
+    cleaned = value.strip()
+    return cleaned.startswith(("/", "./", "../", "~", "file://")) or re.match(r"^[A-Za-z]:[\\/]", cleaned) is not None
+
+
+def _redact_artifact_local_refs(value: Any) -> Any:
+    """Redact local filesystem references from browser artifact previews.
+
+    The dashboard API may render inside Hermes Agent, but it does not serve or
+    host arbitrary local media files. A typed `artifact_render` descriptor tells
+    the UI what kind of artifact it is without leaking private paths.
+    """
+
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if key_lower in _ARTIFACT_REF_KEYS and isinstance(item, str) and _looks_like_local_path(item):
+                out[key_str] = "[REDACTED_LOCAL_PATH]"
+            else:
+                out[key_str] = _redact_artifact_local_refs(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_artifact_local_refs(item) for item in value]
+    if isinstance(value, str) and _looks_like_local_path(value):
+        return "[REDACTED_LOCAL_PATH]"
+    return value
+
+
+def _artifact_kind_from_media_type(media_type: str | None) -> str | None:
+    if not media_type:
+        return None
+    major = media_type.split("/", 1)[0].lower()
+    if major in _MEDIA_KINDS:
+        return major
+    if media_type in {"text/markdown", "application/markdown"}:
+        return "markdown"
+    if media_type.startswith("text/"):
+        return "text"
+    if media_type == "application/json":
+        return "json"
+    return None
+
+
+def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
+    """Return the low-risk rendering seam for approval/run artifacts.
+
+    This is descriptive only: it does not fetch, transcode, or serve media. The
+    raw artifact remains persisted in workflow history; the dashboard receives a
+    redacted preview plus this descriptor so future renderers can support text,
+    JSON, image, audio, video, links, and local/private file references safely.
+    """
+
+    descriptor: dict[str, Any] = {
+        "kind": "json",
+        "render": "inline-json",
+        "persisted": "workflow_history",
+        "servable_by_dashboard": False,
+    }
+    if artifact is None:
+        return {**descriptor, "kind": "none", "render": "none"}
+    if isinstance(artifact, str):
+        if artifact.startswith(("http://", "https://")):
+            return {**descriptor, "kind": "link", "render": "external-link", "reference": {"type": "url", "href": artifact}}
+        return {**descriptor, "kind": "text", "render": "inline-text"}
+    if isinstance(artifact, dict):
+        media_type = artifact.get("media_type") or artifact.get("mime_type") or artifact.get("content_type")
+        media_type = str(media_type) if media_type else None
+        explicit_kind = str(artifact.get("kind") or artifact.get("type") or "").lower()
+        kind = _artifact_kind_from_media_type(media_type) or (explicit_kind if explicit_kind in {"text", "json", "markdown", "image", "audio", "video", "file", "link"} else "json")
+        ref = None
+        ref_key = None
+        for key in ("url", "uri", "href", "path", "file_path", "local_path"):
+            raw = artifact.get(key)
+            if isinstance(raw, str) and raw.strip():
+                ref = raw.strip()
+                ref_key = key
+                break
+        if ref and ref.startswith(("http://", "https://")):
+            render = "external-link" if kind == "link" else "media-reference" if kind in _MEDIA_KINDS else "external-reference"
+            return {**descriptor, "kind": kind, "render": render, "media_type": media_type, "reference": {"type": "url", "href": ref}}
+        if ref:
+            guessed_type = media_type or mimetypes.guess_type(ref)[0]
+            guessed_kind = _artifact_kind_from_media_type(guessed_type) or kind
+            return {
+                **descriptor,
+                "kind": guessed_kind,
+                "render": "file-reference",
+                "media_type": guessed_type,
+                "reference": {"type": "local_path", "field": ref_key, "href": "[REDACTED_LOCAL_PATH]"},
+                "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
+            }
+        if kind == "markdown" or "markdown" in artifact:
+            return {**descriptor, "kind": "markdown", "render": "inline-markdown", "media_type": media_type}
+        if kind == "text" or "text" in artifact:
+            return {**descriptor, "kind": "text", "render": "inline-text", "media_type": media_type}
+        return {**descriptor, "kind": kind, "render": "inline-json", "media_type": media_type}
+    return descriptor
+
+
+def _runtime_semantics() -> dict[str, Any]:
+    return {
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the selected DB alias. The dashboard API route runs that engine locally; record-only approval decisions do not resume workflow code.",
+        "db_selector": "The dropdown selects a configured workflow DB alias, not a remote registry or deployment environment. Raw SQLite paths are intentionally hidden from browser responses.",
+        "agent_steps": "AgentStep calls run through the engine's configured agent_runner when present, otherwise deterministic mock/rendered output is used. Runner requests and live responses are persisted as step metadata for replay.",
+        "approval_decisions": "Dashboard approve/reject records human provenance only (resume=false); a trusted local resumer must continue the workflow.",
+        "artifacts": "Approval and run artifacts are persisted in workflow history and returned as redacted previews plus artifact_render descriptors. The dashboard does not host local media files.",
+    }
+
+
 def _status_packet(
     engine: WorkflowEngine,
     workflow_id: str,
@@ -94,9 +211,10 @@ def _status_packet(
             command_payload_chars=command_payload_chars,
         )
     )
+    packet = _redact_artifact_local_refs(_strip_internal_fields(packet))
     packet["recent_events"] = packet.get("events", [])
     packet["run_id"] = packet.get("workflow_id")
-    return _strip_internal_fields(packet)
+    return packet
 
 
 def _dashboard_approver_id() -> str | None:
@@ -304,7 +422,8 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
         "approver": approval.get("approver"),
         "allowed": approval.get("allowed") or ["approve", "reject"],
         "authority": approval.get("authority"),
-        "artifact_preview": approval.get("artifact"),
+        "artifact_preview": _redact_artifact_local_refs(approval.get("artifact")),
+        "artifact_render": _artifact_descriptor(approval.get("artifact")),
         "decision": approval.get("decision"),
         "source": approval.get("source"),
         "diagnostics": approval.get("diagnostics") or [],
@@ -329,7 +448,8 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "approval_artifact",
                     "title": approval.get("prompt") or approval.get("key") or "Approval artifact",
                     "source": {"event": "ApprovalRequested", "key": approval.get("key"), "seq": approval.get("requested_seq")},
-                    "preview": artifact,
+                    "preview": _redact_artifact_local_refs(artifact),
+                    "artifact_render": _artifact_descriptor(artifact),
                 }
             )
     result = status.get("result")
@@ -341,7 +461,8 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                 "kind": "run_result",
                 "title": "Run result",
                 "source": {"event": "WorkflowCompleted"},
-                "preview": result,
+                "preview": _redact_artifact_local_refs(result),
+                "artifact_render": _artifact_descriptor(result),
             }
         )
     for event in status.get("events") or status.get("recent_events") or []:
@@ -356,7 +477,8 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "step_output",
                     "title": f"Step output: {event.get('key')}",
                     "source": {"event": "StepCompleted", "key": event.get("key"), "seq": event.get("seq")},
-                    "preview": payload.get("output"),
+                    "preview": _redact_artifact_local_refs(payload.get("output")),
+                    "artifact_render": _artifact_descriptor(payload.get("output")),
                     "metadata": payload.get("metadata"),
                 }
             )
@@ -385,7 +507,7 @@ async def list_dbs() -> dict[str, Any]:
     dbs = []
     for name, path in sorted(_configured_dbs().items()):
         dbs.append({"name": name, "exists": Path(path).expanduser().exists()})
-    return {"count": len(dbs), "dbs": dbs}
+    return {"count": len(dbs), "dbs": dbs, "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/definitions")
@@ -393,7 +515,7 @@ async def workflow_definitions(db: str | None = None) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     definitions = [_definition_payload(definition, engine) for definition in _catalog_for_engine(engine)]
-    return {"db_alias": db_alias, "count": len(definitions), "definitions": definitions}
+    return {"db_alias": db_alias, "count": len(definitions), "definitions": definitions, "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/definitions/{definition_id}/runs")
@@ -407,7 +529,7 @@ async def definition_runs(
     engine = WorkflowEngine(db_path, read_only=True)
     definition = _definition_by_id(definition_id, engine)
     runs = _runs_for_ref(engine, str(definition["workflow_ref"]), status=status, limit=_int(limit, default=50, maximum=500))
-    return {"db_alias": db_alias, "definition": definition, "count": len(runs), "runs": runs}
+    return {"db_alias": db_alias, "definition": definition, "count": len(runs), "runs": runs, "runtime_semantics": _runtime_semantics()}
 
 
 @router.post("/runs")
@@ -446,6 +568,7 @@ async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
         "result": {"workflow_id": result.workflow_id, "status": result.status, "waiting_on": result.waiting_on, "error": result.error},
         "run": status,
         "artifacts": _artifacts_from_status(status),
+        "runtime_semantics": _runtime_semantics(),
     }
 
 
@@ -458,7 +581,7 @@ async def runs(
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     rows = _all_runs(engine, status=status, limit=_int(limit, default=100, maximum=500))
-    return {"db_alias": db_alias, "count": len(rows), "runs": rows, "counts": _run_counts(rows)}
+    return {"db_alias": db_alias, "count": len(rows), "runs": rows, "counts": _run_counts(rows), "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/runs/{workflow_id}")
@@ -481,14 +604,14 @@ async def run_status(
         command_payload_chars=_int(command_payload_chars, default=1000, maximum=20000),
     )
     artifacts = _artifacts_from_status(packet)
-    return {"db_alias": db_alias, "run": packet, "artifacts": artifacts}
+    return {"db_alias": db_alias, "run": packet, "artifacts": artifacts, "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/runs/{workflow_id}/artifacts")
 async def run_artifacts(workflow_id: str, db: str | None = None, recent_events: int = 100) -> dict[str, Any]:
     status = await run_status(workflow_id, db=db, recent_events=recent_events, commands="all", command_limit=100, command_payload_chars=5000)
     artifacts = status["artifacts"]
-    return {"db_alias": status["db_alias"], "workflow_id": workflow_id, "count": len(artifacts), "artifacts": artifacts}
+    return {"db_alias": status["db_alias"], "workflow_id": workflow_id, "count": len(artifacts), "artifacts": artifacts, "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/approvals")
@@ -499,7 +622,7 @@ async def active_approvals(db: str | None = None, status: str | None = "waiting"
         _approval_card(approval_view_to_dict(approval), db_alias=db_alias)
         for approval in engine.list_approvals(status=status)[: _int(limit, default=100, maximum=500)]
     ]
-    return {"db_alias": db_alias, "count": len(approvals), "approvals": approvals}
+    return {"db_alias": db_alias, "count": len(approvals), "approvals": approvals, "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/approvals/detail")
@@ -508,10 +631,10 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
     if not workflow_id or not key:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
     engine = WorkflowEngine(db_path, read_only=True)
-    approval = _strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key)))
+    approval = _redact_artifact_local_refs(_strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key))))
     status = _status_packet(engine, workflow_id, recent_events=100, commands="recent", command_limit=20, command_payload_chars=5000)
     timeline = [event for event in engine.events(workflow_id) if event.get("seq", 0) <= (approval.get("requested_seq") or 10**9)]
-    timeline = _redact(timeline)
+    timeline = _redact_artifact_local_refs(_redact(timeline))
     card = _approval_card(approval, db_alias=db_alias)
     return {
         "db_alias": db_alias,
@@ -522,7 +645,8 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
             "action": approval.get("key"),
             "prompt": approval.get("prompt"),
             "allowed_decisions": approval.get("allowed") or ["approve", "reject"],
-            "artifact": approval.get("artifact"),
+            "artifact": _redact_artifact_local_refs(approval.get("artifact")),
+            "artifact_render": _artifact_descriptor(approval.get("artifact")),
             "authority": approval.get("authority"),
             "approver": approval.get("approver"),
         },
@@ -535,6 +659,7 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         },
         "timeline": timeline,
         "artifacts": _artifacts_from_status(status),
+        "runtime_semantics": _runtime_semantics(),
     }
 
 
@@ -580,6 +705,7 @@ async def overview(
         "active_approvals": approvals,
         "artifact_count": len(artifacts),
         "artifacts": artifacts[:50],
+        "runtime_semantics": _runtime_semantics(),
     }
 
 

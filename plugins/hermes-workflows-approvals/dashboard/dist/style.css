@@ -10,6 +10,7 @@
 
 .hwf-header,
 .hwf-controls,
+.hwf-artifact-render,
 .hwf-meta,
 .hwf-stats,
 .hwf-approval-actions,
@@ -50,6 +51,36 @@
 
 .hwf-muted {
   color: var(--color-muted-foreground);
+}
+
+.hwf-db-control {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 16rem;
+}
+
+.hwf-db-control label {
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.hwf-db-control p {
+  margin: 0;
+  max-width: 24rem;
+  font-size: 0.82rem;
+}
+
+.hwf-runtime-note,
+.hwf-attention {
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-lg, 0.75rem);
+  padding: 0.75rem 1rem;
+  background: var(--hwf-surface);
+}
+
+.hwf-attention {
+  border-color: color-mix(in srgb, #f7c948, var(--hwf-border) 45%);
+  background: color-mix(in srgb, #f7c948, transparent 88%);
 }
 
 .hwf-ok {
