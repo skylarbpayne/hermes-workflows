@@ -1,3 +1,8 @@
+---
+layout: page
+title: Runtime vs Skills/Subagents Boundary
+---
+
 # Runtime vs Skills/Subagents Boundary
 
 Status: accepted

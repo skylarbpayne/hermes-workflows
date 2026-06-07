@@ -1,3 +1,8 @@
+---
+layout: page
+title: /workflows UX research and product direction
+---
+
 # /workflows UX research and product direction
 
 Date: 2026-06-06

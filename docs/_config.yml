@@ -3,5 +3,12 @@ description: Durable workflow runtime for Hermes-operated agent workspaces.
 theme: minima
 markdown: kramdown
 plugins: []
+header_pages:
+  - index.md
+  - setup-for-agents.md
+  - architecture/domain-model-and-seams.md
+  - operations/inspectability-cookbook.md
+  - integrations/hermes-plugin.md
+  - plans/2026-06-07-workflow-definition-ergonomics.md
 exclude:
   - output/

@@ -10,22 +10,26 @@ title: hermes-workflows docs
 ## Start here
 
 - [Project README](https://github.com/skylarbpayne/hermes-workflows#readme)
-- [Architecture, domain model, seams, execution environments, and failure modes](architecture/domain-model-and-seams.md)
-- [Hermes/operator setup guide](setup-for-agents.md)
-- [Runtime vs skills/subagents boundary](architecture/runtime-vs-skills-subagents.md)
-- [Inspectability cookbook](operations/inspectability-cookbook.md)
-- [Approval adapters and Hermes plugin](architecture/approval-adapters-and-hermes-plugin.md)
-- [Hermes plugin integration](integrations/hermes-plugin.md)
-- [Documentation summary and CI notes](summary.md)
+- [Architecture, domain model, seams, execution environments, and failure modes](architecture/domain-model-and-seams.html)
+- [Hermes/operator setup guide](setup-for-agents.html)
+- [Runtime vs skills/subagents boundary](architecture/runtime-vs-skills-subagents.html)
+- [Inspectability cookbook](operations/inspectability-cookbook.html)
+- [Approval adapters and Hermes plugin](architecture/approval-adapters-and-hermes-plugin.html)
+- [Hermes plugin integration](integrations/hermes-plugin.html)
+- [Documentation summary and CI notes](summary.html)
+
+## Current plan gates
+
+- [Workflow definition ergonomics, discovery, and uv script plan](plans/2026-06-07-workflow-definition-ergonomics.html) — pre-implementation plan only; do not implement until approved.
 
 ## Existing deeper notes
 
-- [Dynamic sub-workflows](architecture/dynamic-sub-workflows.md)
-- [Launch hardening review](architecture/launch-hardening-review-2026-06-05.md)
-- [Invocation audit](operations/invocation-audit-2026-06-06.md)
-- [Dashboard UX research](ux/workflows-dashboard-ux-research-2026-06-06.md)
-- [Real-run open-source blog plan](plans/2026-06-05-real-run-open-source-blog.md)
-- [Resumable child workflows plan](plans/2026-05-29-resumable-child-workflows.md)
+- [Dynamic sub-workflows](architecture/dynamic-sub-workflows.html)
+- [Launch hardening review](architecture/launch-hardening-review-2026-06-05.html)
+- [Invocation audit](operations/invocation-audit-2026-06-06.html)
+- [Dashboard UX research](ux/workflows-dashboard-ux-research-2026-06-06.html)
+- [Real-run open-source blog plan](plans/2026-06-05-real-run-open-source-blog.html)
+- [Resumable child workflows plan](plans/2026-05-29-resumable-child-workflows.html)
 
 ## Site build
 

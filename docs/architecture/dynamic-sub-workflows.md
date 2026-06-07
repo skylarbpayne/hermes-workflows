@@ -1,3 +1,8 @@
+---
+layout: page
+title: Dynamic Python Workflow Returns
+---
+
 # Dynamic Python Workflow Returns
 
 Status: implemented first slice

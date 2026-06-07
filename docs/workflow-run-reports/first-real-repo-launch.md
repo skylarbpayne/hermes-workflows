@@ -1,3 +1,8 @@
+---
+layout: page
+title: "Repo launch packet: hermes-workflows"
+---
+
 # Repo launch packet: hermes-workflows
 
 Approved by: skylar-current-chat-approval

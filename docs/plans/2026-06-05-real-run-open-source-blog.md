@@ -1,3 +1,8 @@
+---
+layout: page
+title: /workflows real-run, open-source, and blog plan
+---
+
 # /workflows real-run, open-source, and blog plan
 
 Date: 2026-06-05

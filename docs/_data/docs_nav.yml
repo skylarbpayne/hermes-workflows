@@ -1,0 +1,41 @@
+groups:
+  - title: Start
+    pages:
+      - title: Overview
+        path: index.md
+      - title: Setup for agents
+        path: setup-for-agents.md
+      - title: Inspectability cookbook
+        path: operations/inspectability-cookbook.md
+  - title: Architecture
+    pages:
+      - title: Domain model and seams
+        path: architecture/domain-model-and-seams.md
+      - title: Runtime vs skills/subagents
+        path: architecture/runtime-vs-skills-subagents.md
+      - title: Approval adapters and Hermes plugin
+        path: architecture/approval-adapters-and-hermes-plugin.md
+      - title: Dynamic sub-workflows
+        path: architecture/dynamic-sub-workflows.md
+      - title: Dashboard runtime semantics
+        path: architecture/dashboard-runtime-semantics-agentstep-approvals.md
+  - title: Operations and integrations
+    pages:
+      - title: Hermes plugin integration
+        path: integrations/hermes-plugin.md
+      - title: Invocation audit
+        path: operations/invocation-audit-2026-06-06.md
+      - title: First real repo launch report
+        path: workflow-run-reports/first-real-repo-launch.md
+      - title: ctx.gather repo-change review report
+        path: workflow-run-reports/ctx-gather-repo-change-review.md
+  - title: Plans and research
+    pages:
+      - title: Dashboard UX research
+        path: ux/workflows-dashboard-ux-research-2026-06-06.md
+      - title: Workflow definition ergonomics plan
+        path: plans/2026-06-07-workflow-definition-ergonomics.md
+      - title: Real-run open-source blog plan
+        path: plans/2026-06-05-real-run-open-source-blog.md
+      - title: Resumable child workflows plan
+        path: plans/2026-05-29-resumable-child-workflows.md

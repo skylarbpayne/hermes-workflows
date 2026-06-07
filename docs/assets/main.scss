@@ -1,0 +1,55 @@
+---
+---
+
+@import "minima";
+
+.docs-nav {
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  margin: 0 0 2rem;
+  padding: 1rem;
+  background: #fdfdfd;
+}
+
+.docs-nav__title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 0.75rem;
+}
+
+.docs-nav__groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.docs-nav__group-title {
+  font-size: 0.9rem;
+  margin: 0 0 0.4rem;
+  color: #424242;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.docs-nav__list {
+  margin: 0;
+  padding-left: 1rem;
+}
+
+.docs-nav__item {
+  margin: 0.2rem 0;
+}
+
+.docs-nav__link--active {
+  font-weight: 700;
+  color: #111;
+}
+
+.mermaid {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  overflow-x: auto;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fff;
+}

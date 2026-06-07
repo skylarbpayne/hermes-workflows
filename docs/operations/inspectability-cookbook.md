@@ -1,3 +1,8 @@
+---
+layout: page
+title: Workflow Inspectability Cookbook
+---
+
 # Workflow Inspectability Cookbook
 
 This cookbook is the operator path for answering the question: “why is this workflow stuck?” without replaying the workflow or changing workflow instance state.

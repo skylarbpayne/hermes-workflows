@@ -1,3 +1,8 @@
+---
+layout: page
+title: Approval adapters and Hermes plugin path
+---
+
 # Approval adapters and Hermes plugin path
 
 `hermes-workflows` core should stay runtime-agnostic. The approval capability is useful only if humans can approve from the surface they already use, but the core library should not become Discord-specific, Telegram-specific, or Hermes-specific.
@@ -81,7 +86,7 @@ The underlying signal payload remains boring for lower-level integrations:
 - Local approval server: `hermes-workflows serve-dashboard` exposes a small local form and posts through `submit_approval_decision(...)`.
 - Hermes Agent plugin: discovered via the `hermes_agent.plugins` entry point and exposes `workflow_approvals_list` / `workflow_approval_decide`.
 
-See [`../integrations/hermes-plugin.md`](../integrations/hermes-plugin.md) for install/config details.
+See [`../integrations/hermes-plugin.md`](../integrations/hermes-plugin.html) for install/config details.
 
 ## Hermes plugin MVP
 

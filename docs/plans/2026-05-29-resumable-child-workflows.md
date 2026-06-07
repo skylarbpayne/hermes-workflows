@@ -1,3 +1,8 @@
+---
+layout: page
+title: Resumable Child Workflows Implementation Plan
+---
+
 # Resumable Child Workflows Implementation Plan
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task after explicit human approval. Do not treat this plan PR landing as implementation approval.

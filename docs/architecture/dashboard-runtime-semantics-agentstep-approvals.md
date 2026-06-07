@@ -1,3 +1,8 @@
+---
+layout: page
+title: Dashboard runtime semantics, AgentStep naming, and approval artifacts
+---
+
 # Dashboard runtime semantics, AgentStep naming, and approval artifacts
 
 Status: accepted / implementation guide

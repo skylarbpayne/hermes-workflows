@@ -1,3 +1,8 @@
+---
+layout: page
+title: Hermes Workflows Launch Hardening Review — 2026-06-05
+---
+
 # Hermes Workflows Launch Hardening Review — 2026-06-05
 
 ## Scope

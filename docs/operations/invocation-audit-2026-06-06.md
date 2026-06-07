@@ -1,3 +1,8 @@
+---
+layout: page
+title: hermes-workflows invocation audit receipt — 2026-06-06
+---
+
 # hermes-workflows invocation audit receipt — 2026-06-06
 
 Generated: 2026-06-06 14:02 PDT

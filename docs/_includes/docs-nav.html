@@ -1,0 +1,23 @@
+<nav class="docs-nav" aria-label="Documentation navigation">
+  <div class="docs-nav__title">Docs navigation</div>
+  <div class="docs-nav__groups">
+    {% for group in site.data.docs_nav.groups %}
+      <section class="docs-nav__group">
+        <h2 class="docs-nav__group-title">{{ group.title | escape }}</h2>
+        <ul class="docs-nav__list">
+          {% for item in group.pages %}
+            {% assign target_page = site.pages | where: "path", item.path | first %}
+            {% assign href = target_page.url | default: item.path %}
+            {% assign active_class = "" %}
+            {% if page.path == item.path %}
+              {% assign active_class = " docs-nav__link--active" %}
+            {% endif %}
+            <li class="docs-nav__item">
+              <a class="docs-nav__link{{ active_class }}" href="{{ href | relative_url }}">{{ item.title | escape }}</a>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endfor %}
+  </div>
+</nav>
