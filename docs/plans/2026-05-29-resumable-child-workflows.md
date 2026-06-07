@@ -609,6 +609,6 @@ Implementation is complete only when:
 
 - This plan can be reviewed/landed as docs-only.
 - Landing this docs-only plan PR does **not** authorize implementation.
-- A separate explicit Skylar approval of this plan authorizes implementation work and opening an implementation PR.
-- Implementation PR merge/landing requires separate explicit Skylar approval.
+- A separate explicit the maintainer approval of this plan authorizes implementation work and opening an implementation PR.
+- Implementation PR merge/landing requires separate explicit the maintainer approval.
 - No generated Python from a live agent may run without the existing generated-workflow approval signal.

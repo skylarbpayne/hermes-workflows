@@ -2,7 +2,7 @@
 
 ## Scope
 
-Skylar's launch-hardening request was to dogfood workflows, inspect the runtime architecture, harden approval semantics, make install/use easier, add agent-facing operating guidance, build a simple local dashboard, and audit Palmer workloads for adoption candidates. Blog writing stays deferred until the repo work is in reviewable shape.
+the maintainer's launch-hardening request was to dogfood workflows, inspect the runtime architecture, harden approval semantics, make install/use easier, add agent-facing operating guidance, build a simple local dashboard, and audit operator agent workloads for adoption candidates. Blog writing stays deferred until the repo work is in reviewable shape.
 
 ## Architecture review
 
@@ -90,13 +90,13 @@ What should become a Hermes plugin later:
 
 Do not put Hermes-specific messaging concerns in the core runtime. Core should expose stable approval/status APIs; Hermes plugins/adapters should own delivery, identity mapping, and channel-specific provenance.
 
-## Palmer adoption audit
+## Workflow adoption audit
 
 Live surfaces inspected:
 
-- Palmer cron jobs: 25 total in the active profile.
-- Active Kanban/task workload: canonical board `/Users/skylarpayne/.hermes/kanban.db`; recent active tasks include multiple `hermes-workflows` approval/hardening tasks plus HTV, email, artifact, OAuth, and personal-admin work.
-- Palmer skills: 98 profile skills matched workflow/approval/side-effect-related terms. Many already mention workflow patterns generically; only a smaller subset should actually become workflow-backed.
+- operator cron jobs: 25 total in the active profile.
+- Active Kanban/task workload: canonical board `~/.hermes/kanban.db`; recent active tasks include multiple `hermes-workflows` approval/hardening tasks plus HTV, email, artifact, OAuth, and personal-admin work.
+- operator skills: 98 profile skills matched workflow/approval/side-effect-related terms. Many already mention workflow patterns generically; only a smaller subset should actually become workflow-backed.
 
 ### Good first adoption candidates
 
@@ -104,11 +104,11 @@ Live surfaces inspected:
    - Best dogfood loop: repo inspection, plan artifact, approval gate, implementation, review packet.
    - Needs separate approvals for generated workflow execution, PR creation, and merge/landing.
 
-2. `Palmer email execution triage` cron (`d7550ac98477`)
+2. `Email execution triage` cron (`d7550ac98477`)
    - Strong fit because email has obvious side-effect boundaries.
-   - Workflow gates should separate classify → draft → Skylar approval → send/archive. Current rule remains draft-only unless approved.
+   - Workflow gates should separate classify → draft → the maintainer approval → send/archive. Current rule remains draft-only unless approved.
 
-3. `Palmer decision unblock batch` cron (`ee6ee8253356`)
+3. `Decision unblock batch` cron (`ee6ee8253356`)
    - Strong fit for accumulating pending approvals and turning them into typed workflow gates rather than loose chat summaries.
 
 4. HTV send/publish/payment tasks
@@ -130,16 +130,16 @@ Live surfaces inspected:
 - There is no built-in bridge yet from a Hermes Kanban task to a workflow instance ID and dashboard path.
 - There is no first-class cron wrapper that starts/resumes a workflow and posts only approval packets when blocked.
 - Approval source capture is CLI-friendly but still manual; Discord/Telegram/Kanban approval adapters should generate `source-json` automatically.
-- Dashboard is local/static. Good for safety, but not yet a persistent Palmer control surface.
+- Dashboard is local/static. Good for safety, but not yet a persistent operator control surface.
 - No migration guide exists for converting a skill/cron prompt into a workflow-backed operating loop.
 
 ## Review verdict
 
-The repo is now in a much better launch posture for the concern that mattered: approvals are no longer just vibes. The next slice should not be a blog post; it should be a small integration bridge that makes one real Palmer cron/workload create a workflow instance, stop at a typed approval gate, render a dashboard/packet, and resume only from a human-provenance decision.
+The repo is now in a much better launch posture for the concern that mattered: approvals are no longer just vibes. The next slice should not be a blog post; it should be a small integration bridge that makes one real operator cron/workload create a workflow instance, stop at a typed approval gate, render a dashboard/packet, and resume only from a human-provenance decision.
 
 ## Verification
 
-Executed from `/Users/skylarpayne/code/hermes-workflows`:
+Executed from `/path/to/hermes-workflows`:
 
 ```bash
 PYTHONPATH=src:. pytest -q

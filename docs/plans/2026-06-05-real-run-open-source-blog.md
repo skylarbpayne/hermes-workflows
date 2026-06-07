@@ -1,7 +1,7 @@
 # /workflows real-run, open-source, and blog plan
 
 Date: 2026-06-05
-Owner: Palmer prepares; Skylar approves real sends/publishing/repo visibility changes.
+Owner: The operator prepares; the maintainer approves real sends/publishing/repo visibility changes.
 
 ## Bottom line
 
@@ -22,7 +22,7 @@ That is the blog post: not “agents can write emails,” but “agents can do o
 ## Current state
 
 Repo: `hermes-workflows`
-Remote: `skylarbpayne/hermes-workflows`
+Remote: `<owner>/hermes-workflows`
 Current GitHub visibility: private
 License: Apache-2.0
 Demo artifact: private share link redacted
@@ -95,7 +95,7 @@ PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
 
 The harness produces:
 
-- `review-packet/index.html` — private artifact UI for Skylar review
+- `review-packet/index.html` — private artifact UI for the maintainer review
 - `receipt.json` — full private workflow receipt; do not commit or paste into chat
 - CLI summary — redacted counts, approvals, side effects, and generated workflow hash
 - `snapshot.json` — joined private run input
@@ -127,7 +127,7 @@ Blocked without explicit approval:
 
 1. **Generated workflow approval** — generated Python must be inspectable, hashed, and approved before execution.
 2. **Agent QA approval** — agent reviewer must approve roster coverage, prize accuracy, tone, and side-effect safety before human review.
-3. **Human draft approval** — Skylar approves creating drafts or sending/scheduling.
+3. **Human draft approval** — the maintainer approves creating drafts or sending/scheduling.
 4. **Send approval** — separate explicit send/schedule gate. Draft approval is not send approval.
 
 ## Open-source prep
@@ -228,12 +228,12 @@ The post should show the system solving those exact risks, not hand-waving “hu
 1. Fix repo hygiene and full-suite blocker.
 2. Add real-run dry-run harness using exported snapshots.
 3. Run against HTV snapshots and produce protected review packet.
-4. Have Skylar review packet and decide whether to create drafts/send.
+4. Have the maintainer review packet and decide whether to create drafts/send.
 5. Add README/license/security/contributing docs.
 6. Make repo public only after explicit approval.
-7. Publish blog post after Skylar approves final draft.
+7. Publish blog post after the maintainer approves final draft.
 
-## Decision needed from Skylar
+## Decision needed from the maintainer
 
 Before the real run, pick the source mode:
 
