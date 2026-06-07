@@ -131,27 +131,6 @@ Workflow code runs in the Python process that imports it: the CLI, a worker, a t
 - `examples/` contains runnable repository/demo workflows, deterministic test runners, scripts, prompts, and larger scenario assets. These are for contributors and operators working from the source tree.
 - `src/hermes_workflows/examples/` contains small installed examples that can be imported after package installation, such as `hermes_workflows.examples.trip:trip_planning_workflow`. Quickstarts should prefer these installed examples.
 
-### Bounded email triage example
-
-`hermes_workflows.examples.email_triage:email_triage_workflow` is the first real operator-style example: it classifies a bounded email candidate set, stops at a human approval gate, and only writes local proposal artifacts after approval. It never sends, archives, deletes, marks mail, creates Gmail drafts, mutates calendars/accounts, or changes credentials.
-
-For a live private dry run, build a redacted Gmail search fixture first. The helper reads only `gog gmail search` metadata through a profile-aware command, then writes symbolic handles/signals for the workflow input; raw senders, subjects, snippets, bodies, thread IDs, and account emails are not written to the fixture.
-
-```bash
-uv run python examples/build_email_triage_live_fixture.py \
-  --account you@example.com \
-  --query 'newer_than:2d in:inbox' \
-  --max-per-account 5 \
-  --out /tmp/email-triage-input.json
-
-uv run python -m hermes_workflows run \
-  hermes_workflows.examples.email_triage:email_triage_workflow \
-  --id wf_email_triage_private_dry_run \
-  --input-json "$(cat /tmp/email-triage-input.json)"
-```
-
-The run should stop at `approve_email_triage_packet`. Record-only approvals from chat/dashboard adapters should use `resume=false`; a trusted local operator can resume later to write the local proposal packet. Approval to write the local packet is still **not** approval to draft, send, archive, or mutate email.
-
 ## Development checks
 
 ```bash
