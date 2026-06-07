@@ -98,7 +98,7 @@ print(receipt.status)
 Hermes/operator invokes workflow
   -> WorkflowEngine appends/replays SQLite history
   -> local steps or worker processes complete durable commands
-  -> agent steps run only through configured trusted runners
+  -> AgentStep calls run only through configured trusted runners
   -> approvals/signals are recorded with provenance
   -> trusted local resume replays the decider and emits receipts/status
 ```

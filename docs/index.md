@@ -29,4 +29,4 @@ title: hermes-workflows docs
 
 ## Site build
 
-The docs site is intentionally lightweight. GitHub Actions builds the `docs/` directory with GitHub Pages/Jekyll on pull requests and deploys only from `main`.
+The docs site is intentionally lightweight. GitHub Actions builds the `docs/` directory with GitHub Pages/Jekyll on pull requests and pushes. Once GitHub Pages is enabled in repo settings, the same workflow can be run manually to publish the built site.

@@ -27,13 +27,16 @@ jobs:
           source: ./docs
           destination: ./_site
       - name: Upload Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-pages-artifact@v4
         with:
           path: ./_site
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # GitHub Pages must be enabled in repo settings before deploy-pages works.
+    # Keep push/PR docs CI green everywhere; run this workflow manually once Pages
+    # is enabled to publish the built site.
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     environment:
