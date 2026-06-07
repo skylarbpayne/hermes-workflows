@@ -92,6 +92,7 @@ def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(
 
     assert result["count"] == 1
     assert result["dbs"][0] == {"name": "palmer-smoke", "exists": True}
+    assert result["runtime_semantics"]["db_selector"].startswith("The dropdown selects a configured workflow DB alias")
     assert str(db) not in json.dumps(result)
 
 
@@ -279,6 +280,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert status["run"]["workflow_id"] == launched_workflow_id
     assert status["artifacts"][0]["kind"] == "approval_artifact"
     assert status["artifacts"][0]["preview"]["secret_token"] == "[REDACTED]"
+    assert status["artifacts"][0]["artifact_render"]["render"] == "inline-json"
     assert str(db) not in json.dumps(status)
 
     artifacts = run(api.run_artifacts(launched_workflow_id, db="palmer-smoke"))
@@ -291,6 +293,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert approval["headline"] == "Approve the plugin test packet?"
     assert approval["consequence"] == "Records approve/reject only; a trusted local resumer must continue the workflow."
     assert approval["risk"]["level"] == "low"
+    assert approval["artifact_render"]["render"] == "inline-json"
     assert approval["artifact_preview"]["summary"] == "Plugin approval packet"
     assert approval["artifact_preview"]["secret_token"] == "[REDACTED]"
     assert str(db) not in json.dumps(approvals)
@@ -345,6 +348,43 @@ def test_dashboard_inferred_history_definitions_are_not_browser_runnable(tmp_pat
     assert getattr(excinfo.value, "status_code", None) == 403
     assert "workflow_catalog" in str(getattr(excinfo.value, "detail", excinfo.value))
 
+def test_dashboard_artifact_render_descriptors_redact_local_media_paths():
+    api = load_dashboard_api()
+
+    card = api._approval_card(
+        {
+            "workflow_id": "wf_media",
+            "workflow_ref": "pkg:flow",
+            "key": "approve_media",
+            "status": "waiting",
+            "prompt": "Approve generated image?",
+            "artifact": {
+                "kind": "image",
+                "media_type": "image/png",
+                "path": "/Users/skylarpayne/private/generated.png",
+                "caption": "Generated preview",
+            },
+        },
+        db_alias="palmer-smoke",
+    )
+
+    assert card["artifact_render"] == {
+        "kind": "image",
+        "render": "file-reference",
+        "persisted": "workflow_history",
+        "servable_by_dashboard": False,
+        "media_type": "image/png",
+        "reference": {"type": "local_path", "field": "path", "href": "[REDACTED_LOCAL_PATH]"},
+        "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
+    }
+    assert card["artifact_preview"]["path"] == "[REDACTED_LOCAL_PATH]"
+    assert "/Users/skylarpayne" not in json.dumps(card)
+
+    audio = api._artifact_descriptor({"kind": "audio", "url": "https://example.invalid/review.mp3", "media_type": "audio/mpeg"})
+    assert audio["kind"] == "audio"
+    assert audio["render"] == "media-reference"
+    assert audio["reference"] == {"type": "url", "href": "https://example.invalid/review.mp3"}
+
 
 def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
@@ -359,6 +399,10 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         "Record-only decision",
         "View approval",
         "Run history",
+        "Workflow DB alias",
+        "Configured SQLite alias; not a registry",
+        "Dashboard approval buttons record only",
+        "artifact: ",
     ):
         assert phrase in index_js
     assert ".hwf-shell" in style_css
