@@ -28,8 +28,6 @@ Do not commit real participant exports, workflow SQLite databases, generated rec
 
 The Hack the Valley real-run path uses local snapshots and private `/tmp/...` outputs. Public examples use synthetic data only.
 
-The email triage live-fixture helper may read private Gmail search metadata, but it must only write bounded symbolic handles/signals to its fixture JSON. Do not commit generated live email fixtures or workflow DBs from private runs.
-
 ## Reporting issues
 
 Before public launch, report issues directly to the repository owner. After the repo is public, replace this section with the preferred security contact and disclosure process.
