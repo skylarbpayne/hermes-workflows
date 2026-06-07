@@ -1,0 +1,7 @@
+title: hermes-workflows
+description: Durable workflow runtime for Hermes-operated agent workspaces.
+theme: minima
+markdown: kramdown
+plugins: []
+exclude:
+  - output/
