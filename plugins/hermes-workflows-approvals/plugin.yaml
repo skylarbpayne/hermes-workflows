@@ -1,5 +1,5 @@
 name: hermes-workflows-approvals
-version: "0.1.0"
+version: "0.2.0"
 description: Hermes Agent adapter for hermes-workflows human approvals
 kind: standalone
 provides_tools:

@@ -1,0 +1,12 @@
+{
+  "name": "hermes-workflows-approvals",
+  "label": "Workflows",
+  "description": "Workflow observability and human-provenance approval controls for hermes-workflows SQLite DBs.",
+  "icon": "Workflow",
+  "version": "0.2.0",
+  "tab": { "path": "/workflows", "position": "after:kanban" },
+  "slots": [],
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
