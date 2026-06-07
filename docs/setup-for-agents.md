@@ -50,6 +50,48 @@ hermes-workflows serve-dashboard my_package.workflow:main \
 
 That local server is intentionally boring: it is not an agent runtime, and it does not invent a second approval model. When `--enable-approval-actions` is present, it only captures human provenance and calls the same engine signal API that Discord, Telegram, a Hermes plugin, or another runtime adapter should call.
 
+## Agent/operator bridge
+
+For recurring agent-owned workflows, keep aliases in `.hermes/workflows.registry.json` and invoke through the bridge commands:
+
+```json
+{
+  "dbs": {"agent": "/tmp/agent-workflows.sqlite"},
+  "workflows": {
+    "demo": {
+      "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow",
+      "db": "agent",
+      "trusted_resume": true
+    }
+  }
+}
+```
+
+```bash
+hermes-workflows invoke demo \
+  --config .hermes/workflows.registry.json \
+  --id wf_demo \
+  --input-json '{"destination":"NYC","approver":"human:operator"}' \
+  --source-json '{"kind":"operator","channel":"kanban","task_id":"t_..."}' \
+  --receipt-json /tmp/wf-demo-invoke.json
+```
+
+If a Hermes plugin/gateway decision records the approval with `resume=false`, do not run workflow code in the gateway process. Use a trusted local operator or cron path instead:
+
+```bash
+hermes-workflows resume-trusted demo \
+  --config .hermes/workflows.registry.json \
+  --id wf_demo \
+  --receipt-json /tmp/wf-demo-resume.json
+
+hermes-workflows resume-pending \
+  --config .hermes/workflows.registry.json \
+  --registry-name demo \
+  --limit 5
+```
+
+`resume-pending` fails closed unless the registry entry has `trusted_resume: true`. Receipts are redacted JSON that can be pasted into Kanban comments or attached to dashboard artifacts.
+
 ## The mental model
 
 A workflow function is a decider. It replays from the top on every run, resolves completed steps from SQLite history, and exits cleanly whenever it needs a step, signal, or approval.

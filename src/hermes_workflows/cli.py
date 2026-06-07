@@ -10,6 +10,8 @@ from .approvals import ApprovalDecisionInput
 from .dashboard import render_dashboard
 from .dashboard_server import serve_dashboard
 from .engine import JsonCodec, RunResult, WorkflowEngine
+from .invocation import InvocationService, TrustedResumer
+from .registry import WorkflowRegistry
 
 
 def load_workflow(ref: str) -> Callable[..., Any]:
@@ -40,6 +42,13 @@ def positive_int(value: str) -> int:
 
 def print_json(payload: Any) -> None:
     print(JsonCodec.dumps(payload))
+
+
+def maybe_write_json(path: Path | None, payload: Any) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(JsonCodec.dumps(payload) + "\n")
 
 
 def human_source_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -90,6 +99,38 @@ def run_doctor(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    registry = sub.add_parser("registry", help="Inspect workflow registry aliases")
+    registry_sub = registry.add_subparsers(dest="registry_command", required=True)
+    registry_list = registry_sub.add_parser("list", help="List configured DB and workflow aliases")
+    registry_list.add_argument("--config", type=Path)
+    registry_doctor = registry_sub.add_parser("doctor", help="Validate configured workflow refs and DB aliases")
+    registry_doctor.add_argument("--config", type=Path)
+
+    invoke = sub.add_parser("invoke", help="Registry-aware workflow invocation with receipt output")
+    invoke.add_argument("workflow", help="workflow alias or module:function ref")
+    invoke.add_argument("--config", type=Path)
+    invoke.add_argument("--db", help="configured DB alias or explicit local DB path")
+    invoke.add_argument("--id", required=True, dest="workflow_id")
+    invoke.add_argument("--input-json")
+    invoke.add_argument("--source-json")
+    invoke.add_argument("--receipt-json", type=Path)
+    invoke.add_argument("--dashboard-out", type=Path)
+
+    resume_trusted = sub.add_parser("resume-trusted", help="Resume one workflow after a record-only approval decision")
+    resume_trusted.add_argument("workflow", help="workflow alias or module:function ref")
+    resume_trusted.add_argument("--config", type=Path)
+    resume_trusted.add_argument("--db", help="configured DB alias or explicit local DB path")
+    resume_trusted.add_argument("--id", required=True, dest="workflow_id")
+    resume_trusted.add_argument("--receipt-json", type=Path)
+    resume_trusted.add_argument("--dashboard-out", type=Path)
+
+    resume_pending = sub.add_parser("resume-pending", help="Resume allowlisted pending workflows with recorded decisions")
+    resume_pending.add_argument("--config", type=Path)
+    resume_pending.add_argument("--db", help="configured DB alias or explicit local DB path")
+    resume_pending.add_argument("--registry-name", required=True)
+    resume_pending.add_argument("--limit", type=positive_int, default=10)
+    resume_pending.add_argument("--receipt-json", type=Path)
 
     start = sub.add_parser("start", help="Start/replay a workflow decider without draining step commands")
     start.add_argument("workflow_ref", help="module:function")
@@ -204,6 +245,61 @@ def main(argv: list[str] | None = None) -> int:
             approval.add_argument("--reason")
 
     args = parser.parse_args(argv)
+    if args.command == "registry":
+        registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
+        if args.registry_command == "list":
+            print_json(registry_obj.to_payload())
+            return 0
+        if args.registry_command == "doctor":
+            payload = registry_obj.to_payload()
+            checks = []
+            for workflow_cfg in registry_obj.workflows.values():
+                check = {"name": workflow_cfg.name, "workflow_ref": workflow_cfg.workflow_ref, "importable": False, "db_resolved": False}
+                try:
+                    load_workflow(workflow_cfg.workflow_ref)
+                except Exception as exc:  # pragma: no cover - exact import errors are environment-specific.
+                    check["import_error"] = str(exc)
+                else:
+                    check["importable"] = True
+                try:
+                    registry_obj.resolve_db(workflow_cfg.db)
+                except Exception as exc:
+                    check["db_error"] = str(exc)
+                else:
+                    check["db_resolved"] = True
+                checks.append(check)
+            print_json({**payload, "checks": checks, "ok": all(item["importable"] and item["db_resolved"] for item in checks)})
+            return 0
+    if args.command == "invoke":
+        registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
+        payload = InvocationService(registry_obj).invoke(
+            args.workflow,
+            db=args.db,
+            workflow_id=args.workflow_id,
+            input_payload=json.loads(args.input_json) if args.input_json else None,
+            source=json.loads(args.source_json) if args.source_json else None,
+            dashboard_out=args.dashboard_out,
+        )
+        maybe_write_json(args.receipt_json, payload)
+        print_json(payload)
+        return 0
+    if args.command == "resume-trusted":
+        registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
+        payload = TrustedResumer(registry_obj).resume_trusted(
+            args.workflow,
+            db=args.db,
+            workflow_id=args.workflow_id,
+            dashboard_out=args.dashboard_out,
+        )
+        maybe_write_json(args.receipt_json, payload)
+        print_json(payload)
+        return 0
+    if args.command == "resume-pending":
+        registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
+        payload = {"resumed": TrustedResumer(registry_obj).resume_pending(args.registry_name, db=args.db, limit=args.limit)}
+        maybe_write_json(args.receipt_json, payload)
+        print_json(payload)
+        return 0
     if args.command == "doctor":
         return run_doctor(args)
 

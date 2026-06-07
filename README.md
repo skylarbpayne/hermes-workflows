@@ -19,7 +19,8 @@ This is intentionally small. It proves the core idea before we build Kanban, art
 - typed approval adapter API through `ApprovalView`, `ApprovalDecisionInput`, and `ApprovalReceipt`
 - Hermes Agent plugin adapter via `hermes_agent.plugins` entry point: `workflow_approvals_list` + `workflow_approval_decide`
 - manual `signal()` resume API for lower-level integrations
-- tiny cross-process CLI: `hermes-workflows start|run|worker|signal|approve|reject|status|list|events|outbox|dashboard|serve-dashboard|doctor`
+- registry-aware invocation/resume bridge: `WorkflowRegistry`, `InvocationService`, `TrustedResumer`, redacted receipts, and `invoke|resume-trusted|resume-pending`
+- tiny cross-process CLI: `hermes-workflows start|run|worker|signal|approve|reject|status|list|events|outbox|dashboard|serve-dashboard|registry|invoke|resume-trusted|resume-pending|doctor`
 
 ## 60-second quickstart
 
@@ -61,6 +62,56 @@ hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
 ```
 
 The quickstart intentionally stops on approval before returning a final result. That is the point: approval is a durable gate, not a comment the agent gets to reinterpret later.
+
+## Registry-aware invocation and trusted resume
+
+For operator-owned runs, use a registry file instead of stuffing workflow refs and DB paths into chat, cron, or gateway callbacks:
+
+```json
+{
+  "dbs": {"pilot": "/tmp/hermes-workflows-pilot.sqlite"},
+  "workflows": {
+    "trip-pilot": {
+      "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow",
+      "db": "pilot",
+      "default_input": {"approver": "human:operator"},
+      "trusted_resume": true
+    }
+  }
+}
+```
+
+```bash
+hermes-workflows registry list --config .hermes/workflows.registry.json
+
+hermes-workflows invoke trip-pilot \
+  --config .hermes/workflows.registry.json \
+  --id wf_trip_operator \
+  --input-json '{"destination":"NYC"}' \
+  --source-json '{"kind":"operator","channel":"kanban","task_id":"t_..."}' \
+  --receipt-json /tmp/wf-trip-invoke-receipt.json \
+  --dashboard-out /tmp/wf-trip-dashboard.html
+```
+
+Hermes plugin/gateway approval decisions deliberately default to `resume=false`: they record the human decision with provenance and leave code execution to a trusted local operator path. After a record-only approval, resume a single instance:
+
+```bash
+hermes-workflows resume-trusted trip-pilot \
+  --config .hermes/workflows.registry.json \
+  --id wf_trip_operator \
+  --receipt-json /tmp/wf-trip-resume-receipt.json
+```
+
+For cron/manual drainers, bulk resume is allowlist-only and requires `trusted_resume: true` on the registry entry:
+
+```bash
+hermes-workflows resume-pending \
+  --config .hermes/workflows.registry.json \
+  --registry-name trip-pilot \
+  --limit 5
+```
+
+The receipt JSON is redacted recursively for secret-bearing keys and includes workflow id/ref, DB alias (not raw DB path), status, waiting key, approval summaries, source/Kanban linkage, result/error summary, and optional dashboard file reference.
 
 ## Architecture boundary
 
