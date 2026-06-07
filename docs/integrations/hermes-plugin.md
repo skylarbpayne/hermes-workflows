@@ -38,19 +38,19 @@ plugins:
   entries:
     hermes-workflows-approvals:
       workflow_dbs:
-        - name: palmer
+        - name: default
           path: /tmp/hermes-workflows-approval-smoke.sqlite
       # Required only if using the dashboard tab's approve/reject buttons.
       # The browser cannot assert human identity; the server stamps this id.
-      dashboard_approver_id: skylar
+      dashboard_approver_id: operator
 ```
 
 Environment fallback for tests/scripts:
 
 ```bash
 export HERMES_WORKFLOWS_DB=/tmp/hermes-workflows-approval-smoke.sqlite
-export HERMES_WORKFLOWS_DBS='{"palmer":"/tmp/hermes-workflows-approval-smoke.sqlite"}'
-export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=skylar
+export HERMES_WORKFLOWS_DBS='{"default":"/tmp/hermes-workflows-approval-smoke.sqlite"}'
+export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=operator
 ```
 
 ## Hermes dashboard plugin
@@ -71,9 +71,9 @@ plugins/hermes-workflows-approvals/
 Install it into a Hermes profile by copying or symlinking the plugin directory into that profile's plugin root:
 
 ```bash
-mkdir -p /Users/skylarpayne/.hermes/profiles/palmer/plugins
-cp -R plugins/hermes-workflows-approvals /Users/skylarpayne/.hermes/profiles/palmer/plugins/
-hermes -p palmer plugins enable hermes-workflows-approvals
+mkdir -p ~/.hermes/profiles/<profile>/plugins
+cp -R plugins/hermes-workflows-approvals ~/.hermes/profiles/<profile>/plugins/
+hermes -p <profile> plugins enable hermes-workflows-approvals
 ```
 
 Dashboard discovery is runtime-only: Hermes scans `$HERMES_HOME/plugins/<name>/dashboard/manifest.json`, serves the JS/CSS bundle, and mounts `plugin_api.py` under `/api/plugins/hermes-workflows-approvals`. No dashboard source fork or npm build is required.
@@ -105,7 +105,7 @@ Input:
 
 ```json
 {
-  "db": "palmer",
+  "db": "default",
   "status": "waiting",
   "limit": 20
 }
@@ -142,11 +142,11 @@ Input:
 
 ```json
 {
-  "db": "palmer",
+  "db": "default",
   "workflow_id": "wf_trip",
   "key": "approve_trip_plan",
   "action": "approve",
-  "by": "skylar",
+  "by": "operator",
   "channel": "discord",
   "message_id": "...",
   "resume": false

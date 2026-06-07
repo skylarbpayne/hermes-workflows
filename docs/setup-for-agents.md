@@ -14,7 +14,7 @@ Use it when the agent should prepare work and stop before side effects.
 Use a trusted Hermes workspace (or another local operator workspace) to own the source checkout, virtualenv, workflow DBs, and registry files. This repository does **not** currently implement a `hermes workflows` subcommand; use the tested CLI entry point `hermes-workflows` or `python -m hermes_workflows`.
 
 ```bash
-git clone https://github.com/skylarbpayne/hermes-workflows.git
+git clone https://github.com/<owner>/hermes-workflows.git
 cd hermes-workflows
 
 # Runtime/user install. Do not require dev extras for user setup.

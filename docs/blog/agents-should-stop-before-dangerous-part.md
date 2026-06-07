@@ -86,7 +86,7 @@ Demo/output artifacts in the repo:
 - `docs/output/hackathon-redacted-packet-2026-06-05/packet.json`
 - `examples/outputs/hackathon-real-dry-run.redacted.json`
 
-The protected Palmer artifact is registered as:
+The protected review artifact is registered as:
 
 ```text
 /workflows-real-run-output
@@ -123,7 +123,7 @@ The setup pattern is simple:
 Install locally:
 
 ```bash
-git clone https://github.com/skylarbpayne/hermes-workflows.git
+git clone https://github.com/<owner>/hermes-workflows.git
 cd hermes-workflows
 python -m pip install -e '.[dev]'
 pytest -q

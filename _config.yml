@@ -1,0 +1,17 @@
+title: hermes-workflows
+description: Durable Python workflow runtime for agent and automation projects.
+theme: minima
+markdown: kramdown
+plugins: []
+defaults:
+  - scope:
+      path: "docs"
+      type: "pages"
+    values:
+      layout: page
+exclude:
+  - output/
+  - docs/output/
+  - .venv/
+  - .pytest_cache/
+  - .mypy_cache/
