@@ -5,7 +5,7 @@ title: Workflow definition ergonomics, discovery, and uv script plan
 
 # Workflow Definition Ergonomics Implementation Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task after Skylar explicitly approves it.
+> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task after explicit human approval.
 
 **Goal:** Make workflow definition files author-owned and runtime-light: they define workflows, optionally expose a tiny guarded direct-run helper, and can be discovered without hand-maintained registry ceremony.
 
@@ -17,7 +17,7 @@ title: Workflow definition ergonomics, discovery, and uv script plan
 
 ## Approval boundary
 
-This document is a pre-implementation plan. Do not implement it until Skylar approves this plan explicitly, e.g. `approve plan`.
+This document is a pre-implementation plan. Do not implement it until the plan is explicitly approved, e.g. `approve plan`.
 
 Plan approval authorizes implementation and PR creation only. Merge/landing remains a separate gate.
 
@@ -201,7 +201,7 @@ if __name__ == "__main__":
 Run:
 
 ```bash
-uv run --script workflows/hello.py --id hello-1 --input-json '{"name":"Skylar"}'
+uv run --script workflows/hello.py --id hello-1 --input-json '{"name":"Hermes"}'
 ```
 
 This should be documented as an ergonomic packaging path, not as a replacement for operator-owned registries in production.
@@ -361,7 +361,7 @@ Implementation is acceptable when:
 ## Recommended landing order
 
 1. Land docs UX fix separately first: Mermaid rendering and docs navigation.
-2. Ask Skylar to approve this plan.
+2. Ask for explicit human approval of this plan.
 3. Implement `workflow_app` as the smallest API slice.
 4. Implement discovery without registry writes.
 5. Add registry generation.
