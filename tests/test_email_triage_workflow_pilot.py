@@ -8,46 +8,45 @@ from pathlib import Path
 from hermes_workflows import ApprovalDecisionInput, InvocationService, TrustedResumer, WorkflowDbConfig, WorkflowEngine, WorkflowRefConfig, WorkflowRegistry
 from hermes_workflows.hermes_plugin_approvals import _handle_workflow_approval_decide
 from hermes_workflows.examples.email_triage import (
-    DANGEROUS_SIDE_EFFECT_KEYS,
+    APPROVAL_KEY,
     MAX_PROVIDED_THREADS,
-    PILOT_APPROVAL_KEY,
     REGISTRY_NAME,
     WORKFLOW_REF,
-    palmer_email_triage_workflow,
+    email_triage_workflow,
 )
 
 
 def _dangerous_ledger_values_are_zero(ledger: dict[str, int]) -> bool:
-    return all(ledger.get(key) == 0 for key in DANGEROUS_SIDE_EFFECT_KEYS)
+    return all(value == 0 for key, value in ledger.items() if key != "local_artifacts_written")
 
 
-def _approval(status: dict, key: str = PILOT_APPROVAL_KEY) -> dict:
+def _approval(status: dict, key: str = APPROVAL_KEY) -> dict:
     return next(item for item in status["approvals"] if item["key"] == key)
 
 
-def test_email_triage_pilot_is_packaged_example_importable():
+def test_email_triage_demo_is_packaged_example_importable():
     import hermes_workflows.examples as packaged_examples
 
     assert packaged_examples.EMAIL_TRIAGE_WORKFLOW_REF == WORKFLOW_REF
     assert packaged_examples.EMAIL_TRIAGE_REGISTRY_NAME == REGISTRY_NAME
-    assert packaged_examples.palmer_email_triage_workflow is palmer_email_triage_workflow
+    assert packaged_examples.email_triage_workflow is email_triage_workflow
 
 
-def test_email_triage_pilot_waits_for_approval_before_any_writeback(tmp_path: Path, monkeypatch):
+def test_email_triage_demo_waits_for_approval_before_any_writeback(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = tmp_path / "workflow.sqlite"
-    output_root = Path("dist") / "email-triage-workflow-pilot-review"
+    output_root = Path("dist") / "email-triage-demo-review"
     output_dir = output_root / "wf-email-triage-waiting"
 
     result = WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
-        {"output_dir": str(output_root), "fixture": "synthetic", "approver": "human:skylar"},
+        email_triage_workflow,
+        {"output_dir": str(output_root), "fixture": "synthetic", "approver": "human:operator"},
         workflow_id="wf_email_triage_waiting",
         workflow_ref=WORKFLOW_REF,
     )
 
     assert result.status == "waiting"
-    assert result.waiting_on == f"signal:approval.decision:{PILOT_APPROVAL_KEY}"
+    assert result.waiting_on == f"signal:approval.decision:{APPROVAL_KEY}"
     assert not output_dir.exists(), "pre-approval run must not write local proposal artifacts"
 
     status = WorkflowEngine(db, read_only=True).workflow_status("wf_email_triage_waiting")
@@ -78,7 +77,7 @@ def test_email_triage_pilot_waits_for_approval_before_any_writeback(tmp_path: Pa
     assert _dangerous_ledger_values_are_zero(packet["side_effect_ledger"])
 
     requested_steps = [event["payload"].get("step_name") for event in status["events"] if event["type"] == "StepRequested"]
-    assert "perform_email_triage_pilot_writebacks" not in requested_steps
+    assert "perform_email_triage_demo_writebacks" not in requested_steps
 
 
 def test_provided_fixture_redaction_helper_bounds_and_drops_raw_fields():
@@ -87,7 +86,7 @@ def test_provided_fixture_redaction_helper_bounds_and_drops_raw_fields():
     raw_threads = [
         {
             "handle": f"gmail-thread-{index}-private",
-            "account": "skylar.b.payne@gmail.com",
+            "account": "private.person@example.com",
             "sender_label": f"Raw Sender {index}",
             "subject_label": f"Private subject {index}",
             "signals": ["asks_for_response", "PRIVATE_BODY_SNIPPET_SECRET"],
@@ -109,7 +108,7 @@ def test_provided_fixture_redaction_helper_bounds_and_drops_raw_fields():
         f"fixture:gmail:provided:{index + 1:03d}" for index in range(MAX_PROVIDED_THREADS)
     ]
     rendered = json.dumps({"threads": threads, "source": source}, sort_keys=True)
-    assert "skylar.b.payne@gmail.com" not in rendered
+    assert "private.person@example.com" not in rendered
     assert "Raw Sender" not in rendered
     assert "Private subject" not in rendered
     assert "gmail-thread-0-private" not in rendered
@@ -121,8 +120,8 @@ def test_provided_fixture_workflow_accepts_bounded_symbolic_inputs_before_approv
     threads = [{"signals": ["asks_for_response"]} for _ in range(MAX_PROVIDED_THREADS + 3)]
 
     result = WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
-        {"fixture": "provided", "threads": threads, "approver": "human:skylar"},
+        email_triage_workflow,
+        {"fixture": "provided", "threads": threads, "approver": "human:operator"},
         workflow_id="wf_email_triage_provided_redacted",
         workflow_ref=WORKFLOW_REF,
     )
@@ -135,7 +134,7 @@ def test_provided_fixture_workflow_accepts_bounded_symbolic_inputs_before_approv
         f"fixture:gmail:provided:{index + 1:03d}" for index in range(MAX_PROVIDED_THREADS)
     ]
     rendered = json.dumps(packet, sort_keys=True)
-    assert "skylar.b.payne@gmail.com" not in rendered
+    assert "private.person@example.com" not in rendered
     assert "Raw Sender" not in rendered
     assert "Private subject" not in rendered
     assert "gmail-thread-0-private" not in rendered
@@ -144,19 +143,19 @@ def test_provided_fixture_workflow_accepts_bounded_symbolic_inputs_before_approv
 def test_raw_provided_fixture_values_are_not_persisted_in_workflow_db(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     result = WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
+        email_triage_workflow,
         {
             "fixture": "provided",
             "threads": [
                 {
                     "handle": "gmail-thread-private-123",
-                    "account": "skylar.b.payne@gmail.com",
+                    "account": "private.person@example.com",
                     "sender_label": "Raw Sender Private",
                     "subject_label": "Private Subject Secret",
                     "signals": ["asks_for_response", "PRIVATE_BODY_SNIPPET_SECRET"],
                 }
             ],
-            "approver": "human:skylar",
+            "approver": "human:operator",
             "top_level_private": "TOP_LEVEL_PRIVATE_BODY",
         },
         workflow_id="wf_email_triage_raw_input_redacted_before_persistence",
@@ -169,7 +168,7 @@ def test_raw_provided_fixture_values_are_not_persisted_in_workflow_db(tmp_path: 
         rows += con.execute("SELECT payload_json FROM workflow_events").fetchall()
         rows += con.execute("SELECT payload_json FROM workflow_commands_outbox").fetchall()
     persisted = "\n".join(row[0] for row in rows)
-    assert "skylar.b.payne@gmail.com" not in persisted
+    assert "private.person@example.com" not in persisted
     assert "Raw Sender Private" not in persisted
     assert "Private Subject Secret" not in persisted
     assert "gmail-thread-private-123" not in persisted
@@ -180,15 +179,15 @@ def test_raw_provided_fixture_values_are_not_persisted_in_workflow_db(tmp_path: 
 def test_email_triage_sanitizer_preserves_existing_workflow_start_idempotency(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     first = WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
-        {"fixture": "synthetic", "approver": "human:skylar"},
+        email_triage_workflow,
+        {"fixture": "synthetic", "approver": "human:operator"},
         workflow_id="wf_email_triage_idempotent_sanitizer",
         workflow_ref=WORKFLOW_REF,
     )
     assert first.status == "waiting"
 
     second = WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
+        email_triage_workflow,
         {"fixture": "provided", "threads": "not-a-list", "top_level_private": "TOP_LEVEL_PRIVATE_BODY"},
         workflow_id="wf_email_triage_idempotent_sanitizer",
         workflow_ref=WORKFLOW_REF,
@@ -199,9 +198,9 @@ def test_email_triage_sanitizer_preserves_existing_workflow_start_idempotency(tm
 
 def test_email_triage_rejects_non_human_approval_even_if_input_tries_to_override_approver(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
-    output_dir = tmp_path / "dist" / "email-triage-workflow-pilot-approval-bypass"
+    output_dir = tmp_path / "dist" / "email-triage-demo-approval-bypass"
     WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
+        email_triage_workflow,
         {"fixture": "synthetic", "approver": "service:ci", "output_dir": str(output_dir)},
         workflow_id="wf_email_triage_nonhuman_approval",
         workflow_ref=WORKFLOW_REF,
@@ -211,7 +210,7 @@ def test_email_triage_rejects_non_human_approval_even_if_input_tries_to_override
         WorkflowEngine(db).submit_approval_decision(
             ApprovalDecisionInput(
                 workflow_id="wf_email_triage_nonhuman_approval",
-                key=PILOT_APPROVAL_KEY,
+                key=APPROVAL_KEY,
                 action="approve",
                 by="ci-bot",
                 source={"kind": "service", "id": "ci-bot", "channel": "ci", "message_id": "ci-approval"},
@@ -233,13 +232,13 @@ def test_email_triage_rejects_non_human_approval_even_if_input_tries_to_override
 def test_invocation_service_preserves_existing_workflow_idempotency_with_new_invalid_input(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     registry = WorkflowRegistry(
-        dbs={"email-triage-pilot": WorkflowDbConfig(name="email-triage-pilot", path=str(db))},
+        dbs={"email-triage-demo": WorkflowDbConfig(name="email-triage-demo", path=str(db))},
         workflows={
             REGISTRY_NAME: WorkflowRefConfig(
                 name=REGISTRY_NAME,
                 workflow_ref=WORKFLOW_REF,
-                db="email-triage-pilot",
-                title="Palmer email execution triage dry-run pilot",
+                db="email-triage-demo",
+                title="Email triage demo",
                 default_input={"fixture": "synthetic"},
                 trusted_resume=True,
             )
@@ -261,7 +260,7 @@ def test_invocation_service_preserves_existing_workflow_idempotency_with_new_inv
 def test_email_triage_sanitizer_redacts_or_omits_raw_values_in_whitelisted_fields(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
+        email_triage_workflow,
         {
             "fixture": "PRIVATE_BODY_SECRET",
             "output_dir": str(tmp_path / "PRIVATE_BODY_SECRET"),
@@ -282,16 +281,16 @@ def test_email_triage_sanitizer_redacts_or_omits_raw_values_in_whitelisted_field
 
 def test_invocation_receipt_uses_sanitized_email_triage_input(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
-    output_dir = tmp_path / "dist" / "email-triage-workflow-pilot-2026-06-06"
+    output_dir = tmp_path / "dist" / "email-triage-demo-2026-06-06"
     receipt_path = output_dir / "invoke-receipt.json"
     registry = WorkflowRegistry(
-        dbs={"email-triage-pilot": WorkflowDbConfig(name="email-triage-pilot", path=str(db))},
+        dbs={"email-triage-demo": WorkflowDbConfig(name="email-triage-demo", path=str(db))},
         workflows={
             REGISTRY_NAME: WorkflowRefConfig(
                 name=REGISTRY_NAME,
                 workflow_ref=WORKFLOW_REF,
-                db="email-triage-pilot",
-                title="Palmer email execution triage dry-run pilot",
+                db="email-triage-demo",
+                title="Email triage demo",
                 default_input={"fixture": "provided", "approver": "service:ci"},
                 trusted_resume=True,
             )
@@ -305,7 +304,7 @@ def test_invocation_receipt_uses_sanitized_email_triage_input(tmp_path: Path):
             "threads": [
                 {
                     "handle": "gmail-thread-private-123",
-                    "account": "skylar.b.payne@gmail.com",
+                    "account": "private.person@example.com",
                     "sender_label": "Raw Sender Private",
                     "subject_label": "Private Subject Secret",
                     "signals": ["asks_for_response", "PRIVATE_BODY_SNIPPET_SECRET"],
@@ -313,31 +312,31 @@ def test_invocation_receipt_uses_sanitized_email_triage_input(tmp_path: Path):
             ],
             "top_level_private": "TOP_LEVEL_PRIVATE_BODY",
         },
-        source={"kind": "kanban", "task_id": "t_0e2dd0bd", "sender": "skylar.b.payne@gmail.com", "subject": "PRIVATE_BODY_SECRET"},
+        source={"kind": "kanban", "task_id": "t_0e2dd0bd", "sender": "private.person@example.com", "subject": "PRIVATE_BODY_SECRET"},
         receipt_path=receipt_path,
     )
 
     receipt_text = receipt_path.read_text(encoding="utf-8")
-    assert "skylar.b.payne@gmail.com" not in receipt_text
+    assert "private.person@example.com" not in receipt_text
     assert "Raw Sender Private" not in receipt_text
     assert "Private Subject Secret" not in receipt_text
     assert "gmail-thread-private-123" not in receipt_text
     assert "PRIVATE_BODY_SNIPPET_SECRET" not in receipt_text
     assert "TOP_LEVEL_PRIVATE_BODY" not in receipt_text
-    assert '"approver": "human:skylar"' in receipt_text
+    assert '"approver": "human:operator"' in receipt_text
 
 
 def test_invocation_receipt_does_not_fall_back_to_new_raw_source_for_existing_workflow(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     receipt_path = tmp_path / "second-receipt.json"
     registry = WorkflowRegistry(
-        dbs={"email-triage-pilot": WorkflowDbConfig(name="email-triage-pilot", path=str(db))},
+        dbs={"email-triage-demo": WorkflowDbConfig(name="email-triage-demo", path=str(db))},
         workflows={
             REGISTRY_NAME: WorkflowRefConfig(
                 name=REGISTRY_NAME,
                 workflow_ref=WORKFLOW_REF,
-                db="email-triage-pilot",
-                title="Palmer email execution triage dry-run pilot",
+                db="email-triage-demo",
+                title="Email triage demo",
                 default_input={"fixture": "synthetic"},
                 trusted_resume=True,
             )
@@ -361,7 +360,7 @@ def test_invocation_receipt_does_not_fall_back_to_new_raw_source_for_existing_wo
 def test_source_sanitizer_strictly_allowlists_provenance_fields_before_persistence(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
+        email_triage_workflow,
         {
             "fixture": "synthetic",
             "_source": {
@@ -395,7 +394,7 @@ def test_unsafe_output_dir_is_replaced_with_workflow_scoped_default_and_paths_ar
     unsafe_absolute = tmp_path / "outside-proposals"
 
     result = WorkflowEngine(db).run_until_idle(
-        palmer_email_triage_workflow,
+        email_triage_workflow,
         {"fixture": "synthetic", "output_dir": str(unsafe_absolute)},
         workflow_id="wf output/unsafe..id",
         workflow_ref=WORKFLOW_REF,
@@ -403,7 +402,7 @@ def test_unsafe_output_dir_is_replaced_with_workflow_scoped_default_and_paths_ar
 
     assert result.status == "waiting"
     assert not unsafe_absolute.exists()
-    expected_dir = Path("dist") / f"email-triage-workflow-pilot-{date.today().isoformat()}" / "wf-output-unsafe-id"
+    expected_dir = Path("dist") / f"email-triage-demo-{date.today().isoformat()}" / "wf-output-unsafe-id"
     status = WorkflowEngine(db, read_only=True).workflow_status("wf output/unsafe..id")
     approval_packet = _approval(status)["artifact"]
     assert approval_packet["local_writeback_paths"]["triage_packet"] == str(expected_dir / "triage-packet.json")
@@ -422,13 +421,13 @@ def test_sensitive_relative_output_dir_is_replaced_with_workflow_scoped_default(
     for root_name in (".ssh", ".git", ".hermes"):
         workflow_id = f"wf_email_triage_sensitive_relative_output_{root_name.removeprefix('.')}"
         engine.run_until_idle(
-            palmer_email_triage_workflow,
+            email_triage_workflow,
             {"fixture": "synthetic", "output_dir": f"{root_name}/email-triage"},
             workflow_id=workflow_id,
             workflow_ref=WORKFLOW_REF,
         )
 
-        expected_dir = Path("dist") / f"email-triage-workflow-pilot-{date.today().isoformat()}" / workflow_id.replace("_", "-")
+        expected_dir = Path("dist") / f"email-triage-demo-{date.today().isoformat()}" / workflow_id.replace("_", "-")
         status = WorkflowEngine(db, read_only=True).workflow_status(workflow_id)
         approval_packet = _approval(status)["artifact"]
         assert approval_packet["local_writeback_paths"]["triage_packet"] == str(expected_dir / "triage-packet.json")
@@ -441,7 +440,7 @@ def test_default_output_dir_is_workflow_scoped_to_avoid_same_day_collisions(tmp_
     engine = WorkflowEngine(db)
     for workflow_id in ("wf_email_triage_collision_a", "wf_email_triage_collision_b"):
         engine.run_until_idle(
-            palmer_email_triage_workflow,
+            email_triage_workflow,
             {"fixture": "synthetic"},
             workflow_id=workflow_id,
             workflow_ref=WORKFLOW_REF,
@@ -449,18 +448,18 @@ def test_default_output_dir_is_workflow_scoped_to_avoid_same_day_collisions(tmp_
         engine.submit_approval_decision(
             ApprovalDecisionInput(
                 workflow_id=workflow_id,
-                key=PILOT_APPROVAL_KEY,
+                key=APPROVAL_KEY,
                 action="approve",
-                by="skylar",
-                source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": workflow_id},
+                by="operator",
+                source={"kind": "human", "id": "operator", "channel": "discord", "message_id": workflow_id},
                 idempotency_key=f"discord://email-triage/{workflow_id}",
             ),
             resume=False,
         )
 
     registry = WorkflowRegistry(
-        dbs={"email-triage-pilot": WorkflowDbConfig(name="email-triage-pilot", path=str(db))},
-        workflows={REGISTRY_NAME: WorkflowRefConfig(name=REGISTRY_NAME, workflow_ref=WORKFLOW_REF, db="email-triage-pilot", trusted_resume=True)},
+        dbs={"email-triage-demo": WorkflowDbConfig(name="email-triage-demo", path=str(db))},
+        workflows={REGISTRY_NAME: WorkflowRefConfig(name=REGISTRY_NAME, workflow_ref=WORKFLOW_REF, db="email-triage-demo", trusted_resume=True)},
     )
 
     first = TrustedResumer(registry).resume_trusted(REGISTRY_NAME, workflow_id="wf_email_triage_collision_a")
@@ -474,19 +473,19 @@ def test_default_output_dir_is_workflow_scoped_to_avoid_same_day_collisions(tmp_
 
 
 
-def test_email_triage_pilot_default_output_dir_is_dated_and_omits_raw_db_path(tmp_path: Path, monkeypatch):
+def test_email_triage_demo_default_output_dir_is_dated_and_omits_raw_db_path(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = tmp_path / "workflow.sqlite"
-    expected_dir = Path("dist") / f"email-triage-workflow-pilot-{date.today().isoformat()}" / "wf-email-triage-default-output-dir"
+    expected_dir = Path("dist") / f"email-triage-demo-{date.today().isoformat()}" / "wf-email-triage-default-output-dir"
     registry = WorkflowRegistry(
-        dbs={"email-triage-pilot": WorkflowDbConfig(name="email-triage-pilot", path=str(db))},
+        dbs={"email-triage-demo": WorkflowDbConfig(name="email-triage-demo", path=str(db))},
         workflows={
             REGISTRY_NAME: WorkflowRefConfig(
                 name=REGISTRY_NAME,
                 workflow_ref=WORKFLOW_REF,
-                db="email-triage-pilot",
-                title="Palmer email execution triage dry-run pilot",
-                default_input={"fixture": "synthetic", "approver": "human:skylar"},
+                db="email-triage-demo",
+                title="Email triage demo",
+                default_input={"fixture": "synthetic", "approver": "human:operator"},
                 trusted_resume=True,
             )
         },
@@ -500,11 +499,11 @@ def test_email_triage_pilot_default_output_dir_is_dated_and_omits_raw_db_path(tm
     WorkflowEngine(db).submit_approval_decision(
         ApprovalDecisionInput(
             workflow_id="wf_email_triage_default_output_dir",
-            key=PILOT_APPROVAL_KEY,
+            key=APPROVAL_KEY,
             action="approve",
-            by="skylar",
-            source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "approval-msg-default-dir"},
-            idempotency_key="discord://thread/email-pilot/default-dir",
+            by="operator",
+            source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "approval-msg-default-dir"},
+            idempotency_key="discord://thread/email-triage-demo/default-dir",
         ),
         resume=False,
     )
@@ -512,7 +511,7 @@ def test_email_triage_pilot_default_output_dir_is_dated_and_omits_raw_db_path(tm
     final_receipt = TrustedResumer(registry).resume_trusted(REGISTRY_NAME, workflow_id="wf_email_triage_default_output_dir")
 
     result = final_receipt["result"]
-    assert result["db_alias"] == "email-triage-pilot"
+    assert result["db_alias"] == "email-triage-demo"
     assert "db_path" not in result
     assert result["created_or_updated_paths"] == {
         "triage_packet": str(expected_dir / "triage-packet.json"),
@@ -521,7 +520,7 @@ def test_email_triage_pilot_default_output_dir_is_dated_and_omits_raw_db_path(tm
         "side_effect_ledger": str(expected_dir / "side-effect-ledger.json"),
     }
     triage_packet = json.loads((expected_dir / "triage-packet.json").read_text(encoding="utf-8"))
-    assert triage_packet["db_alias"] == "email-triage-pilot"
+    assert triage_packet["db_alias"] == "email-triage-demo"
     assert "db_path" not in triage_packet
 
     persisted_and_written = json.dumps(final_receipt, sort_keys=True) + "\n" + json.dumps(triage_packet, sort_keys=True)
@@ -534,11 +533,11 @@ def test_email_triage_pilot_default_output_dir_is_dated_and_omits_raw_db_path(tm
 
 def test_plugin_style_record_only_approval_keeps_workflow_waiting_and_records_provenance(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
-    output_dir = tmp_path / "dist" / "email-triage-workflow-pilot-2026-06-06"
+    output_dir = tmp_path / "dist" / "email-triage-demo-2026-06-06"
     engine = WorkflowEngine(db)
     engine.run_until_idle(
-        palmer_email_triage_workflow,
-        {"output_dir": str(output_dir), "fixture": "synthetic", "approver": "human:skylar"},
+        email_triage_workflow,
+        {"output_dir": str(output_dir), "fixture": "synthetic", "approver": "human:operator"},
         workflow_id="wf_email_triage_record_only",
         workflow_ref=WORKFLOW_REF,
     )
@@ -547,9 +546,9 @@ def test_plugin_style_record_only_approval_keeps_workflow_waiting_and_records_pr
         {
             "db": str(db),
             "workflow_id": "wf_email_triage_record_only",
-            "key": PILOT_APPROVAL_KEY,
+            "key": APPROVAL_KEY,
             "action": "approve",
-            "by": "skylar",
+            "by": "operator",
             "channel": "discord",
             "message_id": "approval-msg-1",
             "resume": False,
@@ -567,7 +566,7 @@ def test_plugin_style_record_only_approval_keeps_workflow_waiting_and_records_pr
     approval = _approval(status)
     assert status["status"] == "waiting"
     assert approval["status"] == "approve"
-    assert approval["source"] == {"kind": "human", "id": "skylar", "channel": "discord", "message_id": "approval-msg-1"}
+    assert approval["source"] == {"kind": "human", "id": "operator", "channel": "discord", "message_id": "approval-msg-1"}
 
 
 def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_path: Path, monkeypatch):
@@ -575,8 +574,8 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.run_until_idle(
-        palmer_email_triage_workflow,
-        {"fixture": "synthetic", "approver": "human:skylar"},
+        email_triage_workflow,
+        {"fixture": "synthetic", "approver": "human:operator"},
         workflow_id="wf-email-triage-private-approval-metadata",
         workflow_ref=WORKFLOW_REF,
     )
@@ -584,12 +583,12 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     receipt = engine.submit_approval_decision(
         ApprovalDecisionInput(
             workflow_id="wf-email-triage-private-approval-metadata",
-            key=PILOT_APPROVAL_KEY,
+            key=APPROVAL_KEY,
             action="approve",
-            by="skylar",
+            by="operator",
             source={
                 "kind": "human",
-                "id": "skylar",
+                "id": "operator",
                 "channel": "discord",
                 "message_id": "approval-private-metadata",
                 "sender": "private.person@example.com",
@@ -604,7 +603,7 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
 
     assert receipt.source == {
         "kind": "human",
-        "id": "skylar",
+        "id": "operator",
         "channel": "discord",
         "message_id": "approval-private-metadata",
     }
@@ -624,20 +623,20 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     assert "subject" not in persisted_source
     assert "token" not in persisted_source
 
-def test_trusted_resume_creates_local_pilot_receipt_with_zero_dangerous_side_effects(tmp_path: Path, monkeypatch):
+def test_trusted_resume_creates_local_demo_receipt_with_zero_dangerous_side_effects(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = tmp_path / "workflow.sqlite"
-    output_dir = tmp_path / "dist" / "email-triage-workflow-pilot-2026-06-06"
-    workflow_output_dir = Path("dist") / f"email-triage-workflow-pilot-{date.today().isoformat()}" / "wf-email-triage-trusted-resume"
+    output_dir = tmp_path / "dist" / "email-triage-demo-2026-06-06"
+    workflow_output_dir = Path("dist") / f"email-triage-demo-{date.today().isoformat()}" / "wf-email-triage-trusted-resume"
     registry = WorkflowRegistry(
-        dbs={"email-triage-pilot": WorkflowDbConfig(name="email-triage-pilot", path=str(db))},
+        dbs={"email-triage-demo": WorkflowDbConfig(name="email-triage-demo", path=str(db))},
         workflows={
             REGISTRY_NAME: WorkflowRefConfig(
                 name=REGISTRY_NAME,
                 workflow_ref=WORKFLOW_REF,
-                db="email-triage-pilot",
-                title="Palmer email execution triage dry-run pilot",
-                default_input={"output_dir": str(output_dir), "fixture": "synthetic", "approver": "human:skylar"},
+                db="email-triage-demo",
+                title="Email triage demo",
+                default_input={"output_dir": str(output_dir), "fixture": "synthetic", "approver": "human:operator"},
                 trusted_resume=True,
             )
         },
@@ -654,10 +653,10 @@ def test_trusted_resume_creates_local_pilot_receipt_with_zero_dangerous_side_eff
     )
 
     assert invoke_receipt["status"] == "waiting"
-    assert invoke_receipt["db"] == {"alias": "email-triage-pilot"}
+    assert invoke_receipt["db"] == {"alias": "email-triage-demo"}
     assert invoke_receipt_path.exists()
     dashboard_html = waiting_dashboard.read_text(encoding="utf-8")
-    assert PILOT_APPROVAL_KEY in dashboard_html
+    assert APPROVAL_KEY in dashboard_html
     assert "total=4" in dashboard_html
     assert "draft_reply=1" in dashboard_html
     assert "classifications=draft_reply,kanban_update,archive_candidate,ignore" in dashboard_html
@@ -665,11 +664,11 @@ def test_trusted_resume_creates_local_pilot_receipt_with_zero_dangerous_side_eff
     decision = WorkflowEngine(db).submit_approval_decision(
         ApprovalDecisionInput(
             workflow_id="wf_email_triage_trusted_resume",
-            key=PILOT_APPROVAL_KEY,
+            key=APPROVAL_KEY,
             action="approve",
-            by="skylar",
-            source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/email-pilot/42"},
-            idempotency_key="discord://thread/email-pilot/42",
+            by="operator",
+            source={"kind": "human", "id": "operator", "channel": "discord", "message_url": "discord://thread/email-triage-demo/42"},
+            idempotency_key="discord://thread/email-triage-demo/42",
         ),
         resume=False,
     )
@@ -687,9 +686,9 @@ def test_trusted_resume_creates_local_pilot_receipt_with_zero_dangerous_side_eff
     assert final_receipt["status"] == "completed"
     assert final_receipt_path.exists()
     result = final_receipt["result"]
-    assert result["approved_by"] == "skylar"
-    assert result["approval_key"] == PILOT_APPROVAL_KEY
-    assert result["db_alias"] == "email-triage-pilot"
+    assert result["approved_by"] == "operator"
+    assert result["approval_key"] == APPROVAL_KEY
+    assert result["db_alias"] == "email-triage-demo"
     assert _dangerous_ledger_values_are_zero(result["side_effect_ledger"])
     assert result["created_or_updated_paths"] == {
         "triage_packet": str(workflow_output_dir / "triage-packet.json"),

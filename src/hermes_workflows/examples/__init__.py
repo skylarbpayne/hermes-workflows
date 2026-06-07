@@ -7,12 +7,12 @@ stable ``hermes_workflows.examples.<module>:<workflow>`` reference. Repo-local
 
 from .email_triage import REGISTRY_NAME as EMAIL_TRIAGE_REGISTRY_NAME
 from .email_triage import WORKFLOW_REF as EMAIL_TRIAGE_WORKFLOW_REF
-from .email_triage import palmer_email_triage_workflow
+from .email_triage import email_triage_workflow
 from .trip import trip_planning_workflow
 
 __all__ = [
     "EMAIL_TRIAGE_REGISTRY_NAME",
     "EMAIL_TRIAGE_WORKFLOW_REF",
-    "palmer_email_triage_workflow",
+    "email_triage_workflow",
     "trip_planning_workflow",
 ]
