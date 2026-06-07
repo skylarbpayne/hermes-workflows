@@ -1362,12 +1362,13 @@ class WorkflowEngine:
         return workflow_fn
 
     def _workflow_fn_from_ref(self, workflow_ref: str, *, expected_workflow_name: str) -> Callable[..., Any] | None:
-        if ":" not in workflow_ref:
+        if ":" not in workflow_ref and not workflow_ref.endswith(".py"):
             return None
-        module_name, attr = workflow_ref.split(":", 1)
-        module = importlib.import_module(module_name)
-        workflow_fn = getattr(module, attr, None)
-        if workflow_fn is None:
+        try:
+            from .workflow_loading import load_workflow_ref
+
+            workflow_fn = load_workflow_ref(workflow_ref)
+        except Exception:
             return None
         registered_name = getattr(workflow_fn, "__workflow_name__", getattr(workflow_fn, "__name__", None))
         if registered_name != expected_workflow_name:

@@ -5,7 +5,7 @@ title: hermes-workflows docs
 
 # hermes-workflows docs
 
-`hermes-workflows` is a durable Python workflow runtime for trusted agent and automation projects. It records what happened, what is waiting, who approved it, and how to resume safely after process exits or human review.
+`hermes-workflows` is a durable Python workflow runtime for trusted agent and automation projects. It records what happened, what is waiting, who approved it, and how to resume safely after process exits or human review. The default runner is `hermes-workflows run <name-or-path>`: it resolves registry aliases or workflow files, invokes through `uv`, and replays memoized state from `<project-root>/.hermes/workflows.sqlite` unless a DB is explicitly supplied.
 
 ## Start here
 
