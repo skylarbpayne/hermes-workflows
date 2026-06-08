@@ -17,8 +17,6 @@
   const Badge = components.Badge || "span";
   const Button = components.Button || "button";
   const Input = components.Input || "input";
-  const Select = components.Select || "select";
-  const SelectOption = components.SelectOption || "option";
   const API = "/api/plugins/hermes-workflows-approvals";
 
   function e(type, props) {
@@ -352,9 +350,6 @@
 
   function WorkflowsPage() {
     const useState = hooks.useState;
-    const selectedState = useState("");
-    const selectedDb = selectedState[0];
-    const setSelectedDb = selectedState[1];
     const tabState = useState("Overview");
     const activeTab = tabState[0];
     const setActiveTab = tabState[1];
@@ -365,8 +360,9 @@
     const refreshKey = refreshState[0];
     const setRefreshKey = refreshState[1];
     const dbs = useJSON(API + "/dbs", refreshKey);
-    const firstDb = dbs.data && dbs.data.dbs && dbs.data.dbs[0] && dbs.data.dbs[0].name;
-    const activeDb = selectedDb || firstDb || "";
+    const activeSource = dbs.data && dbs.data.active_source;
+    const activeDb = activeSource && activeSource.name || "";
+    const activeSourceLabel = activeSource ? activeSource.name + (activeSource.exists ? "" : " (missing)") : "Not configured";
     const overview = useJSON(activeDb ? API + "/overview" + qs({ db: activeDb, recent_events: 10, command_limit: 10 }) : API + "/overview", refreshKey + ":" + activeDb);
     const definitionsData = useJSON(activeDb ? API + "/definitions" + qs({ db: activeDb }) : API + "/definitions", refreshKey + ":defs:" + activeDb);
     const runsData = useJSON(activeDb ? API + "/runs" + qs({ db: activeDb, limit: 100 }) : API + "/runs", refreshKey + ":runs:" + activeDb);
@@ -389,16 +385,14 @@
           e("h1", null, "Hermes Workflows"),
           e("p", { className: "hwf-muted" }, "Run workflows, track status/history, review artifacts, and make high-context record-only approvals.")),
         e("div", { className: "hwf-controls" },
-          e("div", { className: "hwf-db-control" },
-            e("label", null, "Workflow DB alias"),
-            e(Select, { value: activeDb, onValueChange: function (value) { setSelectedDb(value); } },
-              (dbs.data.dbs || []).map(function (db) { return e(SelectOption, { key: db.name, value: db.name }, db.name + (db.exists ? "" : " (missing)")); })),
-            e("p", { className: "hwf-muted" }, "Configured SQLite alias; not a registry, branch, or deployment environment.")),
+          e("div", { className: "hwf-active-source", title: "Workflow state source" },
+            e("span", { className: "hwf-active-source-label" }, "Source"),
+            e("strong", null, activeSourceLabel)),
           e(Button, { onClick: refresh }, "Refresh"))),
       e(Tabs, { tabs: ["Overview", "Workflows", "Runs", "Approvals", "Artifacts"], active: activeTab, setActive: setActiveTab }),
       e("div", { className: "hwf-runtime-note" },
         e("strong", null, "Runtime: "),
-        "workflow code runs in the local WorkflowEngine process for the selected DB alias. Dashboard approval buttons record only; a trusted local resumer continues execution."),
+        "workflow code runs in the local WorkflowEngine process for the active workflow state source. Dashboard approval buttons record only; a trusted local resumer continues execution."),
       approvals.length > 0 && e("div", { className: "hwf-attention", role: "alert" },
         e("strong", null, approvals.length + " approval" + (approvals.length === 1 ? "" : "s") + " waiting. "),
         "Open Approvals or a card below to review consequence, evidence, and record-only decision semantics."),

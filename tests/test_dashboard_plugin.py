@@ -95,7 +95,8 @@ def test_dashboard_plugin_manifest_assets_and_backend_are_present():
     index_js = index_path.read_text()
     assert "__HERMES_PLUGINS__.register" in index_js
     assert "/api/plugins/hermes-workflows-approvals" in index_js
-    assert "onValueChange" in index_js
+    assert "hwf-active-source" in index_js
+    assert "onValueChange" not in index_js
     assert "onChange" not in index_js
     assert "approval.approver" in index_js
     assert "window.prompt" not in index_js
@@ -112,8 +113,24 @@ def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(
 
     assert result["count"] == 1
     assert result["dbs"][0] == {"name": "palmer-smoke", "exists": True}
-    assert result["runtime_semantics"]["db_selector"].startswith("The dropdown selects a configured workflow DB alias")
+    assert result["runtime_semantics"]["state_source"].startswith("The dashboard uses the configured workflow DB alias")
     assert str(db) not in json.dumps(result)
+
+
+def test_dashboard_plugin_api_marks_default_active_state_source(tmp_path, monkeypatch):
+    missing_db = tmp_path / "000-missing.sqlite"
+    default_db = tmp_path / "workflow.sqlite"
+    create_pending_approval(default_db)
+    configure_test_dbs(monkeypatch, tmp_path, {"aaa-missing": str(missing_db), "default": str(default_db)})
+    monkeypatch.setenv("HERMES_WORKFLOWS_DB", str(default_db))
+    api = load_dashboard_api()
+
+    result = run(api.list_dbs())
+
+    assert result["active_source"] == {"name": "default", "exists": True}
+    assert [db["name"] for db in result["dbs"]] == ["aaa-missing", "default"]
+    assert result["dbs"][0]["exists"] is False
+    assert str(default_db) not in json.dumps(result)
 
 
 def test_dashboard_plugin_api_overview_includes_workflow_observability_and_redacted_approvals(tmp_path, monkeypatch):
@@ -464,11 +481,14 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         "Record-only decision",
         "View approval",
         "Run history",
-        "Workflow DB alias",
-        "Configured SQLite alias; not a registry",
+        "Source",
+        "Workflow state source",
         "Dashboard approval buttons record only",
         "artifact: ",
     ):
         assert phrase in index_js
+    assert "active_source" in index_js
+    assert "firstDb" not in index_js
+    assert "selected DB alias" not in index_js
     assert ".hwf-shell" in style_css
     assert ".hwf-approval-detail" in style_css

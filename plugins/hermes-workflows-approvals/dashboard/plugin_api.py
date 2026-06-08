@@ -185,8 +185,8 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
 
 def _runtime_semantics() -> dict[str, Any]:
     return {
-        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the selected DB alias. The dashboard API route runs that engine locally; record-only approval decisions do not resume workflow code.",
-        "db_selector": "The dropdown selects a configured workflow DB alias, not a remote registry or deployment environment. Raw SQLite paths are intentionally hidden from browser responses.",
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; record-only approval decisions do not resume workflow code.",
+        "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
         "agent_steps": "AgentStep calls run through the engine's configured agent_runner when present, otherwise deterministic mock/rendered output is used. Runner requests and live responses are persisted as step metadata for replay.",
         "approval_decisions": "Dashboard approve/reject records human provenance only (resume=false); a trusted local resumer must continue the workflow.",
         "artifacts": "Approval and run artifacts are persisted in workflow history and returned as redacted previews plus artifact_render descriptors. The dashboard does not host local media files.",
@@ -504,10 +504,17 @@ def _new_workflow_id(definition_id: str) -> str:
 
 @router.get("/dbs")
 async def list_dbs() -> dict[str, Any]:
+    configured = _configured_dbs()
     dbs = []
-    for name, path in sorted(_configured_dbs().items()):
+    for name, path in sorted(configured.items()):
         dbs.append({"name": name, "exists": Path(path).expanduser().exists()})
-    return {"count": len(dbs), "dbs": dbs, "runtime_semantics": _runtime_semantics()}
+    active_source = None
+    try:
+        active_alias, active_path = _resolve_dashboard_db(None)
+        active_source = {"name": active_alias, "exists": Path(active_path).expanduser().exists()}
+    except HTTPException:
+        active_source = None
+    return {"count": len(dbs), "dbs": dbs, "active_source": active_source, "runtime_semantics": _runtime_semantics()}
 
 
 @router.get("/definitions")

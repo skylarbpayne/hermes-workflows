@@ -78,11 +78,11 @@ hermes -p <profile> plugins enable hermes-workflows-approvals
 
 Dashboard discovery is runtime-only: Hermes scans `$HERMES_HOME/plugins/<name>/dashboard/manifest.json`, serves the JS/CSS bundle, and mounts `plugin_api.py` under `/api/plugins/hermes-workflows-approvals`. No dashboard source fork or npm build is required.
 
-Runtime/API semantics are documented in [`docs/architecture/dashboard-runtime-semantics-agentstep-approvals.md`](../architecture/dashboard-runtime-semantics-agentstep-approvals.md). In short: the dashboard DB dropdown selects a configured workflow DB alias, dashboard approval buttons are record-only (`resume=false`), and local/private artifact file paths are redacted rather than served.
+Runtime/API semantics are documented in [`docs/architecture/dashboard-runtime-semantics-agentstep-approvals.md`](../architecture/dashboard-runtime-semantics-agentstep-approvals.md). In short: the dashboard shows the resolved configured workflow state source read-only, dashboard approval buttons are record-only (`resume=false`), and local/private artifact file paths are redacted rather than served.
 
 The dashboard tab at `/workflows` shows:
 
-- configured workflow DB aliases
+- active workflow state source alias and existence status
 - status counts
 - workflow waiting/running/completed state
 - recent events
