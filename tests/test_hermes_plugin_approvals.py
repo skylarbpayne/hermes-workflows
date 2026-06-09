@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -97,6 +99,31 @@ def test_plugin_registers_approval_tools_and_gateway_hook():
     assert ctx.tools["workflow_approvals_list"]["toolset"] == "hermes_workflows_approvals"
     assert ctx.tools["workflow_approval_decide"]["toolset"] == "hermes_workflows_approvals"
     assert "pre_gateway_dispatch" in ctx.hooks
+
+
+def test_configured_dbs_accepts_json_string_from_hermes_config(monkeypatch, tmp_path):
+    import hermes_workflows.hermes_plugin_approvals as approvals
+
+    db = tmp_path / "workflow.sqlite"
+    hermes_cli = ModuleType("hermes_cli")
+    hermes_config = ModuleType("hermes_cli.config")
+
+    def fake_load_config():
+        return {"fake": "config"}
+
+    def fake_cfg_get(config, *keys, default=None):
+        assert keys == ("plugins", "entries", "hermes-workflows-approvals", "workflow_dbs")
+        return json.dumps([{"name": "Palmer workflows", "path": str(db)}])
+
+    setattr(hermes_config, "load_config", fake_load_config)
+    setattr(hermes_config, "cfg_get", fake_cfg_get)
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+    monkeypatch.delenv("HERMES_WORKFLOWS_DB", raising=False)
+    monkeypatch.delenv("HERMES_WORKFLOWS_DBS", raising=False)
+
+    assert approvals._configured_dbs() == {"Palmer workflows": str(db)}
+
 
 
 def test_workflow_approvals_list_returns_bounded_redacted_pending_approval(tmp_path):
@@ -377,6 +404,17 @@ def test_cancelled_workflow_rejects_conflicting_late_recorded_approval_decision(
             ),
             resume=False,
         )
+
+
+def test_list_waiting_approvals_excludes_terminal_workflows(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = create_pending_approval(db)
+    assert [approval.key for approval in engine.list_approvals(status="waiting")] == ["approve_plugin_test"]
+
+    engine.cancel_workflow("wf_plugin", reason="stale approval card", source={"kind": "operator", "id": "unit"})
+
+    assert WorkflowEngine(db).workflow_status("wf_plugin")["status"] == "cancelled"
+    assert WorkflowEngine(db).list_approvals(status="waiting") == []
 
 
 def test_approval_decision_signal_is_schema_unique_per_workflow_and_key(tmp_path):

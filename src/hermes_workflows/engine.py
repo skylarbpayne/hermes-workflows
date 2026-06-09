@@ -306,13 +306,23 @@ class WorkflowEngine:
         """Return approval-card views for plugins, dashboards, CLIs, and chat adapters."""
 
         with self._connect() as con:
-            rows = con.execute(
-                """
-                SELECT id, workflow_name, workflow_ref, status, waiting_on
-                FROM workflow_instances
-                ORDER BY updated_at DESC, created_at DESC, id ASC
-                """
-            ).fetchall()
+            if status == "waiting":
+                rows = con.execute(
+                    """
+                    SELECT id, workflow_name, workflow_ref, status, waiting_on
+                    FROM workflow_instances
+                    WHERE status NOT IN ('completed', 'failed', 'cancelled')
+                    ORDER BY updated_at DESC, created_at DESC, id ASC
+                    """
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT id, workflow_name, workflow_ref, status, waiting_on
+                    FROM workflow_instances
+                    ORDER BY updated_at DESC, created_at DESC, id ASC
+                    """
+                ).fetchall()
         approvals: list[ApprovalView] = []
         for row in rows:
             workflow_approvals = self._approval_views_for_workflow(row)
@@ -1178,7 +1188,7 @@ class WorkflowEngine:
             labels.append("matching_signal_exists")
         if summary.get("status") in {"completed", "failed", "cancelled"}:
             labels.append("terminal_workflow_has_pending_command")
-        if summary.get("status") == "waiting" and summary.get("waiting_on") == expected_wait:
+        if summary.get("status") == "waiting" and _command_matches_current_wait(command, str(summary.get("waiting_on") or ""), expected_wait):
             labels.append("active_wait")
         if not labels:
             labels.append("orphaned_or_inconsistent")
@@ -2136,6 +2146,51 @@ class ApprovalClient:
     def __init__(self, ctx: WorkflowContext):
         self.ctx = ctx
 
+    def _payload(
+        self,
+        prompt: str,
+        *,
+        key: str,
+        artifact: Any = None,
+        approver: str = "human",
+        allowed: Optional[List[str]] = None,
+        authority: Optional[List[str]] = None,
+        timeout: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "prompt": prompt,
+            "key": key,
+            "artifact": artifact,
+            "approver": approver,
+            "allowed": allowed or ["approve", "reject"],
+            "authority": authority or [],
+            "timeout": timeout,
+        }
+
+    def _emit_request_if_missing(self, con: sqlite3.Connection, *, key: str, payload: Dict[str, Any]) -> None:
+        event_key = f"approval:{key}"
+        inserted = self.ctx.engine._append_event(
+            con,
+            self.ctx.workflow_id,
+            "ApprovalRequested",
+            key=event_key,
+            payload=payload,
+            idempotency_key=f"approval-requested:{key}",
+            ignore_duplicate=True,
+        )
+        if inserted:
+            self.ctx.engine._insert_command_row(con, self.ctx.workflow_id, "notify_approval", event_key, payload)
+
+    def _decision_event(self, key: str) -> Optional[Any]:
+        return self.ctx._last_event("SignalReceived", f"signal:approval.decision:{key}")
+
+    def _validate_decision(self, *, key: str, approver: str, allowed: List[str], decision_event: Dict[str, Any]) -> Dict[str, Any]:
+        decision = decision_event["payload"]
+        if decision.get("action") not in allowed:
+            raise ValueError(f"approval {key} action is not allowed: {decision.get('action')}")
+        source = _validate_approval_source(key, approver, decision, decision_event.get("source"))
+        return {**decision, "source": source}
+
     async def request(
         self,
         prompt: str,
@@ -2149,41 +2204,110 @@ class ApprovalClient:
     ) -> Any:
         self.ctx._raise_if_cancelled()
         event_key = f"approval:{key}"
+        allowed_values = allowed or ["approve", "reject"]
         if self.ctx._last_event("ApprovalRequested", event_key) is None:
-            payload = {
-                "prompt": prompt,
-                "key": key,
-                "artifact": artifact,
-                "approver": approver,
-                "allowed": allowed or ["approve", "reject"],
-                "authority": authority or [],
-                "timeout": timeout,
-            }
+            payload = self._payload(
+                prompt,
+                key=key,
+                artifact=artifact,
+                approver=approver,
+                allowed=allowed_values,
+                authority=authority,
+                timeout=timeout,
+            )
             with self.ctx.engine._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
                 self.ctx._raise_if_cancelled_in_connection(con)
-                inserted = self.ctx.engine._append_event(
-                    con,
-                    self.ctx.workflow_id,
-                    "ApprovalRequested",
-                    key=event_key,
-                    payload=payload,
-                    idempotency_key=f"approval-requested:{key}",
-                    ignore_duplicate=True,
-                )
-                if inserted:
-                    self.ctx.engine._insert_command_row(con, self.ctx.workflow_id, "notify_approval", event_key, payload)
+                self._emit_request_if_missing(con, key=key, payload=payload)
 
-        decision_event = self.ctx._last_event("SignalReceived", f"signal:approval.decision:{key}")
+        decision_event = self._decision_event(key)
         if decision_event is None:
             return await self.ctx.wait_for("approval.decision", key=key)
 
-        decision = decision_event["payload"]
-        if decision.get("action") not in (allowed or ["approve", "reject"]):
-            raise ValueError(f"approval {key} action is not allowed: {decision.get('action')}")
+        return self._validate_decision(key=key, approver=approver, allowed=allowed_values, decision_event=decision_event)
 
-        source = _validate_approval_source(key, approver, decision, decision_event.get("source"))
-        return {**decision, "source": source}
+    async def request_many(
+        self,
+        requests: List[Dict[str, Any]],
+        *,
+        approver: str = "human",
+        allowed: Optional[List[str]] = None,
+        authority: Optional[List[str]] = None,
+        timeout: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Emit every approval request before waiting for any decision.
+
+        Approval semantics remain atomic: each request has its own durable key,
+        artifact, decision signal, and provenance. This method only changes the
+        operator experience by making all pending cards visible at once.
+        """
+
+        self.ctx._raise_if_cancelled()
+        normalized: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for request in requests:
+            key = str(request.get("key") or "")
+            if not key:
+                raise ValueError("approval request_many entries require key")
+            if key in seen_keys:
+                raise ValueError(f"duplicate approval key in request_many: {key}")
+            seen_keys.add(key)
+            request_allowed = list(request.get("allowed") or allowed or ["approve", "reject"])
+            request_approver = str(request.get("approver") or approver)
+            normalized.append(
+                {
+                    "key": key,
+                    "approver": request_approver,
+                    "allowed": request_allowed,
+                    "payload": self._payload(
+                        str(request.get("prompt") or "Review approval?"),
+                        key=key,
+                        artifact=request.get("artifact"),
+                        approver=request_approver,
+                        allowed=request_allowed,
+                        authority=list(request.get("authority") or authority or []),
+                        timeout=request.get("timeout") or timeout,
+                    ),
+                }
+            )
+
+        with self.ctx.engine._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            self.ctx._raise_if_cancelled_in_connection(con)
+            for item in normalized:
+                self._emit_request_if_missing(con, key=item["key"], payload=item["payload"])
+            for item in normalized:
+                if self._decision_event(item["key"]) is not None:
+                    continue
+                wait_key = f"wait:approval.decision:{item['key']}"
+                self.ctx.engine._append_event(
+                    con,
+                    self.ctx.workflow_id,
+                    "WaitRequested",
+                    key=wait_key,
+                    payload={"signal_type": "approval.decision", "key": item["key"]},
+                    idempotency_key=f"requested:{wait_key}",
+                    ignore_duplicate=True,
+                )
+
+        decisions: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        for item in normalized:
+            decision_event = self._decision_event(item["key"])
+            if decision_event is None:
+                missing.append(item["key"])
+                continue
+            decision = self._validate_decision(
+                key=item["key"],
+                approver=item["approver"],
+                allowed=item["allowed"],
+                decision_event=decision_event,
+            )
+            decisions.append({"key": item["key"], **decision})
+
+        if missing:
+            raise WorkflowWaiting(f"signals:approval.decision:{','.join(missing)}")
+        return decisions
 
 
 _APPROVAL_SOURCE_ALLOWLIST = ("kind", "id", "channel", "message_url", "message_id", "event_id")
@@ -2260,6 +2384,21 @@ class StepExecutionContext:
     engine: WorkflowEngine
     workflow_id: str
     step_key: str
+
+
+def _command_matches_current_wait(command: Dict[str, Any], waiting_on: str, expected_wait: str) -> bool:
+    if waiting_on == expected_wait:
+        return True
+    if command.get("type") != "notify_approval":
+        return False
+    key = str(command.get("key") or "")
+    if not key.startswith("approval:"):
+        return False
+    approval_key = key.split(":", 1)[1]
+    multi_prefix = "signals:approval.decision:"
+    if not waiting_on.startswith(multi_prefix):
+        return False
+    return approval_key in {part for part in waiting_on[len(multi_prefix) :].split(",") if part}
 
 
 def _expected_wait_for_command(command: Dict[str, Any]) -> str:

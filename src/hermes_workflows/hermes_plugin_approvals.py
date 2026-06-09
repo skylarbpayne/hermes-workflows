@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from . import ApprovalDecisionInput, WorkflowEngine
+from .receipts import redact_secrets
 
 PLUGIN_NAME = "hermes-workflows-approvals"
 TOOLSET = "hermes_workflows_approvals"
@@ -85,6 +86,11 @@ def _configured_dbs() -> dict[str, str]:
 
         config = load_config()
         entries = cfg_get(config, "plugins", "entries", PLUGIN_NAME, "workflow_dbs", default=[])
+        if isinstance(entries, str):
+            try:
+                entries = json.loads(entries)
+            except Exception:
+                entries = []
         if isinstance(entries, list):
             for item in entries:
                 if isinstance(item, dict) and item.get("name") and item.get("path"):
@@ -141,18 +147,7 @@ def resolve_gateway_token_db(db: Any) -> str:
 
 
 def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            key_str = str(key)
-            if any(fragment in key_str.lower() for fragment in _SECRET_KEY_FRAGMENTS):
-                out[key_str] = "[REDACTED]"
-            else:
-                out[key_str] = _redact(item)
-        return out
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    return value
+    return redact_secrets(value)
 
 
 def _as_payload(value: Any) -> dict[str, Any]:
@@ -262,9 +257,19 @@ def _receipt_to_payload(receipt: Any, *, resume_requested: bool) -> dict[str, An
 
 
 def _next_step_for_receipt(receipt_payload: dict[str, Any]) -> str | None:
+    status = receipt_payload.get("status")
     if receipt_payload.get("resume_requested"):
-        return None
-    if receipt_payload.get("status") in {"completed", "failed", "cancelled"}:
+        if status == "completed":
+            return "Workflow completed. Review result and receipts."
+        if status == "failed":
+            return "Workflow resumed but failed. Inspect the workflow error and receipts."
+        if status == "cancelled":
+            return "Workflow is cancelled. No further resume action is available."
+        waiting_on = receipt_payload.get("waiting_on")
+        if waiting_on:
+            return f"Workflow resumed and is now waiting on {waiting_on}."
+        return "Workflow resumed. Refresh status for the next state."
+    if status in {"completed", "failed", "cancelled"}:
         return None
     workflow_ref = receipt_payload.get("workflow_ref")
     if workflow_ref:
