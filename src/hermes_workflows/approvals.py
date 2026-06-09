@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator, Mapping
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,62 @@ class ApprovalView:
     source: dict[str, Any] | None
     decision: dict[str, Any] | None
     diagnostics: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ApprovalDecision(Mapping[str, Any]):
+    """Typed approval decision returned to workflow authors.
+
+    It deliberately behaves like a read-only mapping too, so existing workflows
+    that use ``decision["action"]`` or ``decision.get("action")`` keep working
+    while new workflows can use typed helpers like ``decision.approved``.
+    """
+
+    action: str
+    by: str
+    source: dict[str, Any] | None = None
+    note: str | None = None
+    reason: str | None = None
+    message: str | None = None
+    comment: str | None = None
+
+    @property
+    def approved(self) -> bool:
+        return self.action == "approve"
+
+    @property
+    def rejected(self) -> bool:
+        return self.action == "reject"
+
+    @property
+    def needs_revision(self) -> bool:
+        return self.action in {"reject", "edit", "revise", "rerun"}
+
+    @property
+    def feedback(self) -> str | None:
+        return self.reason or self.note or self.message or self.comment
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"action": self.action, "by": self.by}
+        for key in ("note", "reason", "message", "comment"):
+            value = getattr(self, key)
+            if value is not None:
+                data[key] = value
+        if self.source is not None:
+            data["source"] = self.source
+        return data
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.to_dict())
+
+    def __len__(self) -> int:
+        return len(self.to_dict())
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_dict().get(key, default)
 
 
 @dataclass(frozen=True)

@@ -4,11 +4,13 @@ import hashlib
 import inspect
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, is_dataclass
 from os import PathLike
 from pathlib import Path
 from typing import Any, Union
 
+from .approvals import ApprovalDecision
 from .decorators import DurableStepCall, step
 from .workflow_values import Workflow, workflow_from_agent_output
 
@@ -256,4 +258,18 @@ def _sha256_json(value: Any) -> str:
 
 
 def _json_roundtrip(value: Any) -> Any:
-    return json.loads(json.dumps(value, sort_keys=True))
+    return json.loads(json.dumps(_jsonable(value), sort_keys=True))
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Workflow):
+        return value.to_json()
+    if isinstance(value, ApprovalDecision):
+        return _jsonable(value.to_dict())
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {str(key): _jsonable(item) for key, item in value.__dict__.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
