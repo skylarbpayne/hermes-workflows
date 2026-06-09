@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -45,6 +46,31 @@ HTTPException = _fastapi.HTTPException if _fastapi is not None else _FallbackHTT
 APIRouter = _fastapi.APIRouter if _fastapi is not None else _FallbackAPIRouter
 
 router = APIRouter()
+
+
+def _workflow_project_root_for_db(db_path: str | Path) -> Path | None:
+    path = Path(db_path).expanduser().resolve()
+    if path.parent.name == ".hermes":
+        return path.parent.parent
+    return None
+
+
+def _ensure_workflow_project_on_path(db_path: str | Path) -> Path | None:
+    """Make project-local workflow modules importable for trusted resume.
+
+    Palmer/Echo workflow projects keep state in <project>/.hermes/workflows.sqlite
+    while workflow modules live under <project>. The dashboard process may be
+    launched from Hermes or the runtime repo, so raw engine resume can otherwise
+    see the DB row but fail to import the stored workflow_ref.
+    """
+
+    project_root = _workflow_project_root_for_db(db_path)
+    if project_root is None or not project_root.exists():
+        return None
+    root = str(project_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return project_root
 
 
 def _int(value: Any, *, default: int, minimum: int = 1, maximum: int = 100) -> int:
@@ -88,27 +114,42 @@ def _looks_like_local_path(value: str) -> bool:
 
 
 def _redact_artifact_local_refs(value: Any) -> Any:
-    """Redact local filesystem references from browser artifact previews.
+    """Return artifact values unchanged for local/operator dashboard review."""
 
-    The dashboard API may render inside Hermes Agent, but it does not serve or
-    host arbitrary local media files. A typed `artifact_render` descriptor tells
-    the UI what kind of artifact it is without leaking private paths.
+    return value
+
+
+def _operator_approval_artifact(value: Any) -> Any:
+    """Shape approval artifacts around the one decision being requested.
+
+    Older Palmer email-ops dry-run approvals persisted the full workflow packet,
+    including an internal `approval_queue` for possible future actions. Rendering
+    that field inside an approval card makes it look like the current approval is
+    a bundled send/archive/writeback decision. Normalize that legacy packet into
+    the same single-review artifact future workflow runs emit.
     """
 
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            key_str = str(key)
-            key_lower = key_str.lower()
-            if key_lower in _ARTIFACT_REF_KEYS and isinstance(item, str) and _looks_like_local_path(item):
-                out[key_str] = "[REDACTED_LOCAL_PATH]"
-            else:
-                out[key_str] = _redact_artifact_local_refs(item)
-        return out
-    if isinstance(value, list):
-        return [_redact_artifact_local_refs(item) for item in value]
-    if isinstance(value, str) and _looks_like_local_path(value):
-        return "[REDACTED_LOCAL_PATH]"
+    if isinstance(value, dict) and value.get("kind") == "palmer_email_ops_packet" and "approval_queue" in value:
+        summary = dict(value.get("summary") or {})
+        return {
+            "kind": "email_ops_dry_run_review",
+            "mode": value.get("mode", "dry_run"),
+            "review_scope": "classification_review_only",
+            "decision_requested": "Approve whether this dry-run classification packet is useful enough to continue; this does not send, archive, schedule, or write entities.",
+            "summary": summary,
+            "items": value.get("items", []),
+            "entity_proposals": value.get("entity_proposals", []),
+            "side_effect_ledger": value.get("side_effect_ledger", {}),
+            "deferred_action_counts": {
+                "drafts_requiring_send_review": summary.get("draft_artifacts", len(value.get("draft_artifacts", []))),
+                "followups_requiring_separate_approval": len(value.get("follow_up_recommendations", [])),
+                "archive_candidates_requiring_policy_or_approval": len(value.get("archive_candidates", [])),
+                "entity_proposals_requiring_separate_writeback_review": summary.get("entity_proposals", len(value.get("entity_proposals", []))),
+            },
+            "notes": value.get("notes", []),
+        }
+    if isinstance(value, dict) and value.get("kind") in {"email_draft_send_approval", "entity_extraction_approval"}:
+        return {key: item for key, item in value.items() if key != "atomic"}
     return value
 
 
@@ -172,7 +213,7 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
                 "kind": guessed_kind,
                 "render": "file-reference",
                 "media_type": guessed_type,
-                "reference": {"type": "local_path", "field": ref_key, "href": "[REDACTED_LOCAL_PATH]"},
+                "reference": {"type": "local_path", "field": ref_key, "href": ref},
                 "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
             }
         if kind == "markdown" or "markdown" in artifact:
@@ -185,11 +226,11 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
 
 def _runtime_semantics() -> dict[str, Any]:
     return {
-        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the selected DB alias. The dashboard API route runs that engine locally; record-only approval decisions do not resume workflow code.",
-        "db_selector": "The dropdown selects a configured workflow DB alias, not a remote registry or deployment environment. Raw SQLite paths are intentionally hidden from browser responses.",
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; approval decisions also resume trusted local workflow code immediately after recording human provenance.",
+        "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are internal implementation details.",
         "agent_steps": "AgentStep calls run through the engine's configured agent_runner when present, otherwise deterministic mock/rendered output is used. Runner requests and live responses are persisted as step metadata for replay.",
-        "approval_decisions": "Dashboard approve/reject records human provenance only (resume=false); a trusted local resumer must continue the workflow.",
-        "artifacts": "Approval and run artifacts are persisted in workflow history and returned as redacted previews plus artifact_render descriptors. The dashboard does not host local media files.",
+        "approval_decisions": "Dashboard approve/reject records server-derived human provenance, then resumes the trusted local workflow immediately in the same Hermes process.",
+        "artifacts": "Approval and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
 
 
@@ -256,39 +297,40 @@ def _resolve_dashboard_db(db: Any = None) -> tuple[str, str]:
     return raw, configured[raw]
 
 
+def _append_catalog_entries(entries: list[dict[str, Any]], configured: Any) -> None:
+    if isinstance(configured, str):
+        try:
+            configured = json.loads(configured)
+        except Exception:
+            return
+    if isinstance(configured, list):
+        entries.extend(item for item in configured if isinstance(item, dict))
+    elif isinstance(configured, dict):
+        raw_items = configured.get("workflows", configured)
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+            except Exception:
+                return
+        if isinstance(raw_items, list):
+            entries.extend(item for item in raw_items if isinstance(item, dict))
+        elif isinstance(raw_items, dict):
+            for key, value in raw_items.items():
+                if isinstance(value, dict):
+                    entries.append({"id": str(key), **value})
+
+
 def _raw_catalog_entries() -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     env_catalog = os.getenv("HERMES_WORKFLOWS_CATALOG")
     if env_catalog:
-        try:
-            parsed = json.loads(env_catalog)
-            if isinstance(parsed, list):
-                entries.extend(item for item in parsed if isinstance(item, dict))
-            elif isinstance(parsed, dict):
-                raw_items = parsed.get("workflows", parsed)
-                if isinstance(raw_items, list):
-                    entries.extend(item for item in raw_items if isinstance(item, dict))
-                elif isinstance(raw_items, dict):
-                    for key, value in raw_items.items():
-                        if isinstance(value, dict):
-                            entries.append({"id": str(key), **value})
-        except Exception:
-            pass
+        _append_catalog_entries(entries, env_catalog)
     try:
         from hermes_cli.config import cfg_get, load_config  # type: ignore
 
         config = load_config()
         configured = cfg_get(config, "plugins", "entries", "hermes-workflows-approvals", "workflow_catalog", default=[])
-        if isinstance(configured, list):
-            entries.extend(item for item in configured if isinstance(item, dict))
-        elif isinstance(configured, dict):
-            raw_items = configured.get("workflows", configured)
-            if isinstance(raw_items, list):
-                entries.extend(item for item in raw_items if isinstance(item, dict))
-            elif isinstance(raw_items, dict):
-                for key, value in raw_items.items():
-                    if isinstance(value, dict):
-                        entries.append({"id": str(key), **value})
+        _append_catalog_entries(entries, configured)
     except Exception:
         pass
     return entries
@@ -405,11 +447,12 @@ def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
         return {"level": "high", "reason": "The approval appears to authorize an external, destructive, financial, or credential-affecting action."}
     if any(word in text for word in ("email", "calendar", "schedule", "deploy", "post", "message")):
         return {"level": "medium", "reason": "The approval may affect people, publishing, scheduling, or deployment state."}
-    return {"level": "low", "reason": "Record-only dashboard decision; no workflow resume or external side effect happens in this route."}
+    return {"level": "low", "reason": "Approval records human provenance and resumes the trusted local workflow; no obvious external/destructive keyword was detected."}
 
 
 def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
     prompt = approval.get("prompt") or approval.get("key") or "Approval needed"
+    artifact = _operator_approval_artifact(approval.get("artifact"))
     return {
         "db_alias": db_alias,
         "workflow_id": approval.get("workflow_id"),
@@ -422,15 +465,15 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
         "approver": approval.get("approver"),
         "allowed": approval.get("allowed") or ["approve", "reject"],
         "authority": approval.get("authority"),
-        "artifact_preview": _redact_artifact_local_refs(approval.get("artifact")),
-        "artifact_render": _artifact_descriptor(approval.get("artifact")),
+        "artifact_preview": _redact_artifact_local_refs(artifact),
+        "artifact_render": _artifact_descriptor(artifact),
         "decision": approval.get("decision"),
         "source": approval.get("source"),
         "diagnostics": approval.get("diagnostics") or [],
         "waiting_on": approval.get("waiting_on"),
         "requested_seq": approval.get("requested_seq"),
         "risk": _risk_for_approval(approval),
-        "consequence": "Records approve/reject only; a trusted local resumer must continue the workflow.",
+        "consequence": "Records approve/reject with human provenance, then resumes the trusted local workflow immediately.",
         "detail_url": f"/approvals/detail?db={db_alias}&workflow_id={approval.get('workflow_id')}&key={approval.get('key')}",
     }
 
@@ -439,7 +482,7 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
     workflow_id = str(status.get("workflow_id") or "")
     artifacts: list[dict[str, Any]] = []
     for approval in status.get("approvals") or []:
-        artifact = approval.get("artifact")
+        artifact = _operator_approval_artifact(approval.get("artifact"))
         if artifact is not None:
             artifacts.append(
                 {
@@ -545,6 +588,7 @@ async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     workflow_ref = str(definition["workflow_ref"])
     inputs = _input_from_body(body)
     def execute_run() -> tuple[Any, dict[str, Any]]:
+        _ensure_workflow_project_on_path(db_path)
         workflow = _load_workflow(workflow_ref)
         result = WorkflowEngine(db_path).run_until_idle(workflow, inputs, workflow_id=workflow_id, workflow_ref=workflow_ref)
         status = _status_packet(
@@ -632,6 +676,7 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
     engine = WorkflowEngine(db_path, read_only=True)
     approval = _redact_artifact_local_refs(_strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key))))
+    approval["artifact"] = _operator_approval_artifact(approval.get("artifact"))
     status = _status_packet(engine, workflow_id, recent_events=100, commands="recent", command_limit=20, command_payload_chars=5000)
     timeline = [event for event in engine.events(workflow_id) if event.get("seq", 0) <= (approval.get("requested_seq") or 10**9)]
     timeline = _redact_artifact_local_refs(_redact(timeline))
@@ -653,9 +698,9 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         "risk": card["risk"],
         "consequence": card["consequence"],
         "decision_semantics": {
-            "resume": False,
-            "label": "Record-only decision",
-            "description": "The dashboard records approve/reject with server-derived human provenance. It does not resume workflow execution; a trusted local resumer must continue it.",
+            "resume": True,
+            "label": "Record and resume",
+            "description": "The dashboard records approve/reject with server-derived human provenance, then resumes the trusted local workflow immediately in this Hermes process.",
         },
         "timeline": timeline,
         "artifacts": _artifacts_from_status(status),
@@ -732,8 +777,9 @@ async def workflow_status(
 
 @router.post("/approvals/decision")
 async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
-    # Dashboard approvals are record-only and derive human provenance from
-    # server-side plugin configuration, never from untrusted browser JSON.
+    # Dashboard approvals derive human provenance from server-side plugin
+    # configuration, never from untrusted browser JSON. After recording the
+    # decision they immediately resume trusted local workflow code.
     approver_id = _dashboard_approver_id()
     if not approver_id:
         raise HTTPException(
@@ -765,14 +811,28 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
         reason=body.get("reason"),
         idempotency_key=message_id,
     )
+    def record_and_resume() -> tuple[Any, dict[str, Any]]:
+        _ensure_workflow_project_on_path(db_path)
+        receipt = WorkflowEngine(db_path).submit_approval_decision(decision, resume=True)
+        post_resume = _status_packet(
+            WorkflowEngine(db_path, read_only=True),
+            workflow_id,
+            recent_events=20,
+            commands="recent",
+            command_limit=20,
+            command_payload_chars=2000,
+        )
+        return receipt, post_resume
+
     try:
-        receipt = WorkflowEngine(db_path).submit_approval_decision(decision, resume=False)
+        receipt, post_resume = await asyncio.to_thread(record_and_resume)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"approval decision failed: {type(exc).__name__}: {exc}") from exc
-    receipt_payload = _receipt_to_payload(receipt, resume_requested=False)
+        raise HTTPException(status_code=400, detail=f"approval decision/resume failed: {type(exc).__name__}: {exc}") from exc
+    receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
     return {
         "success": True,
         "db_alias": db_alias,
         "receipt": receipt_payload,
+        "post_resume": post_resume,
         "next_step": _next_step_for_receipt(receipt_payload),
     }
