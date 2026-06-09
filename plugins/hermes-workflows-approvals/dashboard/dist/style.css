@@ -61,6 +61,7 @@
   border-radius: 999px;
   padding: 0.45rem 0.75rem;
   background: var(--hwf-surface);
+  white-space: nowrap;
 }
 
 .hwf-active-source-label {
@@ -224,9 +225,170 @@
 
 .hwf-run-grid {
   display: grid;
-  grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 1fr) auto minmax(10rem, 1fr) auto;
+  grid-template-columns: minmax(12rem, 1.1fr) minmax(10rem, 0.7fr) minmax(0, 1.4fr) max-content;
   gap: 0.75rem;
   align-items: center;
+}
+
+.hwf-run-main,
+.hwf-artifact-title,
+.hwf-run-signals,
+.hwf-run-tail,
+.hwf-summary-row,
+.hwf-run-id,
+.hwf-waiting-on {
+  min-width: 0;
+}
+
+.hwf-run-main strong,
+.hwf-run-main p,
+.hwf-artifact-title h2,
+.hwf-artifact-title p,
+.hwf-run-id,
+.hwf-waiting-on {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hwf-run-main strong,
+.hwf-run-main p,
+.hwf-run-id,
+.hwf-waiting-on {
+  display: block;
+  white-space: nowrap;
+}
+
+.hwf-run-id {
+  display: block;
+  max-width: 100%;
+  line-height: 1.25;
+}
+
+.hwf-run-signals {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hwf-run-signals .hwf-pill {
+  flex: 0 0 auto;
+}
+
+.hwf-waiting-on {
+  flex: 1 1 auto;
+}
+
+.hwf-run-tail {
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hwf-run-artifacts {
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-lg, 0.75rem);
+  background: var(--hwf-surface);
+  overflow: hidden;
+}
+
+.hwf-run-artifacts-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.hwf-run-artifacts-summary::-webkit-details-marker {
+  display: none;
+}
+
+.hwf-run-artifacts-summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+  color: var(--color-muted-foreground);
+}
+
+.hwf-run-artifacts[open] .hwf-run-artifacts-summary::before {
+  content: "▾";
+}
+
+.hwf-run-artifacts[open] .hwf-collapse-hint {
+  color: transparent;
+  position: relative;
+}
+
+.hwf-run-artifacts[open] .hwf-collapse-hint::after {
+  content: "Collapse";
+  color: var(--color-muted-foreground);
+  position: absolute;
+  inset: 0;
+}
+
+.hwf-run-artifacts-body {
+  border-top: 1px solid var(--hwf-border);
+  padding: 1rem;
+}
+
+.hwf-collapse-hint {
+  flex: 0 0 auto;
+  color: var(--color-muted-foreground);
+  font-size: 0.8rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.hwf-artifact-card {
+  margin-top: 0.75rem;
+}
+
+.hwf-artifact-summary dl {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+
+.hwf-summary-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.28fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--hwf-border), transparent 35%);
+}
+
+.hwf-summary-row dt {
+  color: var(--color-muted-foreground);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.72rem;
+}
+
+.hwf-summary-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hwf-run-approval {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--hwf-surface);
+}
+
+.hwf-raw-json summary {
+  cursor: pointer;
+  color: var(--color-muted-foreground);
 }
 
 .hwf-approval-actions {
@@ -252,22 +414,126 @@
   font-size: 0.78rem;
 }
 
-.hwf-approval-detail {
-  position: fixed;
-  top: 1rem;
-  right: 1rem;
-  bottom: 1rem;
-  z-index: 50;
-  width: min(52rem, calc(100vw - 2rem));
+.hwf-code-block {
+  max-height: 70vh;
   overflow: auto;
+  white-space: pre;
+}
+
+.hwf-code-block code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.hwf-code-keyword {
+  color: #c084fc;
+  font-weight: 700;
+}
+
+.hwf-code-string {
+  color: #86efac;
+}
+
+.hwf-code-comment {
+  color: var(--color-muted-foreground);
+  font-style: italic;
+}
+
+.hwf-dag {
+  display: grid;
+  gap: 1rem;
+}
+
+.hwf-dag-strip {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+}
+
+.hwf-dag-node {
+  flex: 0 0 min(14rem, 70vw);
+  display: grid;
+  gap: 0.35rem;
+  text-align: left;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--hwf-surface);
+  color: inherit;
+  padding: 0.75rem;
+  cursor: pointer;
+}
+
+.hwf-dag-node-selected {
+  border-color: var(--color-primary, #6d7cff);
+  box-shadow: inset 0 0 0 1px var(--color-primary, #6d7cff);
+}
+
+.hwf-dag-kind {
+  color: var(--color-muted-foreground);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 800;
+}
+
+.hwf-dag-inspector {
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-lg, 0.75rem);
+  padding: 1rem;
+  background: var(--hwf-surface);
+}
+
+.hwf-approval-dialog {
+  width: min(72rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  margin: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  overflow: visible;
+}
+
+.hwf-approval-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.hwf-approval-detail {
+  width: 100%;
+  max-height: calc(100vh - 2rem);
+  overflow: hidden;
   border: 1px solid var(--hwf-border);
   border-radius: 1rem;
-  background: color-mix(in srgb, var(--color-background), black 3%);
-  box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.45);
-  padding: 1rem;
+  background: var(--color-background);
+  box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.72);
+  display: flex;
+  flex-direction: column;
+}
+
+.hwf-detail-header {
+  flex: 0 0 auto;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--hwf-border);
+  background: color-mix(in srgb, var(--color-background), black 8%);
+}
+
+.hwf-approval-detail-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 1.25rem;
   display: grid;
   align-content: start;
   gap: 1rem;
+}
+
+.hwf-close-button {
+  flex: 0 0 auto;
+  min-width: auto;
+  padding: 0.5rem 0.8rem;
+  line-height: 1;
 }
 
 .hwf-timeline {

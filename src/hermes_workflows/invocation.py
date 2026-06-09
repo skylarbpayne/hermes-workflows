@@ -222,21 +222,31 @@ class TrustedResumer:
         return None
 
 
-def _current_approval_wait_key(status: dict[str, Any]) -> str | None:
+def _current_approval_wait_keys(status: dict[str, Any]) -> list[str]:
     waiting_on = status.get("waiting_on")
-    prefix = "signal:approval.decision:"
-    if not isinstance(waiting_on, str) or not waiting_on.startswith(prefix):
-        return None
-    key = waiting_on[len(prefix) :]
-    return key or None
+    if not isinstance(waiting_on, str):
+        return []
+    single_prefix = "signal:approval.decision:"
+    if waiting_on.startswith(single_prefix):
+        key = waiting_on[len(single_prefix) :]
+        return [key] if key else []
+    multi_prefix = "signals:approval.decision:"
+    if waiting_on.startswith(multi_prefix):
+        return [key for key in waiting_on[len(multi_prefix) :].split(",") if key]
+    return []
+
+
+def _current_approval_wait_key(status: dict[str, Any]) -> str | None:
+    keys = _current_approval_wait_keys(status)
+    return keys[0] if keys else None
 
 
 def _has_recorded_approval_decision_for_current_wait(status: dict[str, Any]) -> bool:
-    approval_key = _current_approval_wait_key(status)
-    if approval_key is None:
+    approval_keys = set(_current_approval_wait_keys(status))
+    if not approval_keys:
         return False
     for approval in status.get("approvals") or []:
-        if approval.get("key") != approval_key:
+        if approval.get("key") not in approval_keys:
             continue
         if approval.get("decision") and approval.get("status") not in {"waiting", "invalid_decision"}:
             return True

@@ -38,6 +38,89 @@ async def approval_trip_workflow(ctx, inputs):
     return await package_trip_plan(ctx, plan, decision)
 
 
+@workflow
+async def bulk_approval_workflow(ctx, inputs):
+    decisions = await ctx.approval.request_many(
+        [
+            {
+                "prompt": "Approve entity A?",
+                "key": "entity_a",
+                "artifact": {"kind": "entity", "name": "A"},
+            },
+            {
+                "prompt": "Approve entity B?",
+                "key": "entity_b",
+                "artifact": {"kind": "entity", "name": "B"},
+            },
+        ],
+        approver="human:skylar",
+    )
+    return {"decisions": decisions}
+
+
+def test_request_many_emits_every_atomic_approval_before_waiting(tmp_path):
+    db = tmp_path / "wf.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(bulk_approval_workflow, {}, workflow_id="wf_bulk_approval")
+
+    assert result.status == "waiting"
+    events = engine.events("wf_bulk_approval")
+    approvals = [event for event in events if event["type"] == "ApprovalRequested"]
+    waits = [event for event in events if event["type"] == "WaitRequested"]
+    assert [event["payload"]["key"] for event in approvals] == ["entity_a", "entity_b"]
+    assert [event["payload"]["prompt"] for event in approvals] == ["Approve entity A?", "Approve entity B?"]
+    assert {event["payload"]["key"] for event in waits} == {"entity_a", "entity_b"}
+
+    active = engine.list_approvals(status="waiting")
+    assert [item.key for item in active] == ["entity_a", "entity_b"]
+
+
+def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
+    db = tmp_path / "wf.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(bulk_approval_workflow, {}, workflow_id="wf_bulk_approval")
+
+    after_first = engine.signal(
+        "wf_bulk_approval",
+        "approval.decision",
+        key="entity_a",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-a"},
+        idempotency_key="approval-a",
+    )
+
+    assert after_first.status == "waiting"
+    assert after_first.waiting_on == "signals:approval.decision:entity_b"
+    assert [item.key for item in engine.list_approvals(status="waiting")] == ["entity_b"]
+    assert engine.workflow_status("wf_bulk_approval")["result"] is None
+
+    after_second = engine.signal(
+        "wf_bulk_approval",
+        "approval.decision",
+        key="entity_b",
+        payload={"action": "reject", "by": "skylar", "reason": "not needed"},
+        source={"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-b"},
+        idempotency_key="approval-b",
+    )
+
+    assert after_second.status == "completed"
+    assert after_second.result["decisions"][0] == {
+        "key": "entity_a",
+        "action": "approve",
+        "by": "skylar",
+        "source": {"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-a"},
+    }
+    assert after_second.result["decisions"][1] == {
+        "key": "entity_b",
+        "action": "reject",
+        "by": "skylar",
+        "reason": "[REDACTED]",
+        "source": {"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-b"},
+    }
+    assert engine.list_approvals(status="waiting") == []
+
+
 def test_run_until_idle_executes_local_steps_once_then_waits_for_approval(tmp_path):
     STEP_RUNS.clear()
     db = tmp_path / "wf.sqlite"

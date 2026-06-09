@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import mimetypes
 import os
 import re
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -45,6 +47,31 @@ HTTPException = _fastapi.HTTPException if _fastapi is not None else _FallbackHTT
 APIRouter = _fastapi.APIRouter if _fastapi is not None else _FallbackAPIRouter
 
 router = APIRouter()
+
+
+def _workflow_project_root_for_db(db_path: str | Path) -> Path | None:
+    path = Path(db_path).expanduser().resolve()
+    if path.parent.name == ".hermes":
+        return path.parent.parent
+    return None
+
+
+def _ensure_workflow_project_on_path(db_path: str | Path) -> Path | None:
+    """Make project-local workflow modules importable for trusted resume.
+
+    Workflow projects often keep state in <project>/.hermes/workflows.sqlite
+    while workflow modules live under <project>. The dashboard process may be
+    launched from Hermes or the runtime repo, so raw engine resume can otherwise
+    see the DB row but fail to import the stored workflow_ref.
+    """
+
+    project_root = _workflow_project_root_for_db(db_path)
+    if project_root is None or not project_root.exists():
+        return None
+    root = str(project_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return project_root
 
 
 def _int(value: Any, *, default: int, minimum: int = 1, maximum: int = 100) -> int:
@@ -88,27 +115,47 @@ def _looks_like_local_path(value: str) -> bool:
 
 
 def _redact_artifact_local_refs(value: Any) -> Any:
-    """Redact local filesystem references from browser artifact previews.
+    """Return artifact values unchanged for local/operator dashboard review."""
 
-    The dashboard API may render inside Hermes Agent, but it does not serve or
-    host arbitrary local media files. A typed `artifact_render` descriptor tells
-    the UI what kind of artifact it is without leaking private paths.
+    return value
+
+
+def _operator_approval_artifact(value: Any) -> Any:
+    """Shape approval artifacts around the one decision being requested.
+
+    Older workflow dry-run approvals sometimes persist the full workflow packet,
+    including an internal `approval_queue` for possible future actions. Rendering
+    that field inside an approval card makes it look like the current approval is
+    a bundled send/archive/writeback decision. Normalize that legacy packet into
+    the same single-review artifact future workflow runs emit.
     """
 
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            key_str = str(key)
-            key_lower = key_str.lower()
-            if key_lower in _ARTIFACT_REF_KEYS and isinstance(item, str) and _looks_like_local_path(item):
-                out[key_str] = "[REDACTED_LOCAL_PATH]"
-            else:
-                out[key_str] = _redact_artifact_local_refs(item)
-        return out
-    if isinstance(value, list):
-        return [_redact_artifact_local_refs(item) for item in value]
-    if isinstance(value, str) and _looks_like_local_path(value):
-        return "[REDACTED_LOCAL_PATH]"
+    if (
+        isinstance(value, dict)
+        and "approval_queue" in value
+        and isinstance(value.get("summary"), dict)
+        and isinstance(value.get("items"), list)
+    ):
+        summary = dict(value.get("summary") or {})
+        return {
+            "kind": "email_ops_dry_run_review",
+            "mode": value.get("mode", "dry_run"),
+            "review_scope": "classification_review_only",
+            "decision_requested": "Approve whether this dry-run classification packet is useful enough to continue; this does not send, archive, schedule, or write entities.",
+            "summary": summary,
+            "items": value.get("items", []),
+            "entity_proposals": value.get("entity_proposals", []),
+            "side_effect_ledger": value.get("side_effect_ledger", {}),
+            "deferred_action_counts": {
+                "drafts_requiring_send_review": summary.get("draft_artifacts", len(value.get("draft_artifacts", []))),
+                "followups_requiring_separate_approval": len(value.get("follow_up_recommendations", [])),
+                "archive_candidates_requiring_policy_or_approval": len(value.get("archive_candidates", [])),
+                "entity_proposals_requiring_separate_writeback_review": summary.get("entity_proposals", len(value.get("entity_proposals", []))),
+            },
+            "notes": value.get("notes", []),
+        }
+    if isinstance(value, dict) and value.get("kind") in {"email_draft_send_approval", "entity_extraction_approval"}:
+        return {key: item for key, item in value.items() if key != "atomic"}
     return value
 
 
@@ -172,7 +219,7 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
                 "kind": guessed_kind,
                 "render": "file-reference",
                 "media_type": guessed_type,
-                "reference": {"type": "local_path", "field": ref_key, "href": "[REDACTED_LOCAL_PATH]"},
+                "reference": {"type": "local_path", "field": ref_key, "href": ref},
                 "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
             }
         if kind == "markdown" or "markdown" in artifact:
@@ -185,11 +232,11 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
 
 def _runtime_semantics() -> dict[str, Any]:
     return {
-        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; record-only approval decisions do not resume workflow code.",
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; approval decisions also resume trusted local workflow code immediately after recording human provenance.",
         "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
         "agent_steps": "AgentStep calls run through the engine's configured agent_runner when present, otherwise deterministic mock/rendered output is used. Runner requests and live responses are persisted as step metadata for replay.",
-        "approval_decisions": "Dashboard approve/reject records human provenance only (resume=false); a trusted local resumer must continue the workflow.",
-        "artifacts": "Approval and run artifacts are persisted in workflow history and returned as redacted previews plus artifact_render descriptors. The dashboard does not host local media files.",
+        "approval_decisions": "Dashboard approve/reject records server-derived human provenance, then resumes the trusted local workflow immediately in the same Hermes process.",
+        "artifacts": "Approval and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
 
 
@@ -256,39 +303,40 @@ def _resolve_dashboard_db(db: Any = None) -> tuple[str, str]:
     return raw, configured[raw]
 
 
+def _append_catalog_entries(entries: list[dict[str, Any]], configured: Any) -> None:
+    if isinstance(configured, str):
+        try:
+            configured = json.loads(configured)
+        except Exception:
+            return
+    if isinstance(configured, list):
+        entries.extend(item for item in configured if isinstance(item, dict))
+    elif isinstance(configured, dict):
+        raw_items = configured.get("workflows", configured)
+        if isinstance(raw_items, str):
+            try:
+                raw_items = json.loads(raw_items)
+            except Exception:
+                return
+        if isinstance(raw_items, list):
+            entries.extend(item for item in raw_items if isinstance(item, dict))
+        elif isinstance(raw_items, dict):
+            for key, value in raw_items.items():
+                if isinstance(value, dict):
+                    entries.append({"id": str(key), **value})
+
+
 def _raw_catalog_entries() -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     env_catalog = os.getenv("HERMES_WORKFLOWS_CATALOG")
     if env_catalog:
-        try:
-            parsed = json.loads(env_catalog)
-            if isinstance(parsed, list):
-                entries.extend(item for item in parsed if isinstance(item, dict))
-            elif isinstance(parsed, dict):
-                raw_items = parsed.get("workflows", parsed)
-                if isinstance(raw_items, list):
-                    entries.extend(item for item in raw_items if isinstance(item, dict))
-                elif isinstance(raw_items, dict):
-                    for key, value in raw_items.items():
-                        if isinstance(value, dict):
-                            entries.append({"id": str(key), **value})
-        except Exception:
-            pass
+        _append_catalog_entries(entries, env_catalog)
     try:
         from hermes_cli.config import cfg_get, load_config  # type: ignore
 
         config = load_config()
         configured = cfg_get(config, "plugins", "entries", "hermes-workflows-approvals", "workflow_catalog", default=[])
-        if isinstance(configured, list):
-            entries.extend(item for item in configured if isinstance(item, dict))
-        elif isinstance(configured, dict):
-            raw_items = configured.get("workflows", configured)
-            if isinstance(raw_items, list):
-                entries.extend(item for item in raw_items if isinstance(item, dict))
-            elif isinstance(raw_items, dict):
-                for key, value in raw_items.items():
-                    if isinstance(value, dict):
-                        entries.append({"id": str(key), **value})
+        _append_catalog_entries(entries, configured)
     except Exception:
         pass
     return entries
@@ -397,6 +445,166 @@ def _definition_payload(definition: dict[str, Any], engine: WorkflowEngine) -> d
     return {**definition, "runs": _run_counts(runs), "latest_run": latest}
 
 
+def _relative_source_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    source_path = Path(path).expanduser().resolve()
+    for root in (Path.cwd().resolve(),):
+        try:
+            return str(source_path.relative_to(root))
+        except ValueError:
+            continue
+    return source_path.name
+
+
+def _workflow_source_payload(definition: dict[str, Any]) -> dict[str, Any]:
+    workflow_ref = str(definition["workflow_ref"])
+    workflow = _load_workflow(workflow_ref)
+    try:
+        lines, line_start = inspect.getsourcelines(workflow)
+    except (OSError, TypeError) as exc:
+        raise HTTPException(status_code=404, detail=f"Workflow source is not inspectable: {workflow_ref}") from exc
+    module_name, attr = workflow_ref.split(":", 1)
+    source_file = inspect.getsourcefile(workflow) or inspect.getfile(workflow)
+    code = "".join(lines)
+    return {
+        "definition": definition,
+        "workflow_ref": workflow_ref,
+        "language": "python",
+        "highlight_class": "language-python",
+        "code": code,
+        "location": {
+            "module": module_name,
+            "attribute": attr,
+            "file": _relative_source_path(source_file),
+            "line_start": line_start,
+            "line_end": line_start + len(lines) - 1,
+        },
+        "runtime_semantics": _runtime_semantics(),
+    }
+
+
+def _approval_node_id(key: str) -> str | None:
+    if not key:
+        return None
+    return key if key.startswith("approval:") else f"approval:{key}"
+
+
+def _dag_node_id_for_event(event: dict[str, Any]) -> str | None:
+    event_type = str(event.get("type") or "")
+    payload = event.get("payload") or {}
+    key = str(payload.get("key") or event.get("key") or "")
+    if event_type == "WorkflowStarted":
+        return "workflow:start"
+    if event_type in {"StepRequested", "StepCompleted"}:
+        return key or None
+    if event_type == "ApprovalRequested":
+        return _approval_node_id(key)
+    if event_type == "SignalReceived":
+        return f"signal:{key}"
+    if event_type == "WorkflowCompleted":
+        return "workflow:completed"
+    if event_type == "WorkflowFailed":
+        return "workflow:failed"
+    if event_type == "WorkflowCancelled":
+        return "workflow:cancelled"
+    return None
+
+
+def _dag_node_kind(event_type: str) -> str:
+    if event_type.startswith("Step"):
+        return "step"
+    if event_type == "ApprovalRequested":
+        return "approval"
+    if event_type == "SignalReceived":
+        return "signal"
+    return "workflow"
+
+
+def _dag_node_status(event_type: str, existing: str | None = None) -> str:
+    if event_type == "StepRequested":
+        return existing or "requested"
+    if event_type == "StepCompleted":
+        return "completed"
+    if event_type == "ApprovalRequested":
+        return "waiting"
+    if event_type == "SignalReceived":
+        return "received"
+    if event_type == "WorkflowCompleted":
+        return "completed"
+    if event_type == "WorkflowFailed":
+        return "failed"
+    if event_type == "WorkflowCancelled":
+        return "cancelled"
+    if event_type == "WorkflowStarted":
+        return "started"
+    return existing or "recorded"
+
+
+def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
+    source = artifact.get("source") or {}
+    key = source.get("key")
+    if not key:
+        if source.get("event") == "WorkflowCompleted":
+            return "workflow:completed"
+        return None
+    if artifact.get("kind") == "approval_artifact":
+        return f"approval:{key}"
+    return str(key)
+
+
+def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    previous_id: str | None = None
+    for event in status.get("events") or status.get("recent_events") or []:
+        node_id = _dag_node_id_for_event(event)
+        if not node_id:
+            continue
+        event_type = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        node = nodes.get(node_id)
+        if node is None:
+            node = {
+                "id": node_id,
+                "kind": _dag_node_kind(event_type),
+                "label": payload.get("step_name") or event.get("key") or event_type,
+                "status": _dag_node_status(event_type),
+                "first_seq": event.get("seq"),
+                "last_seq": event.get("seq"),
+                "event_types": [event_type],
+                "artifacts": [],
+                "artifact_count": 0,
+            }
+            nodes[node_id] = node
+        else:
+            node["status"] = _dag_node_status(event_type, str(node.get("status") or ""))
+            node["last_seq"] = event.get("seq")
+            if event_type not in node["event_types"]:
+                node["event_types"].append(event_type)
+            if payload.get("step_name"):
+                node["label"] = payload.get("step_name")
+        if previous_id and previous_id != node_id and not any(edge["from"] == previous_id and edge["to"] == node_id for edge in edges):
+            edges.append({"from": previous_id, "to": node_id})
+        previous_id = node_id
+    for artifact in artifacts:
+        node_id = _artifact_node_id(artifact)
+        if node_id and node_id in nodes:
+            nodes[node_id]["artifacts"].append(artifact)
+    for node in nodes.values():
+        node["artifact_count"] = len(node["artifacts"])
+    return {
+        "workflow_id": status.get("workflow_id"),
+        "run": status,
+        "layout": "linear-event-dag",
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+        "runtime_semantics": _runtime_semantics(),
+    }
+
+
 def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
     authority = approval.get("authority")
     artifact = approval.get("artifact")
@@ -405,11 +613,12 @@ def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
         return {"level": "high", "reason": "The approval appears to authorize an external, destructive, financial, or credential-affecting action."}
     if any(word in text for word in ("email", "calendar", "schedule", "deploy", "post", "message")):
         return {"level": "medium", "reason": "The approval may affect people, publishing, scheduling, or deployment state."}
-    return {"level": "low", "reason": "Record-only dashboard decision; no workflow resume or external side effect happens in this route."}
+    return {"level": "low", "reason": "Approval records human provenance and resumes the trusted local workflow; no obvious external/destructive keyword was detected."}
 
 
 def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
     prompt = approval.get("prompt") or approval.get("key") or "Approval needed"
+    artifact = _operator_approval_artifact(approval.get("artifact"))
     return {
         "db_alias": db_alias,
         "workflow_id": approval.get("workflow_id"),
@@ -422,15 +631,15 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
         "approver": approval.get("approver"),
         "allowed": approval.get("allowed") or ["approve", "reject"],
         "authority": approval.get("authority"),
-        "artifact_preview": _redact_artifact_local_refs(approval.get("artifact")),
-        "artifact_render": _artifact_descriptor(approval.get("artifact")),
+        "artifact_preview": _redact_artifact_local_refs(artifact),
+        "artifact_render": _artifact_descriptor(artifact),
         "decision": approval.get("decision"),
         "source": approval.get("source"),
         "diagnostics": approval.get("diagnostics") or [],
         "waiting_on": approval.get("waiting_on"),
         "requested_seq": approval.get("requested_seq"),
         "risk": _risk_for_approval(approval),
-        "consequence": "Records approve/reject only; a trusted local resumer must continue the workflow.",
+        "consequence": "Records approve/reject with human provenance, then resumes the trusted local workflow immediately.",
         "detail_url": f"/approvals/detail?db={db_alias}&workflow_id={approval.get('workflow_id')}&key={approval.get('key')}",
     }
 
@@ -439,7 +648,7 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
     workflow_id = str(status.get("workflow_id") or "")
     artifacts: list[dict[str, Any]] = []
     for approval in status.get("approvals") or []:
-        artifact = approval.get("artifact")
+        artifact = _operator_approval_artifact(approval.get("artifact"))
         if artifact is not None:
             artifacts.append(
                 {
@@ -539,6 +748,15 @@ async def definition_runs(
     return {"db_alias": db_alias, "definition": definition, "count": len(runs), "runs": runs, "runtime_semantics": _runtime_semantics()}
 
 
+@router.get("/definitions/{definition_id}/source")
+async def workflow_definition_source(definition_id: str, db: str | None = None) -> dict[str, Any]:
+    db_alias, db_path = _resolve_dashboard_db(db)
+    engine = WorkflowEngine(db_path, read_only=True)
+    definition = _definition_by_id(definition_id, engine)
+    _ensure_workflow_project_on_path(db_path)
+    return {"db_alias": db_alias, **_workflow_source_payload(definition)}
+
+
 @router.post("/runs")
 async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
@@ -552,6 +770,7 @@ async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     workflow_ref = str(definition["workflow_ref"])
     inputs = _input_from_body(body)
     def execute_run() -> tuple[Any, dict[str, Any]]:
+        _ensure_workflow_project_on_path(db_path)
         workflow = _load_workflow(workflow_ref)
         result = WorkflowEngine(db_path).run_until_idle(workflow, inputs, workflow_id=workflow_id, workflow_ref=workflow_ref)
         status = _status_packet(
@@ -621,6 +840,19 @@ async def run_artifacts(workflow_id: str, db: str | None = None, recent_events: 
     return {"db_alias": status["db_alias"], "workflow_id": workflow_id, "count": len(artifacts), "artifacts": artifacts, "runtime_semantics": _runtime_semantics()}
 
 
+@router.get("/runs/{workflow_id}/dag")
+async def run_dag(workflow_id: str, db: str | None = None, recent_events: int = 200) -> dict[str, Any]:
+    status = await run_status(
+        workflow_id,
+        db=db,
+        recent_events=recent_events,
+        commands="all",
+        command_limit=200,
+        command_payload_chars=5000,
+    )
+    return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"])}
+
+
 @router.get("/approvals")
 async def active_approvals(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
@@ -639,6 +871,7 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
     engine = WorkflowEngine(db_path, read_only=True)
     approval = _redact_artifact_local_refs(_strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key))))
+    approval["artifact"] = _operator_approval_artifact(approval.get("artifact"))
     status = _status_packet(engine, workflow_id, recent_events=100, commands="recent", command_limit=20, command_payload_chars=5000)
     timeline = [event for event in engine.events(workflow_id) if event.get("seq", 0) <= (approval.get("requested_seq") or 10**9)]
     timeline = _redact_artifact_local_refs(_redact(timeline))
@@ -660,9 +893,9 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         "risk": card["risk"],
         "consequence": card["consequence"],
         "decision_semantics": {
-            "resume": False,
-            "label": "Record-only decision",
-            "description": "The dashboard records approve/reject with server-derived human provenance. It does not resume workflow execution; a trusted local resumer must continue it.",
+            "resume": True,
+            "label": "Record and resume",
+            "description": "The dashboard records approve/reject with server-derived human provenance, then resumes the trusted local workflow immediately in this Hermes process.",
         },
         "timeline": timeline,
         "artifacts": _artifacts_from_status(status),
@@ -739,8 +972,9 @@ async def workflow_status(
 
 @router.post("/approvals/decision")
 async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
-    # Dashboard approvals are record-only and derive human provenance from
-    # server-side plugin configuration, never from untrusted browser JSON.
+    # Dashboard approvals derive human provenance from server-side plugin
+    # configuration, never from untrusted browser JSON. After recording the
+    # decision they immediately resume trusted local workflow code.
     approver_id = _dashboard_approver_id()
     if not approver_id:
         raise HTTPException(
@@ -772,14 +1006,28 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
         reason=body.get("reason"),
         idempotency_key=message_id,
     )
+    def record_and_resume() -> tuple[Any, dict[str, Any]]:
+        _ensure_workflow_project_on_path(db_path)
+        receipt = WorkflowEngine(db_path).submit_approval_decision(decision, resume=True)
+        post_resume = _status_packet(
+            WorkflowEngine(db_path, read_only=True),
+            workflow_id,
+            recent_events=20,
+            commands="recent",
+            command_limit=20,
+            command_payload_chars=2000,
+        )
+        return receipt, post_resume
+
     try:
-        receipt = WorkflowEngine(db_path).submit_approval_decision(decision, resume=False)
+        receipt, post_resume = await asyncio.to_thread(record_and_resume)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"approval decision failed: {type(exc).__name__}: {exc}") from exc
-    receipt_payload = _receipt_to_payload(receipt, resume_requested=False)
+        raise HTTPException(status_code=400, detail=f"approval decision/resume failed: {type(exc).__name__}: {exc}") from exc
+    receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
     return {
         "success": True,
         "db_alias": db_alias,
         "receipt": receipt_payload,
+        "post_resume": post_resume,
         "next_step": _next_step_for_receipt(receipt_payload),
     }

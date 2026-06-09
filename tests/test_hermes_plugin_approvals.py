@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -27,7 +29,7 @@ async def plugin_approval_workflow(ctx, inputs):
             "summary": "Plugin approval packet",
             "secret_token": "should-not-leak",
         },
-        approver="human:skylar",
+        approver="human:operator",
         allowed=["approve", "reject"],
         authority={"scope": "plugin-test"},
     )
@@ -99,6 +101,31 @@ def test_plugin_registers_approval_tools_and_gateway_hook():
     assert "pre_gateway_dispatch" in ctx.hooks
 
 
+def test_configured_dbs_accepts_json_string_from_hermes_config(monkeypatch, tmp_path):
+    import hermes_workflows.hermes_plugin_approvals as approvals
+
+    db = tmp_path / "workflow.sqlite"
+    hermes_cli = ModuleType("hermes_cli")
+    hermes_config = ModuleType("hermes_cli.config")
+
+    def fake_load_config():
+        return {"fake": "config"}
+
+    def fake_cfg_get(config, *keys, default=None):
+        assert keys == ("plugins", "entries", "hermes-workflows-approvals", "workflow_dbs")
+        return json.dumps([{"name": "Palmer workflows", "path": str(db)}])
+
+    setattr(hermes_config, "load_config", fake_load_config)
+    setattr(hermes_config, "cfg_get", fake_cfg_get)
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+    monkeypatch.delenv("HERMES_WORKFLOWS_DB", raising=False)
+    monkeypatch.delenv("HERMES_WORKFLOWS_DBS", raising=False)
+
+    assert approvals._configured_dbs() == {"Palmer workflows": str(db)}
+
+
+
 def test_workflow_approvals_list_returns_bounded_redacted_pending_approval(tmp_path):
     from hermes_workflows.hermes_plugin_approvals import register
 
@@ -156,7 +183,7 @@ def test_workflow_approval_decide_defaults_to_resume_false(tmp_path):
                 "workflow_id": "wf_plugin",
                 "key": "approve_plugin_test",
                 "action": "approve",
-                "by": "skylar",
+                "by": "operator",
                 "channel": "discord",
                 "message_id": "msg-123",
             }
@@ -187,7 +214,7 @@ def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path)
                 "workflow_id": "wf_plugin",
                 "key": "approve_plugin_test",
                 "action": "approve",
-                "by": "skylar",
+                "by": "operator",
                 "channel": "cli",
                 "message_id": "manual-1",
                 "resume": True,
@@ -204,8 +231,8 @@ def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path)
 class FakeSource:
     platform: Any = "discord"
     chat_id: str = "chat-42"
-    user_id: str = "skylar"
-    user_name: str = "Skylar Payne"
+    user_id: str = "operator"
+    user_name: str = "Operator"
     message_id: str = "msg-456"
 
 
@@ -325,8 +352,8 @@ def test_terminal_workflow_rejects_conflicting_late_approval_decision(tmp_path):
             workflow_id="wf_plugin",
             key="approve_plugin_test",
             action="approve",
-            by="skylar",
-            source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-approve"},
+            by="operator",
+            source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-approve"},
             idempotency_key="approval:approve",
         ),
         resume=True,
@@ -338,8 +365,8 @@ def test_terminal_workflow_rejects_conflicting_late_approval_decision(tmp_path):
                 workflow_id="wf_plugin",
                 key="approve_plugin_test",
                 action="reject",
-                by="skylar",
-                source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-reject"},
+                by="operator",
+                source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-reject"},
                 idempotency_key="approval:reject",
             ),
             resume=True,
@@ -357,8 +384,8 @@ def test_cancelled_workflow_rejects_conflicting_late_recorded_approval_decision(
             workflow_id="wf_plugin",
             key="approve_plugin_test",
             action="approve",
-            by="skylar",
-            source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-approve"},
+            by="operator",
+            source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-approve"},
             idempotency_key="approval:approve",
         ),
         resume=False,
@@ -371,12 +398,23 @@ def test_cancelled_workflow_rejects_conflicting_late_recorded_approval_decision(
                 workflow_id="wf_plugin",
                 key="approve_plugin_test",
                 action="reject",
-                by="skylar",
-                source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-reject"},
+                by="operator",
+                source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-reject"},
                 idempotency_key="approval:reject",
             ),
             resume=False,
         )
+
+
+def test_list_waiting_approvals_excludes_terminal_workflows(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = create_pending_approval(db)
+    assert [approval.key for approval in engine.list_approvals(status="waiting")] == ["approve_plugin_test"]
+
+    engine.cancel_workflow("wf_plugin", reason="stale approval card", source={"kind": "operator", "id": "unit"})
+
+    assert WorkflowEngine(db).workflow_status("wf_plugin")["status"] == "cancelled"
+    assert WorkflowEngine(db).list_approvals(status="waiting") == []
 
 
 def test_approval_decision_signal_is_schema_unique_per_workflow_and_key(tmp_path):
@@ -385,8 +423,8 @@ def test_approval_decision_signal_is_schema_unique_per_workflow_and_key(tmp_path
     payload = {
         "signal_type": "approval.decision",
         "key": "approve_plugin_test",
-        "payload": {"action": "approve", "by": "skylar"},
-        "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-1"},
+        "payload": {"action": "approve", "by": "operator"},
+        "source": {"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-1"},
     }
 
     with sqlite3.connect(db) as con:
@@ -417,7 +455,7 @@ def test_approval_decision_signal_is_schema_unique_per_workflow_and_key(tmp_path
                     100,
                     "SignalReceived",
                     "signal:approval.decision:approve_plugin_test",
-                    JsonCodec.dumps({**payload, "payload": {"action": "reject", "by": "skylar"}}),
+                    JsonCodec.dumps({**payload, "payload": {"action": "reject", "by": "operator"}}),
                     "approval:two",
                     2,
                 ),
