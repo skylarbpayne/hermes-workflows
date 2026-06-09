@@ -720,6 +720,77 @@ def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
     assert str(db) not in json.dumps(dag)
 
 
+def test_dashboard_path_ref_workflow_source_run_and_dag(tmp_path, monkeypatch):
+    project = tmp_path / "path-ref-project"
+    workflow_file = project / "path_ref_flow.py"
+    db = project / ".hermes" / "workflows.sqlite"
+    workflow_file.parent.mkdir(parents=True)
+    db.parent.mkdir(parents=True)
+    workflow_file.write_text(
+        "from hermes_workflows import step, workflow\n"
+        "\n"
+        "@step\n"
+        "async def build_path_ref_packet(ctx, value):\n"
+        "    return {'kind': 'packet', 'value': value, 'path': '/Users/operator/private/path-ref.txt'}\n"
+        "\n"
+        "@workflow\n"
+        "async def path_ref_dag_workflow(ctx, inputs):\n"
+        "    packet = await build_path_ref_packet(ctx, inputs.get('value', 1))\n"
+        "    decision = await ctx.approval.request(\n"
+        "        key='approve_path_ref_dag',\n"
+        "        prompt='Approve path-ref DAG?',\n"
+        "        artifact=packet,\n"
+        "        approver='human:operator',\n"
+        "        allowed=['approve', 'reject'],\n"
+        "    )\n"
+        "    return {'decision': decision.get('action'), 'packet': packet}\n"
+    )
+    workflow_ref = f"{workflow_file}:path_ref_dag_workflow"
+    WorkflowEngine(db)  # Create the configured DB before read-only dashboard source lookup.
+    configure_test_dbs(
+        monkeypatch,
+        tmp_path,
+        {"runtime-smoke": str(db)},
+        workflow_catalog=[
+            {
+                "id": "path-ref-dag",
+                "name": "Path-ref DAG smoke",
+                "description": "Dashboard smoke for workflow refs loaded from a .py file path.",
+                "workflow_ref": workflow_ref,
+                "input_schema": {"type": "object", "properties": {"value": {"type": "integer"}}},
+            }
+        ],
+    )
+    api = load_dashboard_api()
+
+    source = run(api.workflow_definition_source("path-ref-dag", db="runtime-smoke"))
+    launch = run(api.run_workflow({"db": "runtime-smoke", "definition_id": "path-ref-dag", "input": {"value": 2}}))
+    workflow_id = launch["result"]["workflow_id"]
+    dag = run(api.run_dag(workflow_id, db="runtime-smoke"))
+
+    assert source["workflow_ref"] == workflow_ref
+    assert source["location"]["attribute"] == "path_ref_dag_workflow"
+    assert source["location"]["file"] == "path_ref_flow.py"
+    assert "async def path_ref_dag_workflow" in source["code"]
+    assert launch["result"]["status"] == "waiting"
+    assert launch["result"]["waiting_on"] == "signal:approval.decision:approve_path_ref_dag"
+    assert dag["workflow_id"] == workflow_id
+    assert dag["layout"] == "linear-event-dag"
+    step_node = next(node for node in dag["nodes"] if node["id"] == "step:build_path_ref_packet:0")
+    assert step_node["kind"] == "step"
+    assert step_node["status"] == "completed"
+    assert step_node["artifact_count"] == 1
+    assert step_node["artifacts"][0]["artifact_render"]["render"] == "file-reference"
+    approval_node = next(node for node in dag["nodes"] if node["id"] == "approval:approve_path_ref_dag")
+    assert approval_node["kind"] == "approval"
+    assert approval_node["status"] == "waiting"
+    assert any(edge["from"] == "workflow:start" and edge["to"] == "step:build_path_ref_packet:0" for edge in dag["edges"])
+    assert any(edge["to"] == "approval:approve_path_ref_dag" for edge in dag["edges"])
+    combined = json.dumps([source, launch, dag], sort_keys=True)
+    assert str(db) not in combined
+    assert "/Users/operator/private/path-ref.txt" in combined
+
+
 def test_dashboard_email_ops_review_artifacts_do_not_expose_future_approval_queue():
     api = load_dashboard_api()
     legacy_packet = {
