@@ -414,6 +414,17 @@
   font-size: 0.78rem;
 }
 
+.hwf-markdown-preview,
+.hwf-text-preview {
+  margin: 0.75rem 0;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--hwf-surface), var(--color-primary) 4%);
+}
+
+.hwf-markdown-preview {
+  max-height: 30rem;
+}
+
 .hwf-code-block {
   max-height: 70vh;
   overflow: auto;

@@ -6,12 +6,13 @@ import inspect
 import json
 import sqlite3
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
-from .approvals import ApprovalDecisionInput, ApprovalReceipt, ApprovalView
+from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView
 from .workflow_values import Workflow
 
 
@@ -284,6 +285,15 @@ class WorkflowEngine:
                         WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
                         """,
                         (_now(), workflow_id, f"approval:{key}"),
+                    )
+                elif signal_type == "handoff.completed":
+                    con.execute(
+                        """
+                        UPDATE workflow_commands_outbox
+                        SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                        WHERE workflow_id = ? AND type = 'external_handoff' AND key = ? AND status != 'cancelled'
+                        """,
+                        (_now(), workflow_id, f"handoff:{key}"),
                     )
         if inserted:
             assert workflow_fn is not None
@@ -1858,6 +1868,7 @@ class WorkflowContext:
         self.workflow_id = workflow_id
         self._step_call_counts: Dict[str, int] = {}
         self._gather_call_count = 0
+        self._approval_call_counts: Dict[str, int] = {}
         self.approval = ApprovalClient(self)
 
     def _raise_if_cancelled(self) -> None:
@@ -2127,6 +2138,83 @@ class WorkflowContext:
 
         raise WorkflowWaiting(wait_key)
 
+    async def approve(
+        self,
+        prompt: str,
+        *,
+        key: str | None = None,
+        artifact: Any = None,
+        approver: str = "human",
+        allowed: Optional[List[str]] = None,
+        authority: Optional[List[str]] = None,
+        timeout: Optional[str] = None,
+        feedback_loop: bool = False,
+    ) -> ApprovalDecision:
+        """Request an approval with the ergonomic ctx.approve(...) primitive."""
+
+        return await self.approval.request(
+            prompt,
+            key=key,
+            artifact=artifact,
+            approver=approver,
+            allowed=allowed,
+            authority=authority,
+            timeout=timeout,
+            feedback_loop=feedback_loop,
+        )
+
+    async def handoff(
+        self,
+        prompt: str,
+        *,
+        key: str | None = None,
+        artifact: Any = None,
+        assignee: str | None = None,
+        instructions: str | None = None,
+        authority: Optional[List[str]] = None,
+        signal_type: str = "handoff.completed",
+    ) -> Any:
+        """Record external/human/agent work and wait for its completion signal."""
+
+        self._raise_if_cancelled()
+        handoff_key = _safe_approval_key(key, prefix="") if key is not None else _safe_approval_key(prompt, prefix="handoff")
+        event_key = f"handoff:{handoff_key}"
+        completed = self._last_event("SignalReceived", f"signal:{signal_type}:{handoff_key}")
+        if completed is not None:
+            return completed["payload"]
+
+        payload = {
+            "prompt": prompt,
+            "key": handoff_key,
+            "artifact": artifact,
+            "assignee": assignee,
+            "instructions": instructions,
+            "authority": authority or [],
+            "signal_type": signal_type,
+        }
+        if self._last_event("HandoffRequested", event_key) is None:
+            with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
+                inserted = self.engine._append_event(
+                    con,
+                    self.workflow_id,
+                    "HandoffRequested",
+                    key=event_key,
+                    payload=payload,
+                    idempotency_key=f"handoff-requested:{handoff_key}",
+                    ignore_duplicate=True,
+                )
+                if inserted:
+                    self.engine._insert_command_row(con, self.workflow_id, "external_handoff", event_key, payload)
+
+        return await self.wait_for(signal_type, key=handoff_key)
+
+    async def external(self, *args: Any, **kwargs: Any) -> Any:
+        """Alias for ctx.handoff(...); reads better for non-agent external work."""
+
+        return await self.handoff(*args, **kwargs)
+
     def _last_event(self, event_type: str, key: str) -> Optional[Any]:
         with self.engine._connect() as con:
             row = con.execute(
@@ -2145,6 +2233,18 @@ class WorkflowContext:
 class ApprovalClient:
     def __init__(self, ctx: WorkflowContext):
         self.ctx = ctx
+
+    def _key_for_request(self, prompt: str, key: str | None, *, feedback_loop: bool = False) -> str:
+        if key is not None and not feedback_loop:
+            return _safe_approval_key(key, prefix="")
+        base = _safe_approval_key(key, prefix="") if key is not None else _safe_approval_key(prompt, prefix="approve")
+        call_index = self.ctx._approval_call_counts.get(base, 0)
+        self.ctx._approval_call_counts[base] = call_index + 1
+        if feedback_loop and call_index > 0:
+            return f"{base}_retry_{call_index}"
+        if key is None and call_index > 0:
+            return f"{base}_{call_index}"
+        return base
 
     def _payload(
         self,
@@ -2184,25 +2284,35 @@ class ApprovalClient:
     def _decision_event(self, key: str) -> Optional[Any]:
         return self.ctx._last_event("SignalReceived", f"signal:approval.decision:{key}")
 
-    def _validate_decision(self, *, key: str, approver: str, allowed: List[str], decision_event: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_decision(self, *, key: str, approver: str, allowed: List[str], decision_event: Dict[str, Any]) -> ApprovalDecision:
         decision = decision_event["payload"]
         if decision.get("action") not in allowed:
             raise ValueError(f"approval {key} action is not allowed: {decision.get('action')}")
         source = _validate_approval_source(key, approver, decision, decision_event.get("source"))
-        return {**decision, "source": source}
+        return ApprovalDecision(
+            action=str(decision.get("action") or ""),
+            by=str(decision.get("by") or ""),
+            source=source,
+            note=decision.get("note"),
+            reason=decision.get("reason"),
+            message=decision.get("message"),
+            comment=decision.get("comment"),
+        )
 
     async def request(
         self,
         prompt: str,
         *,
-        key: str,
+        key: str | None = None,
         artifact: Any = None,
         approver: str = "human",
         allowed: Optional[List[str]] = None,
         authority: Optional[List[str]] = None,
         timeout: Optional[str] = None,
-    ) -> Any:
+        feedback_loop: bool = False,
+    ) -> ApprovalDecision:
         self.ctx._raise_if_cancelled()
+        key = self._key_for_request(prompt, key, feedback_loop=feedback_loop)
         event_key = f"approval:{key}"
         allowed_values = allowed or ["approve", "reject"]
         if self.ctx._last_event("ApprovalRequested", event_key) is None:
@@ -2245,10 +2355,11 @@ class ApprovalClient:
         self.ctx._raise_if_cancelled()
         normalized: List[Dict[str, Any]] = []
         seen_keys: set[str] = set()
-        for request in requests:
-            key = str(request.get("key") or "")
+        for index, request in enumerate(requests):
+            raw_key = request.get("key")
+            key = self._key_for_request(str(request.get("prompt") or f"approval {index}"), str(raw_key) if raw_key else None)
             if not key:
-                raise ValueError("approval request_many entries require key")
+                raise ValueError("approval request_many entries require key or prompt")
             if key in seen_keys:
                 raise ValueError(f"duplicate approval key in request_many: {key}")
             seen_keys.add(key)
@@ -2303,7 +2414,7 @@ class ApprovalClient:
                 allowed=item["allowed"],
                 decision_event=decision_event,
             )
-            decisions.append({"key": item["key"], **decision})
+            decisions.append({"key": item["key"], **decision.to_dict()})
 
         if missing:
             raise WorkflowWaiting(f"signals:approval.decision:{','.join(missing)}")
@@ -2368,9 +2479,10 @@ def _validate_approval_source(
         raise ValueError(f"approval {key} requires human approval source")
 
     expected_id = approver.split(":", 1)[1] if ":" in approver else None
-    if expected_id and source.get("id") != expected_id:
+    dashboard_provenance = source.get("channel") == "hermes-dashboard"
+    if expected_id and not dashboard_provenance and source.get("id") != expected_id:
         raise ValueError(f"approval {key} requires approval from {approver}")
-    if expected_id and decision.get("by") != expected_id:
+    if expected_id and not dashboard_provenance and decision.get("by") != expected_id:
         raise ValueError(f"approval {key} decision.by must match {approver}")
 
     if not source.get("channel") or not any(source.get(field) for field in ("message_url", "message_id", "event_id")):
@@ -2460,8 +2572,12 @@ def _diagnostic_message(label: str) -> str:
 def _to_jsonable(value: Any) -> Any:
     if isinstance(value, Workflow):
         return value.to_json()
-    if isinstance(value, dict):
+    if isinstance(value, ApprovalDecision):
+        return _to_jsonable(value.to_dict())
+    if isinstance(value, MappingABC):
         return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {str(key): _to_jsonable(item) for key, item in value.__dict__.items()}
     if isinstance(value, list):
         return [_to_jsonable(item) for item in value]
     if isinstance(value, tuple):
@@ -2477,6 +2593,25 @@ def _from_jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_from_jsonable(item) for item in value]
     return value
+
+
+def _safe_approval_key(value: Any, *, prefix: str = "approve") -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("approval key source must be non-empty")
+    if not prefix and all(char.isalnum() or char in "._-:" for char in text):
+        return text
+    lowered = text.lower()
+    safe = "".join(char if char.isalnum() else "_" for char in lowered)
+    safe = "_".join(part for part in safe.split("_") if part)
+    if not safe:
+        safe = prefix
+    if not safe.startswith(("approve", "approval", "handoff")) and prefix:
+        safe = f"{prefix}_{safe}"
+    digest = _hash_text(text)[:8]
+    if len(safe) <= 64 and safe == lowered.replace(" ", "_").strip("_"):
+        return safe
+    return f"{safe[:56].strip('_') or prefix}_{digest}"
 
 
 def _safe_child_key(value: Any) -> str:

@@ -90,6 +90,21 @@
       render.warning && e("span", { className: "hwf-muted" }, render.warning));
   }
 
+  function ArtifactInlinePreview(props) {
+    const render = props.render || {};
+    const value = props.value;
+    if (render.render === "inline-markdown") {
+      const markdown = value && typeof value === "object" ? value.markdown : value;
+      if (typeof markdown === "string" && markdown.trim()) {
+        return e("pre", { className: "hwf-markdown-preview" }, markdown);
+      }
+    }
+    if (render.render === "inline-text" && typeof value === "string") {
+      return e("pre", { className: "hwf-text-preview" }, value);
+    }
+    return null;
+  }
+
   function shortId(value) {
     const text = String(value || "");
     if (text.length <= 28) return text || "—";
@@ -143,6 +158,7 @@
             artifact.source && artifact.source.key && e(Pill, { label: "step: " + artifact.source.key })))),
       e(CardContent, null,
         e(ArtifactRenderSummary, { render: artifact.artifact_render }),
+        e(ArtifactInlinePreview, { render: artifact.artifact_render, value: raw }),
         e(ArtifactSummary, { artifact: artifact }),
         e("details", { className: "hwf-raw-json" },
           e("summary", null, "Raw JSON"),
@@ -229,6 +245,7 @@
           e("div", null,
             e("div", { className: "hwf-section-title" }, "Artifact preview"),
             e(ArtifactRenderSummary, { render: approval.artifact_render }),
+            e(ArtifactInlinePreview, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact }),
             e("pre", null, pretty(approval.artifact_preview || approval.artifact)))),
         e(ApprovalActions, { db: props.db, approval: approval, onDecided: props.onRefresh })));
   }
@@ -292,6 +309,7 @@
           e("div", { className: "hwf-section-title" }, "What you are approving"),
           e("p", null, what.prompt || approval.prompt || approval.key),
           e(ArtifactRenderSummary, { render: what.artifact_render || approval.artifact_render }),
+          e(ArtifactInlinePreview, { render: what.artifact_render || approval.artifact_render, value: what.artifact || approval.artifact_preview }),
           e("pre", null, pretty(what.artifact || approval.artifact_preview))),
         e("div", null,
           e("div", { className: "hwf-section-title" }, "Consequence"),

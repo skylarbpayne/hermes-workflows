@@ -115,6 +115,37 @@ def test_invocation_service_runs_until_approval_and_writes_redacted_receipt_and_
     assert "wf_bridge_invoke" in dashboard_path.read_text()
 
 
+def test_invocation_service_loads_path_workflow_refs(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    workflow_file = tmp_path / "path_invocation_flow.py"
+    workflow_file.write_text(
+        "from hermes_workflows import workflow\n"
+        "\n"
+        "@workflow\n"
+        "async def path_invocation_workflow(ctx, inputs):\n"
+        "    return {'value': inputs.get('value')}\n"
+    )
+    workflow_ref = f"{workflow_file}:path_invocation_workflow"
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"pilot": str(db)},
+            "workflows": {
+                "path_bridge": {
+                    "workflow_ref": workflow_ref,
+                    "db": "pilot",
+                    "default_input": {"value": 1},
+                }
+            },
+        }
+    )
+
+    receipt = InvocationService(registry).invoke("path_bridge", workflow_id="wf_path_ref", input_payload={"value": 2})
+
+    assert receipt["workflow_ref"] == workflow_ref
+    assert receipt["status"] == "completed"
+    assert WorkflowEngine(db).workflow_status("wf_path_ref")["result"] == {"value": 2}
+
+
 def test_trusted_resumer_completes_plugin_recorded_resume_false_decision(tmp_path):
     db = tmp_path / "workflow.sqlite"
     registry = WorkflowRegistry.from_sources(
