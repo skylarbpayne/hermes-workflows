@@ -19,7 +19,7 @@ PLUGIN_DASHBOARD = Path("plugins/hermes-workflows-approvals/dashboard")
 
 @step
 async def dashboard_path_artifact_step(ctx, artifact):
-    return {"copied_to": "/Users/skylar/private/generated-copy.png", "artifact": artifact}
+    return {"copied_to": "/Users/operator/private/generated-copy.png", "artifact": artifact}
 
 
 @workflow
@@ -30,11 +30,11 @@ async def dashboard_path_artifact_workflow(ctx, inputs):
         key="approve_path_artifact",
         prompt="Approve path artifact?",
         artifact=artifact,
-        approver="human:skylar",
+        approver="human:operator",
         allowed=["approve", "reject"],
         authority=["review_media"],
     )
-    return {"decision": decision, "artifact": artifact, "saved_at": "/Users/skylar/private/final-report.pdf"}
+    return {"decision": decision, "artifact": artifact, "saved_at": "/Users/operator/private/final-report.pdf"}
 
 
 def load_dashboard_api():
@@ -132,16 +132,34 @@ def test_dashboard_artifact_run_groups_are_collapsible():
     assert ".hwf-run-artifacts-body" in style_css
 
 
+def test_dashboard_frontend_exposes_workflow_code_and_run_dag_affordances():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "WorkflowSourceModal" in index_js
+    assert '"View code"' in index_js
+    assert "language-python" in index_js
+    assert "RunDag" in index_js
+    assert '"Run DAG"' in index_js
+    assert "selectedDagNode" in index_js
+    assert "Artifacts from this step" in index_js
+    assert "/definitions/" in index_js and "/source" in index_js
+    assert "/dag" in index_js
+    assert ".hwf-code-block" in style_css
+    assert ".hwf-dag-node" in style_css
+    assert ".hwf-dag-node-selected" in style_css
+
+
 def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()
 
     result = run(api.list_dbs())
 
     assert result["count"] == 1
-    assert result["dbs"][0] == {"name": "palmer-smoke", "exists": True}
+    assert result["dbs"][0] == {"name": "runtime-smoke", "exists": True}
     assert result["runtime_semantics"]["state_source"].startswith("The dashboard uses the configured workflow DB alias")
     assert str(db) not in json.dumps(result)
 
@@ -149,12 +167,12 @@ def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(
 def test_dashboard_plugin_api_overview_includes_workflow_observability_and_redacts_secrets(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()
 
-    result = run(api.overview(db="palmer-smoke", recent_events=10, command_limit=10, command_payload_chars=300))
+    result = run(api.overview(db="runtime-smoke", recent_events=10, command_limit=10, command_payload_chars=300))
 
-    assert result["db_alias"] == "palmer-smoke"
+    assert result["db_alias"] == "runtime-smoke"
     assert str(db) not in json.dumps(result)
     assert result["workflow_count"] == 1
     assert result["counts_by_status"] == {"waiting": 1}
@@ -175,10 +193,10 @@ def test_dashboard_plugin_api_overview_includes_workflow_observability_and_redac
 def test_dashboard_plugin_api_approval_decision_records_and_resumes(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)}, dashboard_approver="skylar")
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)}, dashboard_approver="operator")
     api = load_dashboard_api()
 
-    status = run(api.workflow_status("wf_plugin", db="palmer-smoke", recent_events=5, commands="recent"))
+    status = run(api.workflow_status("wf_plugin", db="runtime-smoke", recent_events=5, commands="recent"))
     assert status["workflow_id"] == "wf_plugin"
     assert status["approvals"][0]["artifact"]["secret_token"] == "[REDACTED]"
     assert "command_history" in status
@@ -186,7 +204,7 @@ def test_dashboard_plugin_api_approval_decision_records_and_resumes(tmp_path, mo
     receipt = run(
         api.decide_approval(
             {
-                "db": "palmer-smoke",
+                "db": "runtime-smoke",
                 "workflow_id": "wf_plugin",
                 "key": "approve_plugin_test",
                 "action": "approve",
@@ -242,7 +260,7 @@ def test_dashboard_plugin_api_approval_decision_loads_project_workflow_ref_befor
     sys.modules.pop("project_flows", None)
     _WORKFLOW_REGISTRY.pop("project_email_ops_workflow", None)
 
-    configure_test_dbs(monkeypatch, tmp_path, {"project-db": str(db)}, dashboard_approver="skylar")
+    configure_test_dbs(monkeypatch, tmp_path, {"project-db": str(db)}, dashboard_approver="operator")
     api = load_dashboard_api()
 
     receipt = run(
@@ -264,7 +282,7 @@ def test_dashboard_plugin_api_approval_decision_loads_project_workflow_ref_befor
 def test_dashboard_plugin_api_rejects_explicit_db_paths(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)}, dashboard_approver="skylar")
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)}, dashboard_approver="operator")
     api = load_dashboard_api()
 
     with pytest.raises(Exception) as excinfo:
@@ -277,14 +295,14 @@ def test_dashboard_plugin_api_rejects_explicit_db_paths(tmp_path, monkeypatch):
 def test_dashboard_approval_requires_server_configured_approver(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()
 
     with pytest.raises(Exception) as excinfo:
         run(
             api.decide_approval(
                 {
-                    "db": "palmer-smoke",
+                    "db": "runtime-smoke",
                     "workflow_id": "wf_plugin",
                     "key": "approve_plugin_test",
                     "action": "approve",
@@ -299,13 +317,13 @@ def test_dashboard_approval_requires_server_configured_approver(tmp_path, monkey
 def test_dashboard_approval_identity_is_server_derived_not_client_supplied(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)}, dashboard_approver="skylar")
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)}, dashboard_approver="operator")
     api = load_dashboard_api()
 
     receipt = run(
         api.decide_approval(
             {
-                "db": "palmer-smoke",
+                "db": "runtime-smoke",
                 "workflow_id": "wf_plugin",
                 "key": "approve_plugin_test",
                 "action": "approve",
@@ -324,11 +342,11 @@ def test_dashboard_approval_identity_is_server_derived_not_client_supplied(tmp_p
     assert receipt["receipt"]["resume_requested"] is True
     assert signal["payload"]["source"] == {
         "kind": "human",
-        "id": "skylar",
+        "id": "operator",
         "channel": "hermes-dashboard",
         "message_id": signal["payload"]["source"]["message_id"],
     }
-    assert signal["payload"]["payload"] == {"action": "approve", "by": "skylar"}
+    assert signal["payload"]["payload"] == {"action": "approve", "by": "operator"}
 
 
 def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_approval_detail(tmp_path, monkeypatch):
@@ -347,13 +365,13 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     configure_test_dbs(
         monkeypatch,
         tmp_path,
-        {"palmer-smoke": str(db)},
-        dashboard_approver="skylar",
+        {"runtime-smoke": str(db)},
+        dashboard_approver="operator",
         workflow_catalog=catalog,
     )
     api = load_dashboard_api()
 
-    definitions = run(api.workflow_definitions(db="palmer-smoke"))
+    definitions = run(api.workflow_definitions(db="runtime-smoke"))
     assert definitions["count"] == 1
     definition = definitions["definitions"][0]
     assert definition["id"] == "plugin-approval"
@@ -364,7 +382,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     launched = run(
         api.run_workflow(
             {
-                "db": "palmer-smoke",
+                "db": "runtime-smoke",
                 "definition_id": "plugin-approval",
                 "input": {},
             }
@@ -377,26 +395,26 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert launched["run"]["workflow_ref"] == "tests.test_hermes_plugin_approvals:plugin_approval_workflow"
     assert str(db) not in json.dumps(launched)
 
-    history = run(api.definition_runs("plugin-approval", db="palmer-smoke"))
+    history = run(api.definition_runs("plugin-approval", db="runtime-smoke"))
     history_ids = [item["workflow_id"] for item in history["runs"]]
     assert launched_workflow_id in history_ids
     assert "wf_plugin" in history_ids
     assert next(item for item in history["runs"] if item["workflow_id"] == launched_workflow_id)["status"] == "waiting"
     assert str(db) not in json.dumps(history)
 
-    status = run(api.run_status(launched_workflow_id, db="palmer-smoke"))
+    status = run(api.run_status(launched_workflow_id, db="runtime-smoke"))
     assert status["run"]["workflow_id"] == launched_workflow_id
     assert status["artifacts"][0]["kind"] == "approval_artifact"
     assert status["artifacts"][0]["preview"]["secret_token"] == "[REDACTED]"
     assert status["artifacts"][0]["artifact_render"]["render"] == "inline-json"
     assert str(db) not in json.dumps(status)
 
-    artifacts = run(api.run_artifacts(launched_workflow_id, db="palmer-smoke"))
+    artifacts = run(api.run_artifacts(launched_workflow_id, db="runtime-smoke"))
     assert artifacts["count"] >= 1
     assert artifacts["artifacts"][0]["workflow_id"] == launched_workflow_id
     assert str(db) not in json.dumps(artifacts)
 
-    approvals = run(api.active_approvals(db="palmer-smoke"))
+    approvals = run(api.active_approvals(db="runtime-smoke"))
     approval = next(item for item in approvals["approvals"] if item["workflow_id"] == launched_workflow_id)
     assert approval["headline"] == "Approve the plugin test packet?"
     assert approval["consequence"] == "Records approve/reject with human provenance, then resumes the trusted local workflow immediately."
@@ -406,7 +424,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert approval["artifact_preview"]["secret_token"] == "[REDACTED]"
     assert str(db) not in json.dumps(approvals)
 
-    detail = run(api.approval_detail(db="palmer-smoke", workflow_id=launched_workflow_id, key="approve_plugin_test"))
+    detail = run(api.approval_detail(db="runtime-smoke", workflow_id=launched_workflow_id, key="approve_plugin_test"))
     assert detail["approval"]["key"] == "approve_plugin_test"
     assert detail["decision_semantics"]["resume"] is True
     assert "resumes the trusted local workflow" in detail["decision_semantics"]["description"]
@@ -415,11 +433,21 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert detail["timeline"][-1]["type"] == "ApprovalRequested"
     assert str(db) not in json.dumps(detail)
 
+    source = run(api.workflow_definition_source("plugin-approval", db="runtime-smoke"))
+    assert source["definition"]["id"] == "plugin-approval"
+    assert source["workflow_ref"] == "tests.test_hermes_plugin_approvals:plugin_approval_workflow"
+    assert source["language"] == "python"
+    assert source["highlight_class"] == "language-python"
+    assert "def plugin_approval_workflow" in source["code"]
+    assert "ctx.approval.request" in source["code"]
+    assert source["location"]["module"] == "tests.test_hermes_plugin_approvals"
+    assert str(db) not in json.dumps(source)
+
 
 def test_dashboard_workflow_catalog_accepts_json_string_from_profile_config(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     catalog = [
         {
             "id": "json-string-smoke",
@@ -455,7 +483,7 @@ def test_dashboard_workflow_catalog_accepts_json_string_from_profile_config(tmp_
     monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
     api = load_dashboard_api()
 
-    definitions = run(api.workflow_definitions(db="palmer-smoke"))
+    definitions = run(api.workflow_definitions(db="runtime-smoke"))
     assert definitions["count"] == 1
     assert definitions["definitions"][0]["id"] == "json-string-smoke"
     assert definitions["definitions"][0]["runnable"] is True
@@ -467,7 +495,7 @@ def test_dashboard_run_launch_rejects_browser_supplied_workflow_id(tmp_path, mon
     configure_test_dbs(
         monkeypatch,
         tmp_path,
-        {"palmer-smoke": str(db)},
+        {"runtime-smoke": str(db)},
         workflow_catalog=[
             {
                 "id": "plugin-approval",
@@ -479,7 +507,7 @@ def test_dashboard_run_launch_rejects_browser_supplied_workflow_id(tmp_path, mon
     api = load_dashboard_api()
 
     with pytest.raises(Exception) as excinfo:
-        run(api.run_workflow({"db": "palmer-smoke", "definition_id": "plugin-approval", "workflow_id": "wf_plugin"}))
+        run(api.run_workflow({"db": "runtime-smoke", "definition_id": "plugin-approval", "workflow_id": "wf_plugin"}))
 
     assert getattr(excinfo.value, "status_code", None) == 400
     assert "workflow_id" in str(getattr(excinfo.value, "detail", excinfo.value))
@@ -488,16 +516,16 @@ def test_dashboard_run_launch_rejects_browser_supplied_workflow_id(tmp_path, mon
 def test_dashboard_inferred_history_definitions_are_not_browser_runnable(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()
 
-    definitions = run(api.workflow_definitions(db="palmer-smoke"))
+    definitions = run(api.workflow_definitions(db="runtime-smoke"))
     inferred = definitions["definitions"][0]
     assert inferred["tags"] == ["inferred"]
     assert inferred["runnable"] is False
 
     with pytest.raises(Exception) as excinfo:
-        run(api.run_workflow({"db": "palmer-smoke", "definition_id": inferred["id"]}))
+        run(api.run_workflow({"db": "runtime-smoke", "definition_id": inferred["id"]}))
 
     assert getattr(excinfo.value, "status_code", None) == 403
     assert "workflow_catalog" in str(getattr(excinfo.value, "detail", excinfo.value))
@@ -515,11 +543,11 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
             "artifact": {
                 "kind": "image",
                 "media_type": "image/png",
-                "path": "/Users/skylarpayne/private/generated.png",
+                "path": "/Users/operatorpayne/private/generated.png",
                 "caption": "Generated preview",
             },
         },
-        db_alias="palmer-smoke",
+        db_alias="runtime-smoke",
     )
 
     assert card["artifact_render"] == {
@@ -528,16 +556,16 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
         "persisted": "workflow_history",
         "servable_by_dashboard": False,
         "media_type": "image/png",
-        "reference": {"type": "local_path", "field": "path", "href": "/Users/skylarpayne/private/generated.png"},
+        "reference": {"type": "local_path", "field": "path", "href": "/Users/operatorpayne/private/generated.png"},
         "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
     }
-    assert card["artifact_preview"]["path"] == "/Users/skylarpayne/private/generated.png"
-    assert "/Users/skylarpayne/private/generated.png" in json.dumps(card)
+    assert card["artifact_preview"]["path"] == "/Users/operatorpayne/private/generated.png"
+    assert "/Users/operatorpayne/private/generated.png" in json.dumps(card)
 
-    assert api._redact_artifact_local_refs("/Users/skylar/private.png") == "/Users/skylar/private.png"
-    assert api._redact_artifact_local_refs({"kind": "image", "uri": "/Users/skylar/private.png"})["uri"] == "/Users/skylar/private.png"
+    assert api._redact_artifact_local_refs("/Users/operator/private.png") == "/Users/operator/private.png"
+    assert api._redact_artifact_local_refs({"kind": "image", "uri": "/Users/operator/private.png"})["uri"] == "/Users/operator/private.png"
     assert api._redact_artifact_local_refs({"kind": "file", "href": "../private/report.pdf"})["href"] == "../private/report.pdf"
-    assert api._redact_artifact_local_refs({"url": "file:///Users/skylar/private.mov"})["url"] == "file:///Users/skylar/private.mov"
+    assert api._redact_artifact_local_refs({"url": "file:///Users/operator/private.mov"})["url"] == "file:///Users/operator/private.mov"
 
     audio = api._artifact_descriptor({"kind": "audio", "url": "https://example.invalid/review.mp3", "media_type": "audio/mpeg"})
     assert audio["kind"] == "audio"
@@ -545,10 +573,46 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
     assert audio["reference"] == {"type": "url", "href": "https://example.invalid/review.mp3"}
 
 
+def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    artifact = {
+        "kind": "file",
+        "path": "/tmp/workflows-private/generated.png",
+        "summary": "Generated preview",
+    }
+    WorkflowEngine(db).run_until_idle(
+        dashboard_path_artifact_workflow,
+        {"artifact": artifact},
+        workflow_id="wf_dag",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_path_artifact_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    dag = run(api.run_dag("wf_dag", db="runtime-smoke"))
+
+    assert dag["workflow_id"] == "wf_dag"
+    assert dag["layout"] == "linear-event-dag"
+    assert dag["artifact_count"] >= 1
+    step_node = next(node for node in dag["nodes"] if node["id"] == "step:dashboard_path_artifact_step:0")
+    assert step_node["kind"] == "step"
+    assert step_node["status"] == "completed"
+    assert step_node["artifact_count"] == 1
+    assert step_node["artifacts"][0]["kind"] == "step_output"
+    assert step_node["artifacts"][0]["source"]["key"] == "step:dashboard_path_artifact_step:0"
+    assert step_node["artifacts"][0]["artifact_render"]["render"] == "inline-json"
+    approval_node = next(node for node in dag["nodes"] if node["id"] == "approval:approve_path_artifact")
+    assert approval_node["kind"] == "approval"
+    assert approval_node["status"] == "waiting"
+    assert any(edge["from"] == "workflow:start" and edge["to"] == "step:dashboard_path_artifact_step:0" for edge in dag["edges"])
+    assert any(edge["to"] == "approval:approve_path_artifact" for edge in dag["edges"])
+    assert str(db) not in json.dumps(dag)
+
+
 def test_dashboard_email_ops_review_artifacts_do_not_expose_future_approval_queue():
     api = load_dashboard_api()
     legacy_packet = {
-        "kind": "palmer_email_ops_packet",
+        "kind": "email_ops_packet",
         "mode": "dry_run",
         "summary": {"total_items": 1, "draft_artifacts": 1, "entity_proposals": 1},
         "items": [{"handle": "gmail:ops:001", "safe_summary": "Needs reply"}],
@@ -558,7 +622,7 @@ def test_dashboard_email_ops_review_artifacts_do_not_expose_future_approval_queu
         "archive_candidates": [{"source_handle": "gmail:ops:001"}],
         "approval_queue": [
             {"approval_kind": "email_draft_send", "risk": "external email send"},
-            {"approval_kind": "entity_graph_writeback", "risk": "canonical Skyvault edits"},
+            {"approval_kind": "entity_graph_writeback", "risk": "canonical knowledge-base edits"},
         ],
         "side_effect_ledger": {"gmail_sent": 0},
     }
@@ -566,12 +630,12 @@ def test_dashboard_email_ops_review_artifacts_do_not_expose_future_approval_queu
     card = api._approval_card(
         {
             "workflow_id": "wf_email_ops",
-            "workflow_ref": "palmer_workflows.email_ops:palmer_email_ops_workflow",
-            "key": "palmer_email_ops_dry_run_review",
-            "prompt": "Review Palmer email ops dry-run packet?",
+            "workflow_ref": "project_workflows.email_ops:email_ops_workflow",
+            "key": "email_ops_dry_run_review",
+            "prompt": "Review email ops dry-run packet?",
             "artifact": legacy_packet,
         },
-        db_alias="Palmer workflows",
+        db_alias="Project workflows",
     )
 
     preview = card["artifact_preview"]
@@ -598,8 +662,8 @@ def test_dashboard_email_draft_approval_preview_hides_internal_atomic_flag():
     card = api._approval_card(
         {
             "workflow_id": "wf_email_draft",
-            "workflow_ref": "palmer_workflows.email_ops:palmer_email_ops_workflow",
-            "key": "palmer_email_ops:draft_send:gmail:ops:001:abc",
+            "workflow_ref": "automation-agent_workflows.email_ops:automation-agent_email_ops_workflow",
+            "key": "automation-agent_email_ops:draft_send:gmail:ops:001:abc",
             "prompt": "Approve this one email draft?",
             "artifact": {
                 "kind": "email_draft_send_approval",
@@ -620,7 +684,7 @@ def test_dashboard_email_draft_approval_preview_hides_internal_atomic_flag():
                 },
             },
         },
-        db_alias="Palmer workflows",
+        db_alias="Workflow runtime",
     )
 
     preview = card["artifact_preview"]
@@ -637,9 +701,9 @@ def test_dashboard_status_detail_and_overview_keep_local_artifact_paths_visible(
     artifact = {
         "kind": "image",
         "media_type": "image/png",
-        "uri": "/Users/skylar/private/generated.png",
+        "uri": "/Users/operator/private/generated.png",
         "href": "../private/report.pdf",
-        "nested": ["/Users/skylar/private/nested.wav", {"url": "file:///Users/skylar/private/video.mov"}],
+        "nested": ["/Users/operator/private/nested.wav", {"url": "file:///Users/operator/private/video.mov"}],
     }
     WorkflowEngine(db).run_until_idle(
         dashboard_path_artifact_workflow,
@@ -647,28 +711,28 @@ def test_dashboard_status_detail_and_overview_keep_local_artifact_paths_visible(
         workflow_id="wf_dashboard_path_artifact",
         workflow_ref="tests.test_dashboard_plugin:dashboard_path_artifact_workflow",
     )
-    configure_test_dbs(monkeypatch, tmp_path, {"palmer-smoke": str(db)})
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()
 
     responses = [
-        run(api.run_status("wf_dashboard_path_artifact", db="palmer-smoke", commands="all", recent_events=100)),
-        run(api.approval_detail(db="palmer-smoke", workflow_id="wf_dashboard_path_artifact", key="approve_path_artifact")),
-        run(api.overview(db="palmer-smoke", recent_events=100, command_limit=20, command_payload_chars=5000)),
-        run(api.active_approvals(db="palmer-smoke")),
+        run(api.run_status("wf_dashboard_path_artifact", db="runtime-smoke", commands="all", recent_events=100)),
+        run(api.approval_detail(db="runtime-smoke", workflow_id="wf_dashboard_path_artifact", key="approve_path_artifact")),
+        run(api.overview(db="runtime-smoke", recent_events=100, command_limit=20, command_payload_chars=5000)),
+        run(api.active_approvals(db="runtime-smoke")),
     ]
     combined = json.dumps(responses, sort_keys=True)
 
     for visible in (
-        "/Users/skylar/private/generated.png",
+        "/Users/operator/private/generated.png",
         "../private/report.pdf",
-        "/Users/skylar/private/nested.wav",
-        "file:///Users/skylar/private/video.mov",
-        "/Users/skylar/private/generated-copy.png",
+        "/Users/operator/private/nested.wav",
+        "file:///Users/operator/private/video.mov",
+        "/Users/operator/private/generated-copy.png",
     ):
         assert visible in combined
     assert "[REDACTED_LOCAL_PATH]" not in combined
     detail = responses[1]
-    assert detail["what_you_are_approving"]["artifact"]["uri"] == "/Users/skylar/private/generated.png"
+    assert detail["what_you_are_approving"]["artifact"]["uri"] == "/Users/operator/private/generated.png"
     assert detail["approval"]["artifact"]["href"] == "../private/report.pdf"
 
 

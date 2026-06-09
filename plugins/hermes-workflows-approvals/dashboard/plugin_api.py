@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import mimetypes
 import os
@@ -58,7 +59,7 @@ def _workflow_project_root_for_db(db_path: str | Path) -> Path | None:
 def _ensure_workflow_project_on_path(db_path: str | Path) -> Path | None:
     """Make project-local workflow modules importable for trusted resume.
 
-    Palmer/Echo workflow projects keep state in <project>/.hermes/workflows.sqlite
+    Workflow projects often keep state in <project>/.hermes/workflows.sqlite
     while workflow modules live under <project>. The dashboard process may be
     launched from Hermes or the runtime repo, so raw engine resume can otherwise
     see the DB row but fail to import the stored workflow_ref.
@@ -122,14 +123,19 @@ def _redact_artifact_local_refs(value: Any) -> Any:
 def _operator_approval_artifact(value: Any) -> Any:
     """Shape approval artifacts around the one decision being requested.
 
-    Older Palmer email-ops dry-run approvals persisted the full workflow packet,
+    Older workflow dry-run approvals sometimes persist the full workflow packet,
     including an internal `approval_queue` for possible future actions. Rendering
     that field inside an approval card makes it look like the current approval is
     a bundled send/archive/writeback decision. Normalize that legacy packet into
     the same single-review artifact future workflow runs emit.
     """
 
-    if isinstance(value, dict) and value.get("kind") == "palmer_email_ops_packet" and "approval_queue" in value:
+    if (
+        isinstance(value, dict)
+        and "approval_queue" in value
+        and isinstance(value.get("summary"), dict)
+        and isinstance(value.get("items"), list)
+    ):
         summary = dict(value.get("summary") or {})
         return {
             "kind": "email_ops_dry_run_review",
@@ -439,6 +445,166 @@ def _definition_payload(definition: dict[str, Any], engine: WorkflowEngine) -> d
     return {**definition, "runs": _run_counts(runs), "latest_run": latest}
 
 
+def _relative_source_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    source_path = Path(path).expanduser().resolve()
+    for root in (Path.cwd().resolve(),):
+        try:
+            return str(source_path.relative_to(root))
+        except ValueError:
+            continue
+    return source_path.name
+
+
+def _workflow_source_payload(definition: dict[str, Any]) -> dict[str, Any]:
+    workflow_ref = str(definition["workflow_ref"])
+    workflow = _load_workflow(workflow_ref)
+    try:
+        lines, line_start = inspect.getsourcelines(workflow)
+    except (OSError, TypeError) as exc:
+        raise HTTPException(status_code=404, detail=f"Workflow source is not inspectable: {workflow_ref}") from exc
+    module_name, attr = workflow_ref.split(":", 1)
+    source_file = inspect.getsourcefile(workflow) or inspect.getfile(workflow)
+    code = "".join(lines)
+    return {
+        "definition": definition,
+        "workflow_ref": workflow_ref,
+        "language": "python",
+        "highlight_class": "language-python",
+        "code": code,
+        "location": {
+            "module": module_name,
+            "attribute": attr,
+            "file": _relative_source_path(source_file),
+            "line_start": line_start,
+            "line_end": line_start + len(lines) - 1,
+        },
+        "runtime_semantics": _runtime_semantics(),
+    }
+
+
+def _approval_node_id(key: str) -> str | None:
+    if not key:
+        return None
+    return key if key.startswith("approval:") else f"approval:{key}"
+
+
+def _dag_node_id_for_event(event: dict[str, Any]) -> str | None:
+    event_type = str(event.get("type") or "")
+    payload = event.get("payload") or {}
+    key = str(payload.get("key") or event.get("key") or "")
+    if event_type == "WorkflowStarted":
+        return "workflow:start"
+    if event_type in {"StepRequested", "StepCompleted"}:
+        return key or None
+    if event_type == "ApprovalRequested":
+        return _approval_node_id(key)
+    if event_type == "SignalReceived":
+        return f"signal:{key}"
+    if event_type == "WorkflowCompleted":
+        return "workflow:completed"
+    if event_type == "WorkflowFailed":
+        return "workflow:failed"
+    if event_type == "WorkflowCancelled":
+        return "workflow:cancelled"
+    return None
+
+
+def _dag_node_kind(event_type: str) -> str:
+    if event_type.startswith("Step"):
+        return "step"
+    if event_type == "ApprovalRequested":
+        return "approval"
+    if event_type == "SignalReceived":
+        return "signal"
+    return "workflow"
+
+
+def _dag_node_status(event_type: str, existing: str | None = None) -> str:
+    if event_type == "StepRequested":
+        return existing or "requested"
+    if event_type == "StepCompleted":
+        return "completed"
+    if event_type == "ApprovalRequested":
+        return "waiting"
+    if event_type == "SignalReceived":
+        return "received"
+    if event_type == "WorkflowCompleted":
+        return "completed"
+    if event_type == "WorkflowFailed":
+        return "failed"
+    if event_type == "WorkflowCancelled":
+        return "cancelled"
+    if event_type == "WorkflowStarted":
+        return "started"
+    return existing or "recorded"
+
+
+def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
+    source = artifact.get("source") or {}
+    key = source.get("key")
+    if not key:
+        if source.get("event") == "WorkflowCompleted":
+            return "workflow:completed"
+        return None
+    if artifact.get("kind") == "approval_artifact":
+        return f"approval:{key}"
+    return str(key)
+
+
+def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    previous_id: str | None = None
+    for event in status.get("events") or status.get("recent_events") or []:
+        node_id = _dag_node_id_for_event(event)
+        if not node_id:
+            continue
+        event_type = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        node = nodes.get(node_id)
+        if node is None:
+            node = {
+                "id": node_id,
+                "kind": _dag_node_kind(event_type),
+                "label": payload.get("step_name") or event.get("key") or event_type,
+                "status": _dag_node_status(event_type),
+                "first_seq": event.get("seq"),
+                "last_seq": event.get("seq"),
+                "event_types": [event_type],
+                "artifacts": [],
+                "artifact_count": 0,
+            }
+            nodes[node_id] = node
+        else:
+            node["status"] = _dag_node_status(event_type, str(node.get("status") or ""))
+            node["last_seq"] = event.get("seq")
+            if event_type not in node["event_types"]:
+                node["event_types"].append(event_type)
+            if payload.get("step_name"):
+                node["label"] = payload.get("step_name")
+        if previous_id and previous_id != node_id and not any(edge["from"] == previous_id and edge["to"] == node_id for edge in edges):
+            edges.append({"from": previous_id, "to": node_id})
+        previous_id = node_id
+    for artifact in artifacts:
+        node_id = _artifact_node_id(artifact)
+        if node_id and node_id in nodes:
+            nodes[node_id]["artifacts"].append(artifact)
+    for node in nodes.values():
+        node["artifact_count"] = len(node["artifacts"])
+    return {
+        "workflow_id": status.get("workflow_id"),
+        "run": status,
+        "layout": "linear-event-dag",
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+        "runtime_semantics": _runtime_semantics(),
+    }
+
+
 def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
     authority = approval.get("authority")
     artifact = approval.get("artifact")
@@ -575,6 +741,15 @@ async def definition_runs(
     return {"db_alias": db_alias, "definition": definition, "count": len(runs), "runs": runs, "runtime_semantics": _runtime_semantics()}
 
 
+@router.get("/definitions/{definition_id}/source")
+async def workflow_definition_source(definition_id: str, db: str | None = None) -> dict[str, Any]:
+    db_alias, db_path = _resolve_dashboard_db(db)
+    engine = WorkflowEngine(db_path, read_only=True)
+    definition = _definition_by_id(definition_id, engine)
+    _ensure_workflow_project_on_path(db_path)
+    return {"db_alias": db_alias, **_workflow_source_payload(definition)}
+
+
 @router.post("/runs")
 async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
@@ -656,6 +831,19 @@ async def run_artifacts(workflow_id: str, db: str | None = None, recent_events: 
     status = await run_status(workflow_id, db=db, recent_events=recent_events, commands="all", command_limit=100, command_payload_chars=5000)
     artifacts = status["artifacts"]
     return {"db_alias": status["db_alias"], "workflow_id": workflow_id, "count": len(artifacts), "artifacts": artifacts, "runtime_semantics": _runtime_semantics()}
+
+
+@router.get("/runs/{workflow_id}/dag")
+async def run_dag(workflow_id: str, db: str | None = None, recent_events: int = 200) -> dict[str, Any]:
+    status = await run_status(
+        workflow_id,
+        db=db,
+        recent_events=recent_events,
+        commands="all",
+        command_limit=200,
+        command_payload_chars=5000,
+    )
+    return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"])}
 
 
 @router.get("/approvals")

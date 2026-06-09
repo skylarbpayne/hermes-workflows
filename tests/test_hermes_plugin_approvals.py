@@ -29,7 +29,7 @@ async def plugin_approval_workflow(ctx, inputs):
             "summary": "Plugin approval packet",
             "secret_token": "should-not-leak",
         },
-        approver="human:skylar",
+        approver="human:operator",
         allowed=["approve", "reject"],
         authority={"scope": "plugin-test"},
     )
@@ -183,7 +183,7 @@ def test_workflow_approval_decide_defaults_to_resume_false(tmp_path):
                 "workflow_id": "wf_plugin",
                 "key": "approve_plugin_test",
                 "action": "approve",
-                "by": "skylar",
+                "by": "operator",
                 "channel": "discord",
                 "message_id": "msg-123",
             }
@@ -214,7 +214,7 @@ def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path)
                 "workflow_id": "wf_plugin",
                 "key": "approve_plugin_test",
                 "action": "approve",
-                "by": "skylar",
+                "by": "operator",
                 "channel": "cli",
                 "message_id": "manual-1",
                 "resume": True,
@@ -231,8 +231,8 @@ def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path)
 class FakeSource:
     platform: Any = "discord"
     chat_id: str = "chat-42"
-    user_id: str = "skylar"
-    user_name: str = "Skylar Payne"
+    user_id: str = "operator"
+    user_name: str = "Operator"
     message_id: str = "msg-456"
 
 
@@ -352,8 +352,8 @@ def test_terminal_workflow_rejects_conflicting_late_approval_decision(tmp_path):
             workflow_id="wf_plugin",
             key="approve_plugin_test",
             action="approve",
-            by="skylar",
-            source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-approve"},
+            by="operator",
+            source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-approve"},
             idempotency_key="approval:approve",
         ),
         resume=True,
@@ -365,8 +365,8 @@ def test_terminal_workflow_rejects_conflicting_late_approval_decision(tmp_path):
                 workflow_id="wf_plugin",
                 key="approve_plugin_test",
                 action="reject",
-                by="skylar",
-                source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-reject"},
+                by="operator",
+                source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-reject"},
                 idempotency_key="approval:reject",
             ),
             resume=True,
@@ -384,8 +384,8 @@ def test_cancelled_workflow_rejects_conflicting_late_recorded_approval_decision(
             workflow_id="wf_plugin",
             key="approve_plugin_test",
             action="approve",
-            by="skylar",
-            source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-approve"},
+            by="operator",
+            source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-approve"},
             idempotency_key="approval:approve",
         ),
         resume=False,
@@ -398,8 +398,8 @@ def test_cancelled_workflow_rejects_conflicting_late_recorded_approval_decision(
                 workflow_id="wf_plugin",
                 key="approve_plugin_test",
                 action="reject",
-                by="skylar",
-                source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-reject"},
+                by="operator",
+                source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-reject"},
                 idempotency_key="approval:reject",
             ),
             resume=False,
@@ -423,8 +423,8 @@ def test_approval_decision_signal_is_schema_unique_per_workflow_and_key(tmp_path
     payload = {
         "signal_type": "approval.decision",
         "key": "approve_plugin_test",
-        "payload": {"action": "approve", "by": "skylar"},
-        "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_id": "msg-1"},
+        "payload": {"action": "approve", "by": "operator"},
+        "source": {"kind": "human", "id": "operator", "channel": "discord", "message_id": "msg-1"},
     }
 
     with sqlite3.connect(db) as con:
@@ -455,7 +455,7 @@ def test_approval_decision_signal_is_schema_unique_per_workflow_and_key(tmp_path
                     100,
                     "SignalReceived",
                     "signal:approval.decision:approve_plugin_test",
-                    JsonCodec.dumps({**payload, "payload": {"action": "reject", "by": "skylar"}}),
+                    JsonCodec.dumps({**payload, "payload": {"action": "reject", "by": "operator"}}),
                     "approval:two",
                     2,
                 ),

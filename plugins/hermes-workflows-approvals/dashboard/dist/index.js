@@ -314,9 +314,75 @@
     return frame(e("aside", { className: "hwf-approval-detail", role: "dialog", "aria-modal": "true", onClick: function (event) { event.stopPropagation(); } }, header, body));
   }
 
+  function PythonCode(props) {
+    const code = props.code || "";
+    const parts = [];
+    const pattern = /(#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:async|await|def|class|return|if|elif|else|for|while|try|except|finally|with|from|import|as|raise|yield|True|False|None|and|or|not|in|is)\b)/g;
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(code))) {
+      if (match.index > last) parts.push(code.slice(last, match.index));
+      const token = match[0];
+      let className = "hwf-code-keyword";
+      if (token.startsWith("#")) className = "hwf-code-comment";
+      else if (token.startsWith("\"") || token.startsWith("'")) className = "hwf-code-string";
+      parts.push(e("span", { key: parts.length, className: className }, token));
+      last = match.index + token.length;
+    }
+    if (last < code.length) parts.push(code.slice(last));
+    return e("code", { className: props.className || "language-python" }, parts);
+  }
+
+  function WorkflowSourceModal(props) {
+    const dialogRef = hooks.useRef(null);
+    const source = useJSON(API + "/definitions/" + encodeURIComponent(props.definition.id) + "/source" + qs({ db: props.db }), props.definition.id + ":source");
+    function closeDialog() {
+      const node = dialogRef.current;
+      if (node && node.open && typeof node.close === "function") {
+        try { node.returnValue = "closed"; node.close("closed"); } catch (_err) { /* noop */ }
+      }
+      props.onClose();
+    }
+    hooks.useEffect(function () {
+      const node = dialogRef.current;
+      if (!node) return;
+      if (typeof node.showModal === "function" && !node.open) {
+        try { node.showModal(); } catch (_err) { node.setAttribute("open", ""); }
+      } else if (!node.open) {
+        node.setAttribute("open", "");
+      }
+      return function () {
+        if (node.open && typeof node.close === "function") {
+          try { node.close("component-unmount"); } catch (_err) { /* noop */ }
+        }
+      };
+    }, []);
+    const data = source.data || {};
+    const location = data.location || {};
+    return e("dialog", {
+      ref: dialogRef,
+      className: "hwf-approval-dialog",
+      onCancel: function (event) { event.preventDefault(); closeDialog(); },
+      onClick: function (event) { if (event.target === event.currentTarget) closeDialog(); }
+    }, e("aside", { className: "hwf-approval-detail", role: "dialog", "aria-modal": "true", onClick: function (event) { event.stopPropagation(); } },
+      e("div", { className: "hwf-detail-header" },
+        e("div", null,
+          e("p", { className: "hwf-eyebrow" }, "Workflow source"),
+          e("h2", null, props.definition.name || props.definition.id),
+          e("p", { className: "hwf-muted" }, location.file ? location.file + ":" + location.line_start + "-" + location.line_end : props.definition.workflow_ref)),
+        e(Button, { className: "hwf-close-button", variant: "outline", onClick: closeDialog }, "Close")),
+      e("div", { className: "hwf-approval-detail-body" },
+        source.loading && e("p", null, "Loading workflow source…"),
+        source.error && e("p", { className: "hwf-bad" }, source.error),
+        data.code && e("pre", { className: "hwf-code-block" }, e(PythonCode, { className: data.highlight_class || "language-python", code: data.code })))));
+  }
+
   function DefinitionCard(props) {
     const definition = props.definition;
     const useState = hooks.useState;
+    const sourceState = useState(false);
+    const showSource = sourceState[0];
+    const setShowSource = sourceState[1];
     const inputState = useState(pretty(definition.input_defaults || {}));
     const inputText = inputState[0];
     const setInputText = inputState[1];
@@ -346,9 +412,11 @@
         e("div", null,
           e(CardTitle, null, definition.name || definition.id),
           e("p", { className: "hwf-muted" }, definition.description || definition.workflow_ref)),
-        e("div", { className: "hwf-row-actions" }, canRun
-          ? e(Button, { disabled: runUi.busy, onClick: runWorkflow }, definition.run_button_label || "Run workflow")
-          : e(Pill, { label: "history only" }))),
+        e("div", { className: "hwf-row-actions" },
+          e(Button, { variant: "outline", onClick: function () { setShowSource(true); } }, "View code"),
+          canRun
+            ? e(Button, { disabled: runUi.busy, onClick: runWorkflow }, definition.run_button_label || "Run workflow")
+            : e(Pill, { label: "history only" }))),
       e(CardContent, null,
         e("div", { className: "hwf-meta" },
           e(Pill, { label: "runs: " + runs.total }),
@@ -374,7 +442,8 @@
           e("pre", null, pretty(definition.input_schema))),
         e("details", null,
           e("summary", null, "Run history"),
-          definition.latest_run ? e("p", null, "Latest: ", e("code", null, definition.latest_run.workflow_id), " ", e(Pill, { label: definition.latest_run.status, className: statusClass(definition.latest_run.status) })) : e("p", { className: "hwf-muted" }, "No runs yet."))));
+          definition.latest_run ? e("p", null, "Latest: ", e("code", null, definition.latest_run.workflow_id), " ", e(Pill, { label: definition.latest_run.status, className: statusClass(definition.latest_run.status) })) : e("p", { className: "hwf-muted" }, "No runs yet.")),
+        showSource && e(WorkflowSourceModal, { db: props.db, definition: definition, onClose: function () { setShowSource(false); } })));
   }
 
   function RunApprovalSummary(props) {
@@ -386,6 +455,45 @@
       e("div", { className: "hwf-meta" },
         e(Pill, { label: approval.status || "waiting", className: statusClass(approval.status || "waiting") }),
         approval.key && e(Pill, { label: "key: " + approval.key })));
+  }
+
+  function RunDag(props) {
+    const selectedState = hooks.useState(null);
+    const selectedDagNode = selectedState[0];
+    const setSelectedDagNode = selectedState[1];
+    const dag = useJSON(API + "/runs/" + encodeURIComponent(props.workflowId) + "/dag" + qs({ db: props.db }), props.workflowId + ":dag:" + props.refreshKey);
+    if (dag.loading) return e("p", { className: "hwf-muted" }, "Loading Run DAG…");
+    if (dag.error) return e("p", { className: "hwf-bad" }, dag.error);
+    const data = dag.data || {};
+    const nodes = data.nodes || [];
+    const selected = selectedDagNode || nodes[0] || null;
+    const edgesByTarget = {};
+    (data.edges || []).forEach(function (edge) { edgesByTarget[edge.to] = edge.from; });
+    return e("div", { className: "hwf-dag" },
+      e("div", { className: "hwf-dag-strip" }, nodes.map(function (node) {
+        return e("button", {
+          key: node.id,
+          type: "button",
+          className: "hwf-dag-node " + (selected && selected.id === node.id ? "hwf-dag-node-selected" : ""),
+          onClick: function () { setSelectedDagNode(node); },
+          title: node.id
+        },
+          e("span", { className: "hwf-dag-kind" }, node.kind),
+          e("strong", null, shortId(node.label || node.id)),
+          e("span", { className: statusClass(node.status) }, node.status || "recorded"),
+          node.artifact_count ? e("span", { className: "hwf-muted" }, node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s")) : null,
+          edgesByTarget[node.id] && e("small", { className: "hwf-muted" }, "after " + shortId(edgesByTarget[node.id])));
+      })),
+      selected && e("div", { className: "hwf-dag-inspector" },
+        e("div", { className: "hwf-section-title" }, "Selected piece"),
+        e("div", { className: "hwf-meta" },
+          e(Pill, { label: selected.kind || "node" }),
+          e(Pill, { label: selected.status || "recorded", className: statusClass(selected.status) }),
+          e("code", { className: "hwf-run-id", title: selected.id }, shortId(selected.id))),
+        e("div", { className: "hwf-section-title" }, "Artifacts from this step"),
+        selected.artifacts && selected.artifacts.length ? selected.artifacts.map(function (artifact) {
+          return e(ArtifactCard, { key: artifact.id, artifact: artifact });
+        }) : e("p", { className: "hwf-muted" }, "No artifacts captured for this piece yet.")));
   }
 
   function RunRow(props) {
@@ -428,6 +536,8 @@
               e(Pill, { label: "events: " + status.data.run.event_count }),
               e(Pill, { label: "artifacts: " + status.data.artifacts.length }),
               e("code", { className: "hwf-run-id", title: status.data.run.workflow_id }, shortId(status.data.run.workflow_id))),
+            e("div", { className: "hwf-section-title" }, "Run DAG"),
+            e(RunDag, { db: props.db, workflowId: selected.workflow_id, refreshKey: props.refreshKey }),
             e("div", { className: "hwf-section-title" }, "Approvals in this run"),
             (status.data.run.approvals || []).length ? (status.data.run.approvals || []).map(function (approval) {
               return e(RunApprovalSummary, { key: approval.key, approval: approval });

@@ -414,6 +414,77 @@
   font-size: 0.78rem;
 }
 
+.hwf-code-block {
+  max-height: 70vh;
+  overflow: auto;
+  white-space: pre;
+}
+
+.hwf-code-block code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.hwf-code-keyword {
+  color: #c084fc;
+  font-weight: 700;
+}
+
+.hwf-code-string {
+  color: #86efac;
+}
+
+.hwf-code-comment {
+  color: var(--color-muted-foreground);
+  font-style: italic;
+}
+
+.hwf-dag {
+  display: grid;
+  gap: 1rem;
+}
+
+.hwf-dag-strip {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+}
+
+.hwf-dag-node {
+  flex: 0 0 min(14rem, 70vw);
+  display: grid;
+  gap: 0.35rem;
+  text-align: left;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--hwf-surface);
+  color: inherit;
+  padding: 0.75rem;
+  cursor: pointer;
+}
+
+.hwf-dag-node-selected {
+  border-color: var(--color-primary, #6d7cff);
+  box-shadow: inset 0 0 0 1px var(--color-primary, #6d7cff);
+}
+
+.hwf-dag-kind {
+  color: var(--color-muted-foreground);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 800;
+}
+
+.hwf-dag-inspector {
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-lg, 0.75rem);
+  padding: 1rem;
+  background: var(--hwf-surface);
+}
+
 .hwf-approval-dialog {
   width: min(72rem, calc(100vw - 2rem));
   max-height: calc(100vh - 2rem);
