@@ -35,7 +35,8 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     repo.mkdir()
     init_repo(repo)
     (repo / "README.md").write_text("# Demo\n\nCoding workflow dogfood.\n")
-    run(["git", "add", "README.md"], repo)
+    (repo / "demo.py").write_text("VALUE = 1\n")
+    run(["git", "add", "README.md", "demo.py"], repo)
     subprocess.run(
         ["git", "commit", "-m", "add readme"],
         cwd=repo,
@@ -55,8 +56,18 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     engine = WorkflowEngine(db)
     inputs = {
         "repo_path": str(repo),
-        "goal": "Add dashboard workflow DAG source loading regression",
-        "verification_commands": ["python -m py_compile demo.py"],
+        "goal": "Change demo module VALUE from 1 to 2",
+        "verification_commands": ["python -m py_compile demo.py", "python -c 'import demo; assert demo.VALUE == 2'"],
+        "before_after": {
+            "before": "demo.VALUE is 1 in demo.py before implementation.",
+            "after": "demo.VALUE is 2 after implementation, and importing demo confirms the value.",
+        },
+        "implementation_steps": [
+            "Open demo.py and change the configured VALUE constant from 1 to 2.",
+            "Run py_compile and a tiny import/value check.",
+            "Leave the diff for the evidence packet after approval.",
+        ],
+        "non_goals": ["Do not touch package/runtime/dashboard files in this demo."],
         "plan_path": str(tmp_path / "coding-plan.md"),
         "evidence_path": str(tmp_path / "coding-evidence.md"),
         "review_packet_path": str(tmp_path / "coding-review.md"),
@@ -75,10 +86,31 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert first.waiting_on == "signal:approval.decision:approve_coding_plan"
     plan = (tmp_path / "coding-plan.md").read_text()
     assert "# Coding workflow plan" in plan
-    assert "Add dashboard workflow DAG" in plan
+    assert "Change demo module VALUE" in plan
     assert "approve_coding_plan" in plan
     assert "handoff.completed:coding_ready" in plan
     assert "approve_coding_review" in plan
+    assert "## Before / after" in plan
+    assert "## Concrete implementation steps" in plan
+    assert "## Dashboard preview" in plan
+    assert "## Non-goals" in plan
+    assert "## Rollback / stop conditions" in plan
+    assert "demo.VALUE is 1" in plan
+    assert "demo.VALUE is 2" in plan
+    assert "Do not touch package/runtime/dashboard files" in plan
+    assert "No source files will be modified before this approval is recorded." in plan
+    approval = engine.get_approval("wf_coding", "approve_coding_plan")
+    assert approval.artifact["kind"] == "markdown"
+    assert approval.artifact["render"] == "inline-markdown"
+    assert approval.artifact["markdown"] == plan
+    assert approval.artifact["summary"].startswith("Approve a concrete coding plan")
+    assert approval.artifact["sections"]["before_after"]["before"]
+    assert approval.artifact["sections"]["examples"]
+    assert approval.artifact["sections"]["visuals"][0]["type"] == "flow"
+    assert approval.artifact["sections"]["non_goals"] == ["Do not touch package/runtime/dashboard files in this demo."]
+    assert approval.artifact["sections"]["rollback"]
+
+    assert run(["git", "status", "--short"], repo).stdout.strip() == ""
 
     after_plan = WorkflowEngine(db).signal(
         "wf_coding",
@@ -91,7 +123,7 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert after_plan.status == "waiting"
     assert after_plan.waiting_on == "signal:handoff.completed:coding_ready"
 
-    (repo / "demo.py").write_text("VALUE = 1\n")
+    (repo / "demo.py").write_text("VALUE = 2\n")
     after_ready = WorkflowEngine(db).signal(
         "wf_coding",
         "handoff.completed",

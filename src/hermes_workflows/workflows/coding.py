@@ -28,6 +28,12 @@ class CodingWorkflowInput(TypedDict, total=False):
     commit: bool
     push: bool
     commit_message: str
+    before_after: Dict[str, str]
+    implementation_steps: List[str]
+    examples: List[Dict[str, str]]
+    visuals: List[Dict[str, Any]]
+    non_goals: List[str]
+    rollback: List[str]
 
 
 class CodingWorkflowResult(TypedDict, total=False):
@@ -140,21 +146,63 @@ async def coding_write_plan(ctx, inputs: Dict[str, Any], repo: Dict[str, Any]) -
         "The workflow records an external implementation handoff and waits for handoff.completed:coding_ready before collecting diff/evidence.",
         "The review packet is approved before the workflow reports ready=true or commits/pushes.",
     ]
+    before_after = inputs.get("before_after") or {
+        "before": "The workflow is at repo inspection only: no source files have been modified by this run, and implementation is still gated on approve_coding_plan.",
+        "after": f"A scoped change satisfies `{goal}`, evidence is collected, and approve_coding_review gates the final ready=true report.",
+    }
+    implementation_steps = inputs.get("implementation_steps") or [
+        "Confirm the working tree still matches the repo context captured below.",
+        "Make only the files needed for the stated goal; do not bundle opportunistic cleanup.",
+        "Run the verification commands exactly as listed and keep their output for the evidence packet.",
+        "Signal handoff.completed:coding_ready with a short summary and artifact/diff pointers.",
+    ]
+    examples = inputs.get("examples") or [
+        {
+            "case": "approved path",
+            "input": "approve_coding_plan = approve",
+            "expected": "implementation handoff opens; evidence and review approval are required before completion",
+        },
+        {
+            "case": "rejected path",
+            "input": "approve_coding_plan = reject/edit/rerun",
+            "expected": "workflow stops or loops without source changes from this workflow stage",
+        },
+    ]
+    visuals = inputs.get("visuals") or [
+        {
+            "type": "flow",
+            "title": "approval-gated coding flow",
+            "nodes": [
+                "inspect repo",
+                "approve plan",
+                "implement after approval",
+                "collect diff + evidence",
+                "approve review",
+                "ready/land",
+            ],
+        }
+    ]
+    non_goals = inputs.get("non_goals") or [
+        "Do not modify files outside the stated repo scope.",
+        "Do not commit, push, publish, or schedule anything unless those authorities are explicitly enabled in the workflow input and review is approved.",
+        "Do not use the plan artifact as a diff; the diff belongs in the evidence packet after approval and implementation.",
+    ]
+    rollback = inputs.get("rollback") or [
+        "Before implementation: reject the plan; no source change should exist from this workflow path.",
+        "After implementation but before review approval: revert the working-tree changes shown in the evidence diff.",
+        "Stop immediately if verification fails or the changed-file list exceeds the approved scope.",
+    ]
+    visual_nodes = []
+    if visuals and isinstance(visuals[0], dict):
+        raw_nodes = visuals[0].get("nodes") or []
+        if isinstance(raw_nodes, list):
+            visual_nodes = [str(node) for node in raw_nodes]
+    visual_line = " → ".join(visual_nodes) if visual_nodes else "approval-gated coding flow"
     authority = ["commit"] if inputs.get("commit") else []
     if inputs.get("push"):
         authority.append("push")
-    plan = {
-        "kind": "coding_plan",
-        "goal": goal,
-        "repo": repo,
-        "verification_commands": verification,
-        "acceptance_checks": acceptance,
-        "approval_gates": APPROVAL_GATES,
-        "implementation_boundary": "External/manual implementation happens only after approve_coding_plan and is represented by ctx.handoff(..., key=\"coding_ready\") before evidence collection.",
-        "completion_boundary": "Workflow completion requires approve_coding_review from the human approver after evidence is collected.",
-        "authority": authority or ["approve_report"],
-        "artifact_path": str(plan_path),
-    }
+    implementation_boundary = "No source files will be modified before this approval is recorded. External/manual implementation happens only after approve_coding_plan and is represented by ctx.handoff(..., key=\"coding_ready\") before evidence collection."
+    completion_boundary = "Workflow completion requires approve_coding_review from the human approver after evidence is collected."
     content = f"""# Coding workflow plan
 
 ## Goal
@@ -168,17 +216,45 @@ async def coding_write_plan(ctx, inputs: Dict[str, Any], repo: Dict[str, Any]) -
 - baseline head: `{repo['head']}`
 - clean before workflow: `{repo['clean']}`
 
+## Before / after
+
+Before: {before_after['before']}
+
+After: {before_after['after']}
+
+## Concrete implementation steps
+
+""" + "\n".join(f"{index}. {item}" for index, item in enumerate(implementation_steps, start=1)) + f"""
+
+## Examples / acceptance scenarios
+
+""" + "\n".join(f"- {item['case']}: `{item['input']}` → {item['expected']}" for item in examples) + f"""
+
+## Dashboard preview
+
+- artifact render: inline markdown approval packet
+- visual: {visual_line}
+- approval buttons: Approve records human provenance and resumes; Reject records feedback without implementation.
+
+## Non-goals
+
+""" + "\n".join(f"- {item}" for item in non_goals) + f"""
+
+## Rollback / stop conditions
+
+""" + "\n".join(f"- {item}" for item in rollback) + f"""
+
 ## Approval gates
 
 """ + "\n".join(f"- `{gate}`" for gate in APPROVAL_GATES) + f"""
 
 ## Implementation boundary
 
-{plan['implementation_boundary']}
+{implementation_boundary}
 
 ## Completion boundary
 
-{plan['completion_boundary']}
+{completion_boundary}
 
 ## Acceptance checks
 
@@ -187,6 +263,30 @@ async def coding_write_plan(ctx, inputs: Dict[str, Any], repo: Dict[str, Any]) -
 ## Verification commands
 
 """ + "\n".join(f"- `{command}`" for command in verification) + "\n"
+    plan = {
+        "kind": "markdown",
+        "plan_kind": "coding_plan",
+        "render": "inline-markdown",
+        "summary": f"Approve a concrete coding plan for: {goal}",
+        "goal": goal,
+        "repo": repo,
+        "verification_commands": verification,
+        "acceptance_checks": acceptance,
+        "approval_gates": APPROVAL_GATES,
+        "implementation_boundary": implementation_boundary,
+        "completion_boundary": completion_boundary,
+        "authority": authority or ["approve_report"],
+        "artifact_path": str(plan_path),
+        "markdown": content,
+        "sections": {
+            "before_after": before_after,
+            "implementation_steps": implementation_steps,
+            "examples": examples,
+            "visuals": visuals,
+            "non_goals": non_goals,
+            "rollback": rollback,
+        },
+    }
     _write(plan_path, content)
     return plan
 

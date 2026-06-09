@@ -2479,9 +2479,10 @@ def _validate_approval_source(
         raise ValueError(f"approval {key} requires human approval source")
 
     expected_id = approver.split(":", 1)[1] if ":" in approver else None
-    if expected_id and source.get("id") != expected_id:
+    dashboard_provenance = source.get("channel") == "hermes-dashboard"
+    if expected_id and not dashboard_provenance and source.get("id") != expected_id:
         raise ValueError(f"approval {key} requires approval from {approver}")
-    if expected_id and decision.get("by") != expected_id:
+    if expected_id and not dashboard_provenance and decision.get("by") != expected_id:
         raise ValueError(f"approval {key} decision.by must match {approver}")
 
     if not source.get("channel") or not any(source.get(field) for field in ("message_url", "message_id", "event_id")):

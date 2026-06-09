@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -8,15 +7,11 @@ from .dashboard import render_dashboard
 from .engine import TERMINAL_WORKFLOW_STATUSES, WorkflowEngine
 from .receipts import build_workflow_receipt, write_receipt
 from .registry import WorkflowDbConfig, WorkflowRefConfig, WorkflowRegistry
+from .workflow_loading import load_workflow_ref as _load_workflow_ref
 
 
 def load_workflow_ref(ref: str) -> Callable[..., Any]:
-    if ":" not in ref:
-        raise ValueError("workflow ref must look like module:function")
-    module_name, attr = ref.split(":", 1)
-    module = importlib.import_module(module_name)
-    workflow = getattr(module, attr)
-    return workflow
+    return _load_workflow_ref(ref)
 
 
 class InvocationService:

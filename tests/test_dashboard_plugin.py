@@ -37,6 +37,19 @@ async def dashboard_path_artifact_workflow(ctx, inputs):
     return {"decision": decision, "artifact": artifact, "saved_at": "/Users/operator/private/final-report.pdf"}
 
 
+@workflow
+async def dashboard_named_human_approval_workflow(ctx, inputs):
+    decision = await ctx.approval.request(
+        key="approve_named_human",
+        prompt="Approve named-human dashboard smoke?",
+        artifact={"summary": "Named human approval packet"},
+        approver="human:Skylar Payne",
+        allowed=["approve", "reject"],
+        authority=["approve_report"],
+    )
+    return {"approved_by": decision.get("by"), "source_id": decision.get("source", {}).get("id")}
+
+
 def load_dashboard_api():
     plugin_file = PLUGIN_DASHBOARD / "plugin_api.py"
     spec = importlib.util.spec_from_file_location("hermes_workflows_dashboard_plugin_test", plugin_file)
@@ -349,6 +362,72 @@ def test_dashboard_approval_identity_is_server_derived_not_client_supplied(tmp_p
     assert signal["payload"]["payload"] == {"action": "approve", "by": "operator"}
 
 
+def test_dashboard_approval_records_configured_actor_without_rewriting_to_workflow_approver(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_named_human_approval_workflow,
+        {},
+        workflow_id="wf_named_human",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_named_human_approval_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)}, dashboard_approver="skylar")
+    api = load_dashboard_api()
+
+    receipt = run(
+        api.decide_approval(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_named_human",
+                "key": "approve_named_human",
+                "action": "approve",
+            }
+        )
+    )
+
+    status = WorkflowEngine(db).workflow_status("wf_named_human")
+    signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
+
+    assert receipt["success"] is True
+    assert receipt["receipt"]["by"] == "skylar"
+    assert receipt["post_resume"]["status"] == "completed"
+    assert status["result"] == {"approved_by": "skylar", "source_id": "skylar"}
+    assert signal["payload"]["source"]["id"] == "skylar"
+    assert signal["payload"]["payload"] == {"action": "approve", "by": "skylar"}
+
+
+def test_dashboard_approval_does_not_permission_check_workflow_approver(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_named_human_approval_workflow,
+        {},
+        workflow_id="wf_named_human_mismatch",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_named_human_approval_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)}, dashboard_approver="operator")
+    api = load_dashboard_api()
+
+    receipt = run(
+        api.decide_approval(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_named_human_mismatch",
+                "key": "approve_named_human",
+                "action": "approve",
+            }
+        )
+    )
+
+    status = WorkflowEngine(db).workflow_status("wf_named_human_mismatch")
+    signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
+
+    assert receipt["success"] is True
+    assert receipt["receipt"]["by"] == "operator"
+    assert receipt["post_resume"]["status"] == "completed"
+    assert status["result"] == {"approved_by": "operator", "source_id": "operator"}
+    assert signal["payload"]["source"]["id"] == "operator"
+    assert signal["payload"]["payload"] == {"action": "approve", "by": "operator"}
+
+
 def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_approval_detail(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
@@ -442,6 +521,38 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert "ctx.approval.request" in source["code"]
     assert source["location"]["module"] == "tests.test_hermes_plugin_approvals"
     assert str(db) not in json.dumps(source)
+
+
+def test_dashboard_workflow_definition_source_loads_path_refs(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db)
+    workflow_file = tmp_path / "demo_flow.py"
+    workflow_file.write_text(
+        "from hermes_workflows import workflow\n"
+        "\n"
+        "@workflow\n"
+        "async def demo_path_workflow(ctx, inputs):\n"
+        "    return {'ok': True}\n"
+    )
+    configure_test_dbs(
+        monkeypatch,
+        tmp_path,
+        {"runtime-smoke": str(db)},
+        workflow_catalog=[
+            {
+                "id": "path-ref-demo",
+                "name": "Path ref demo",
+                "workflow_ref": f"{workflow_file}:demo_path_workflow",
+            }
+        ],
+    )
+    api = load_dashboard_api()
+
+    source = run(api.workflow_definition_source("path-ref-demo", db="runtime-smoke"))
+
+    assert source["workflow_ref"] == f"{workflow_file}:demo_path_workflow"
+    assert source["location"]["attribute"] == "demo_path_workflow"
+    assert "async def demo_path_workflow" in source["code"]
 
 
 def test_dashboard_workflow_catalog_accepts_json_string_from_profile_config(tmp_path, monkeypatch):
@@ -753,6 +864,8 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         "Workflow state source",
         "Dashboard approval buttons record human provenance and immediately resume trusted local workflow code",
         "artifact: ",
+        "ArtifactInlinePreview",
+        "hwf-markdown-preview",
     ):
         assert phrase in index_js
     assert ".hwf-shell" in style_css

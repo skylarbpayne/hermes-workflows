@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import inspect
 import json
 import mimetypes
@@ -21,6 +20,7 @@ from hermes_workflows.hermes_plugin_approvals import (
     _receipt_to_payload,
     approval_view_to_dict,
 )
+from hermes_workflows.workflow_loading import load_workflow_ref
 
 try:  # FastAPI is provided by Hermes Agent's dashboard process.
     import fastapi as _fastapi
@@ -88,11 +88,7 @@ def _slug(value: str) -> str:
 
 
 def _load_workflow(ref: str) -> Any:
-    if ":" not in ref:
-        raise ValueError("workflow_ref must look like module:function")
-    module_name, attr = ref.split(":", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, attr)
+    return load_workflow_ref(ref)
 
 
 def _strip_internal_fields(value: Any) -> Any:
@@ -282,6 +278,17 @@ def _dashboard_approver_id() -> str | None:
     return None
 
 
+def _dashboard_decision_actor(configured_actor: str) -> str:
+    """Return the server-configured actor to store as approval provenance.
+
+    Dashboard approval identity is audit/provenance, not a permissions layer. The
+    workflow's requested approver label remains visible on the approval card, but
+    this trusted local dashboard does not block or rewrite decisions because that
+    label differs from the configured dashboard actor.
+    """
+    return configured_actor
+
+
 def _resolve_dashboard_db(db: Any = None) -> tuple[str, str]:
     """Resolve dashboard requests through configured aliases only.
 
@@ -464,7 +471,11 @@ def _workflow_source_payload(definition: dict[str, Any]) -> dict[str, Any]:
         lines, line_start = inspect.getsourcelines(workflow)
     except (OSError, TypeError) as exc:
         raise HTTPException(status_code=404, detail=f"Workflow source is not inspectable: {workflow_ref}") from exc
-    module_name, attr = workflow_ref.split(":", 1)
+    if ":" in workflow_ref:
+        module_name, attr = workflow_ref.rsplit(":", 1)
+    else:
+        module_name = getattr(workflow, "__module__", workflow_ref)
+        attr = getattr(workflow, "__name__", None)
     source_file = inspect.getsourcefile(workflow) or inspect.getfile(workflow)
     code = "".join(lines)
     return {
@@ -983,15 +994,16 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
     if not workflow_id or not key:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
 
+    decision_actor = _dashboard_decision_actor(approver_id)
     message_id = f"dashboard:{uuid.uuid4()}"
     decision = ApprovalDecisionInput(
         workflow_id=workflow_id,
         key=key,
         action=action,
-        by=approver_id,
+        by=decision_actor,
         source={
             "kind": "human",
-            "id": approver_id,
+            "id": decision_actor,
             "channel": "hermes-dashboard",
             "message_id": message_id,
         },
