@@ -184,6 +184,16 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert ".hwf-dag-inspector" in style_css
 
 
+def test_dashboard_frontend_inspect_run_waits_for_run_status_payload():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    assert "const runStatus = status.data && status.data.run;" in index_js
+    assert "status && status.data && !runStatus" in index_js
+    assert "status.data.run.status" not in index_js
+    assert "status.data.run.event_count" not in index_js
+    assert "status.data.run.workflow_id" not in index_js
+
+
 def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
