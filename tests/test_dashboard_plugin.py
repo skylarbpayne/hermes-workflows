@@ -177,6 +177,22 @@ def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(
     assert str(db) not in json.dumps(result)
 
 
+def test_dashboard_plugin_api_marks_default_active_state_source(tmp_path, monkeypatch):
+    missing_db = tmp_path / "000-missing.sqlite"
+    default_db = tmp_path / "workflow.sqlite"
+    create_pending_approval(default_db)
+    configure_test_dbs(monkeypatch, tmp_path, {"aaa-missing": str(missing_db), "default": str(default_db)})
+    monkeypatch.setenv("HERMES_WORKFLOWS_DB", str(default_db))
+    api = load_dashboard_api()
+
+    result = run(api.list_dbs())
+
+    assert result["active_source"] == {"name": "default", "exists": True}
+    assert [db["name"] for db in result["dbs"]] == ["aaa-missing", "default"]
+    assert result["dbs"][0]["exists"] is False
+    assert str(default_db) not in json.dumps(result)
+
+
 def test_dashboard_plugin_api_overview_includes_workflow_observability_and_redacts_secrets(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
@@ -654,7 +670,7 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
             "artifact": {
                 "kind": "image",
                 "media_type": "image/png",
-                "path": "/Users/operatorpayne/private/generated.png",
+                "path": "/Users/operator/private/generated.png",
                 "caption": "Generated preview",
             },
         },
@@ -667,11 +683,11 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
         "persisted": "workflow_history",
         "servable_by_dashboard": False,
         "media_type": "image/png",
-        "reference": {"type": "local_path", "field": "path", "href": "/Users/operatorpayne/private/generated.png"},
+        "reference": {"type": "local_path", "field": "path", "href": "/Users/operator/private/generated.png"},
         "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
     }
-    assert card["artifact_preview"]["path"] == "/Users/operatorpayne/private/generated.png"
-    assert "/Users/operatorpayne/private/generated.png" in json.dumps(card)
+    assert card["artifact_preview"]["path"] == "/Users/operator/private/generated.png"
+    assert "/Users/operator/private/generated.png" in json.dumps(card)
 
     assert api._redact_artifact_local_refs("/Users/operator/private.png") == "/Users/operator/private.png"
     assert api._redact_artifact_local_refs({"kind": "image", "uri": "/Users/operator/private.png"})["uri"] == "/Users/operator/private.png"
@@ -939,6 +955,9 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         "hwf-markdown-preview",
     ):
         assert phrase in index_js
+    assert "active_source" in index_js
+    assert "firstDb" not in index_js
+    assert "selected DB alias" not in index_js
     assert ".hwf-shell" in style_css
     assert "hwf-approval-dialog" in index_js
     assert "showModal" in index_js

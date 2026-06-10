@@ -66,10 +66,10 @@
 
 .hwf-active-source-label {
   color: var(--color-muted-foreground);
-  font-size: 0.78rem;
-  font-weight: 800;
+  font-size: 0.72rem;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.12em;
+  font-weight: 800;
 }
 
 .hwf-runtime-note,

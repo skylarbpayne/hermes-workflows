@@ -7,20 +7,20 @@ Scope: Hermes Workflows dashboard/API clarity without breaking existing workflow
 ## Decision summary
 
 1. **Public docs and new examples should say `AgentStep`.** `AgentStep` is the durable boundary for asking a configured agent runner to produce JSON or a typed `Workflow` value. Keep `AgentPrompt` as a backwards-compatible render-only helper for existing code/tests/history; do not remove it without a separately tested migration.
-2. **The dashboard DB dropdown is a workflow DB alias selector.** It is not a registry, branch, deployment, or remote execution environment. Browser APIs continue to reject raw SQLite paths and return aliases only.
+2. **The dashboard shows a read-only active workflow state source.** It is not a registry, branch, deployment, remote execution environment, or user-selectable database debugger. Browser APIs continue to reject raw SQLite paths and return configured aliases plus existence status only.
 3. **Dashboard approval actions are record-only.** Approve/reject from the dashboard records server-derived human provenance with `resume=false`. Workflow execution resumes only when a trusted local resumer/operator continues the run.
 4. **Artifacts get a typed render descriptor.** Approval/run artifact payloads remain persisted in workflow history, but dashboard responses include a redacted preview plus `artifact_render` so text/JSON/image/audio/video/file references can be handled consistently later.
 
 ## Where workflow code runs
 
-Hermes Workflows is a Python runtime. Workflow code is imported and executed by the Python process that owns the `WorkflowEngine` instance for the selected SQLite DB:
+Hermes Workflows is a Python runtime. Workflow code is imported and executed by the Python process that owns the `WorkflowEngine` instance for the active workflow state source:
 
 - CLI `hermes-workflows run ...` executes workflow code in that CLI process.
 - A local trusted resumer executes workflow code in its local process when it drains/resumes a run.
-- The dashboard `POST /runs` route imports the configured `workflow_ref` and runs it in the Hermes dashboard server process because that route owns the engine for the selected DB alias.
+- The dashboard `POST /runs` route imports the configured `workflow_ref` and runs it in the Hermes dashboard server process because that route owns the engine for the active configured state-source alias.
 - The dashboard `POST /approvals/decision` route **does not** continue workflow code. It records a decision only.
 
-The workflow DB is durable state, not an execution sandbox. Selecting a DB alias changes which SQLite ledger is inspected or mutated; it does not move execution to another machine or deployment.
+The workflow DB is durable state, not an execution sandbox. The dashboard presents the resolved configured state-source alias read-only; it does not let the browser pick arbitrary SQLite paths or move execution to another machine or deployment.
 
 ## AgentStep execution and failure modes
 
