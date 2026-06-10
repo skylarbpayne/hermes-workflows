@@ -194,6 +194,17 @@ def test_dashboard_frontend_inspect_run_waits_for_run_status_payload():
     assert "status.data.run.workflow_id" not in index_js
 
 
+def test_dashboard_frontend_overview_inspect_run_opens_runs_inspector():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    assert "onInspect: function () {}" not in index_js
+    assert "const inspectedRunState = useState(null);" in index_js
+    assert "function inspectRun(run)" in index_js
+    assert "setActiveTab(\"Runs\");" in index_js
+    assert "onInspectRun: inspectRun" in index_js
+    assert "inspectRun: inspectedRun" in index_js
+
+
 def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)

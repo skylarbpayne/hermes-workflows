@@ -565,9 +565,13 @@
   }
 
   function RunsPanel(props) {
+    const useEffect = hooks.useEffect;
     const selectedState = hooks.useState(null);
     const selected = selectedState[0];
     const setSelected = selectedState[1];
+    useEffect(function () {
+      if (props.inspectRun) setSelected(props.inspectRun);
+    }, [props.inspectRun && props.inspectRun.workflow_id]);
     const statusPath = selected ? API + "/runs/" + encodeURIComponent(selected.workflow_id) + qs({ db: props.db }) : API + "/runs" + qs({ db: props.db, limit: 1 });
     const status = useJSON(statusPath, props.refreshKey + ":" + (selected && selected.workflow_id || "none"));
     const runStatus = status.data && status.data.run;
@@ -619,8 +623,8 @@
           e("div", { className: "hwf-panel-header" }, e("h2", null, "Needs my approval")),
           approvals.length ? approvals.slice(0, 3).map(function (approval) { return e(ApprovalCard, { key: approval.workflow_id + approval.key, db: props.db, approval: approval, onView: props.onViewApproval, onRefresh: props.onRefresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active approvals."))),
         e("div", null,
-          e("div", { className: "hwf-panel-header" }, e("h2", null, "Recent runs")),
-          props.runs.slice(0, 5).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: function () {} }); }))));
+        e("div", { className: "hwf-panel-header" }, e("h2", null, "Recent runs")),
+        props.runs.slice(0, 5).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: props.onInspectRun }); }))));
   }
 
   function ArtifactsPanel(props) {
@@ -658,6 +662,9 @@
     const approvalState = useState(null);
     const selectedApproval = approvalState[0];
     const setSelectedApproval = approvalState[1];
+    const inspectedRunState = useState(null);
+    const inspectedRun = inspectedRunState[0];
+    const setInspectedRun = inspectedRunState[1];
     const refreshState = useState(0);
     const refreshKey = refreshState[0];
     const setRefreshKey = refreshState[1];
@@ -671,6 +678,10 @@
     const approvalsData = useJSON(activeDb ? API + "/approvals" + qs({ db: activeDb, status: "waiting" }) : API + "/approvals", refreshKey + ":approvals:" + activeDb);
 
     function refresh() { setRefreshKey(refreshKey + 1); }
+    function inspectRun(run) {
+      setInspectedRun(run);
+      setActiveTab("Runs");
+    }
     if (dbs.loading) return e("div", { className: "hwf-page" }, "Loading workflow DBs…");
     if (dbs.error) return e("div", { className: "hwf-page hwf-bad" }, dbs.error);
     const overviewData = overview.data || {};
@@ -704,11 +715,11 @@
       initialConsoleLoading && e("p", { className: "hwf-muted" }, "Loading workflow data…"),
       refreshingConsole && e("p", { className: "hwf-muted hwf-refreshing" }, "Refreshing workflow console…"),
       (overview.error || definitionsData.error || runsData.error || approvalsData.error) && e("p", { className: "hwf-bad" }, overview.error || definitionsData.error || runsData.error || approvalsData.error),
-      activeTab === "Overview" && e(OverviewPanel, { db: activeDb, definitions: definitions, runs: runs, approvals: approvals, artifacts: artifacts, counts: counts, onViewApproval: setSelectedApproval, onRefresh: refresh }),
+      activeTab === "Overview" && e(OverviewPanel, { db: activeDb, definitions: definitions, runs: runs, approvals: approvals, artifacts: artifacts, counts: counts, onViewApproval: setSelectedApproval, onInspectRun: inspectRun, onRefresh: refresh }),
       activeTab === "Workflows" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Workflows you can run"), e("p", { className: "hwf-muted" }, "See workflows I can run, then run one with JSON inputs.")),
         definitions.length ? definitions.map(function (definition) { return e(DefinitionCard, { key: definition.id, db: activeDb, definition: definition, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No runnable workflows configured yet."))),
-      activeTab === "Runs" && e(RunsPanel, { db: activeDb, runs: runs, refreshKey: refreshKey }),
+      activeTab === "Runs" && e(RunsPanel, { db: activeDb, runs: runs, refreshKey: refreshKey, inspectRun: inspectedRun }),
       activeTab === "Approvals" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Active approvals"), e("p", { className: "hwf-muted" }, "See a list of active approvals needed.")),
         approvals.length ? approvals.map(function (approval) { return e(ApprovalCard, { key: approval.workflow_id + approval.key, db: activeDb, approval: approval, onView: setSelectedApproval, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active approvals."))),
