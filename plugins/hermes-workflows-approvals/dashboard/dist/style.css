@@ -456,15 +456,45 @@
   gap: 1rem;
 }
 
-.hwf-dag-strip {
-  display: flex;
-  gap: 0.75rem;
+.hwf-dag-graph {
+  position: relative;
   overflow-x: auto;
+  min-height: 12rem;
   padding-bottom: 0.35rem;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-lg, 0.75rem);
+  background: color-mix(in srgb, var(--hwf-surface), black 5%);
+}
+
+.hwf-dag-edge-svg {
+  position: absolute;
+  inset: 0;
+  min-width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.hwf-dag-edge-svg marker path {
+  fill: color-mix(in srgb, var(--color-primary, #6d7cff), white 18%);
+}
+
+.hwf-dag-edge-line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--color-primary, #6d7cff), white 18%);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 5 5;
+  opacity: 0.82;
+}
+
+.hwf-dag-layer {
+  position: relative;
+  z-index: 1;
 }
 
 .hwf-dag-node {
-  flex: 0 0 min(14rem, 70vw);
+  position: absolute;
   display: grid;
   gap: 0.35rem;
   text-align: left;
@@ -474,6 +504,7 @@
   color: inherit;
   padding: 0.75rem;
   cursor: pointer;
+  box-shadow: 0 0.7rem 1.8rem rgba(0, 0, 0, 0.18);
 }
 
 .hwf-dag-node-selected {

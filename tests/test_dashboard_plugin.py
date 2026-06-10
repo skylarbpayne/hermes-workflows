@@ -163,6 +163,27 @@ def test_dashboard_frontend_exposes_workflow_code_and_run_dag_affordances():
     assert ".hwf-dag-node-selected" in style_css
 
 
+def test_dashboard_frontend_exposes_visual_run_dag_graph():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "selectedDagNodeId" in index_js
+    assert "hwf-dag-graph" in index_js
+    assert "Workflow run DAG graph" in index_js
+    assert "hwf-dag-edge-svg" in index_js
+    assert "hwf-dag-edge-line" in index_js
+    assert "markerEnd" in index_js
+    assert "data-dag-node-id" in index_js
+    assert "Artifacts from this step" in index_js
+    assert "hwf-dag-strip" not in index_js
+
+    assert ".hwf-dag-graph" in style_css
+    assert ".hwf-dag-edge-svg" in style_css
+    assert ".hwf-dag-edge-line" in style_css
+    assert ".hwf-dag-layer" in style_css
+    assert ".hwf-dag-inspector" in style_css
+
+
 def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
