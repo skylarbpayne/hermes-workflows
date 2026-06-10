@@ -578,7 +578,6 @@
     const runArtifacts = status.data && Array.isArray(status.data.artifacts) ? status.data.artifacts : [];
     return e("div", { className: "hwf-panel" },
       e("div", { className: "hwf-panel-header" }, e("h2", null, "Runs"), e("p", { className: "hwf-muted" }, "Workflow → Run → Step → Artifact/Approval. Inspect a run for outputs and decisions.")),
-      (props.runs || []).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: setSelected }); }),
       selected && e(Card, { className: "hwf-inspector" },
         e(CardHeader, null,
           e("div", null,
@@ -605,7 +604,8 @@
             runArtifacts.length ? runArtifacts.map(function (artifact) { return e(ArtifactCard, { key: artifact.id, artifact: artifact }); }) : e("p", { className: "hwf-muted" }, "No artifacts captured yet."),
             e("details", { className: "hwf-raw-json" },
               e("summary", null, "Recent events"),
-              e("pre", null, pretty(runStatus.recent_events || [])))))));
+              e("pre", null, pretty(runStatus.recent_events || []))))),
+      (props.runs || []).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: setSelected }); })));
   }
 
   function OverviewPanel(props) {

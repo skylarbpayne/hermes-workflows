@@ -205,6 +205,14 @@ def test_dashboard_frontend_overview_inspect_run_opens_runs_inspector():
     assert "inspectRun: inspectedRun" in index_js
 
 
+def test_dashboard_frontend_inspect_run_inspector_is_visible_before_run_list():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    inspector_index = index_js.index('selected && e(Card, { className: "hwf-inspector" }')
+    run_list_index = index_js.index('(props.runs || []).map(function (run)')
+    assert inspector_index < run_list_index
+
+
 def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
