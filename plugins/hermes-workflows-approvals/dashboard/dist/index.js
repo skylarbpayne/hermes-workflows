@@ -570,6 +570,8 @@
     const setSelected = selectedState[1];
     const statusPath = selected ? API + "/runs/" + encodeURIComponent(selected.workflow_id) + qs({ db: props.db }) : API + "/runs" + qs({ db: props.db, limit: 1 });
     const status = useJSON(statusPath, props.refreshKey + ":" + (selected && selected.workflow_id || "none"));
+    const runStatus = status.data && status.data.run;
+    const runArtifacts = status.data && Array.isArray(status.data.artifacts) ? status.data.artifacts : [];
     return e("div", { className: "hwf-panel" },
       e("div", { className: "hwf-panel-header" }, e("h2", null, "Runs"), e("p", { className: "hwf-muted" }, "Workflow → Run → Step → Artifact/Approval. Inspect a run for outputs and decisions.")),
       (props.runs || []).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: setSelected }); }),
@@ -582,23 +584,24 @@
         e(CardContent, null,
           status && status.loading && e("p", null, "Loading status…"),
           status && status.error && e("p", { className: "hwf-bad" }, status.error),
-          status && status.data && e("div", null,
+          status && status.data && !runStatus && e("p", { className: "hwf-muted" }, "Loading run status…"),
+          runStatus && e("div", null,
             e("div", { className: "hwf-meta" },
-              e(Pill, { label: status.data.run.status, className: statusClass(status.data.run.status) }),
-              e(Pill, { label: "events: " + status.data.run.event_count }),
-              e(Pill, { label: "artifacts: " + status.data.artifacts.length }),
-              e("code", { className: "hwf-run-id", title: status.data.run.workflow_id }, shortId(status.data.run.workflow_id))),
+              e(Pill, { label: runStatus.status, className: statusClass(runStatus.status) }),
+              e(Pill, { label: "events: " + runStatus.event_count }),
+              e(Pill, { label: "artifacts: " + runArtifacts.length }),
+              e("code", { className: "hwf-run-id", title: runStatus.workflow_id }, shortId(runStatus.workflow_id))),
             e("div", { className: "hwf-section-title" }, "Run DAG"),
             e(RunDag, { db: props.db, workflowId: selected.workflow_id, refreshKey: props.refreshKey }),
             e("div", { className: "hwf-section-title" }, "Approvals in this run"),
-            (status.data.run.approvals || []).length ? (status.data.run.approvals || []).map(function (approval) {
+            (runStatus.approvals || []).length ? (runStatus.approvals || []).map(function (approval) {
               return e(RunApprovalSummary, { key: approval.key, approval: approval });
             }) : e("p", { className: "hwf-muted" }, "No approval gates recorded for this run."),
             e("div", { className: "hwf-section-title" }, "Artifacts / outputs in this run"),
-            status.data.artifacts.length ? status.data.artifacts.map(function (artifact) { return e(ArtifactCard, { key: artifact.id, artifact: artifact }); }) : e("p", { className: "hwf-muted" }, "No artifacts captured yet."),
+            runArtifacts.length ? runArtifacts.map(function (artifact) { return e(ArtifactCard, { key: artifact.id, artifact: artifact }); }) : e("p", { className: "hwf-muted" }, "No artifacts captured yet."),
             e("details", { className: "hwf-raw-json" },
               e("summary", null, "Recent events"),
-              e("pre", null, pretty(status.data.run.recent_events || [])))))));
+              e("pre", null, pretty(runStatus.recent_events || [])))))));
   }
 
   function OverviewPanel(props) {
