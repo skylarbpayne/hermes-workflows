@@ -74,90 +74,6 @@ def _ensure_workflow_project_on_path(db_path: str | Path) -> Path | None:
     return project_root
 
 
-def _path_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        if not value.strip():
-            return []
-        try:
-            parsed = json.loads(value)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            return [str(item) for item in parsed if str(item).strip()]
-        return [item for item in value.split(os.pathsep) if item.strip()]
-    if isinstance(value, (list, tuple)):
-        return [str(item) for item in value if str(item).strip()]
-    return [str(value)]
-
-
-def _add_import_path(path: str | Path) -> Path | None:
-    candidate = Path(path).expanduser().resolve(strict=False)
-    if not candidate.exists():
-        return None
-    rendered = str(candidate)
-    if rendered not in sys.path:
-        sys.path.insert(0, rendered)
-    return candidate
-
-
-def _configured_import_roots_for_ref(workflow_ref: str) -> list[Path]:
-    """Resolve configured import roots for a workflow ref from workflow_catalog.
-
-    Dashboard launches should not depend on the dashboard process cwd or on
-    state DB placement. Operators configure runnable workflows once; run/source
-    routes then derive import roots from that catalog entry.
-    """
-
-    roots: list[Path] = []
-    for entry in _raw_catalog_entries():
-        ref = str(entry.get("workflow_ref") or entry.get("ref") or "").strip()
-        if ref != workflow_ref:
-            continue
-        for key in ("python_path", "python_paths", "sys_path", "sys_paths"):
-            for raw in _path_list(entry.get(key)):
-                added = _add_import_path(raw)
-                if added is not None:
-                    roots.append(added)
-        for key in ("project_root", "repo_path", "cwd"):
-            for raw in _path_list(entry.get(key)):
-                root = _add_import_path(raw)
-                if root is not None:
-                    roots.append(root)
-                    src = _add_import_path(root / "src")
-                    if src is not None:
-                        roots.append(src)
-    return roots
-
-
-def _workflow_ref_for_instance(db_path: str | Path, workflow_id: str) -> str | None:
-    try:
-        status = WorkflowEngine(db_path, read_only=True).workflow_status(workflow_id, recent_events=0)
-    except Exception:
-        return None
-    ref = status.get("workflow_ref")
-    return str(ref) if ref else None
-
-
-def _ensure_workflow_runtime_on_path(
-    db_path: str | Path,
-    *,
-    workflow_ref: str | None = None,
-    workflow_id: str | None = None,
-) -> list[Path]:
-    """Make configured workflow code importable for dashboard source/run/resume routes."""
-
-    roots: list[Path] = []
-    project_root = _ensure_workflow_project_on_path(db_path)
-    if project_root is not None:
-        roots.append(project_root)
-    resolved_ref = workflow_ref or (_workflow_ref_for_instance(db_path, workflow_id) if workflow_id else None)
-    if resolved_ref:
-        roots.extend(_configured_import_roots_for_ref(resolved_ref))
-    return roots
-
-
 def _int(value: Any, *, default: int, minimum: int = 1, maximum: int = 100) -> int:
     try:
         parsed = int(value)
@@ -848,7 +764,7 @@ async def workflow_definition_source(definition_id: str, db: str | None = None) 
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     definition = _definition_by_id(definition_id, engine)
-    _ensure_workflow_runtime_on_path(db_path, workflow_ref=str(definition.get("workflow_ref") or ""))
+    _ensure_workflow_project_on_path(db_path)
     return {"db_alias": db_alias, **_workflow_source_payload(definition)}
 
 
@@ -865,7 +781,7 @@ async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     workflow_ref = str(definition["workflow_ref"])
     inputs = _input_from_body(body)
     def execute_run() -> tuple[Any, dict[str, Any]]:
-        _ensure_workflow_runtime_on_path(db_path, workflow_ref=workflow_ref)
+        _ensure_workflow_project_on_path(db_path)
         workflow = _load_workflow(workflow_ref)
         result = WorkflowEngine(db_path).run_until_idle(workflow, inputs, workflow_id=workflow_id, workflow_ref=workflow_ref)
         status = _status_packet(
@@ -1103,7 +1019,7 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
         idempotency_key=message_id,
     )
     def record_and_resume() -> tuple[Any, dict[str, Any]]:
-        _ensure_workflow_runtime_on_path(db_path, workflow_id=workflow_id)
+        _ensure_workflow_project_on_path(db_path)
         receipt = WorkflowEngine(db_path).submit_approval_decision(decision, resume=True)
         post_resume = _status_packet(
             WorkflowEngine(db_path, read_only=True),
