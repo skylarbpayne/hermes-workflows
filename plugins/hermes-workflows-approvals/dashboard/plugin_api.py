@@ -289,6 +289,33 @@ def _dashboard_decision_actor(configured_actor: str) -> str:
     return configured_actor
 
 
+def _workflow_count_for_dashboard_db(path: str) -> int:
+    db_path = Path(path).expanduser()
+    if not db_path.exists():
+        return 0
+    try:
+        return len(WorkflowEngine(str(db_path), read_only=True).list_workflows())
+    except Exception:
+        return 0
+
+
+def _active_dashboard_db(configured: dict[str, str]) -> tuple[str, str] | None:
+    if not configured:
+        return None
+    if len(configured) == 1:
+        return next(iter(configured.items()))
+
+    existing = [(alias, path) for alias, path in configured.items() if Path(path).expanduser().exists()]
+    populated = [(alias, path) for alias, path in existing if _workflow_count_for_dashboard_db(path) > 0]
+    if len(populated) == 1:
+        return populated[0]
+    if "default" in configured:
+        return "default", configured["default"]
+    if len(existing) == 1:
+        return existing[0]
+    return None
+
+
 def _resolve_dashboard_db(db: Any = None) -> tuple[str, str]:
     """Resolve dashboard requests through configured aliases only.
 
@@ -299,11 +326,9 @@ def _resolve_dashboard_db(db: Any = None) -> tuple[str, str]:
     configured = _configured_dbs()
     raw = str(db or "").strip()
     if not raw:
-        if len(configured) == 1:
-            alias, path = next(iter(configured.items()))
-            return alias, path
-        if "default" in configured:
-            return "default", configured["default"]
+        active = _active_dashboard_db(configured)
+        if active:
+            return active
         raise HTTPException(status_code=400, detail="Select a configured DB alias.")
     if raw not in configured:
         raise HTTPException(status_code=400, detail="Dashboard API only accepts configured DB aliases.")

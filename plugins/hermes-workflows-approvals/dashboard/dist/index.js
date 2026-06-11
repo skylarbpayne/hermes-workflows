@@ -677,7 +677,8 @@
     const status = useJSON(statusPath, props.refreshKey + ":" + (selected && selected.workflow_id || "none"));
     const runStatus = status.data && status.data.run;
     const runArtifacts = status.data && Array.isArray(status.data.artifacts) ? status.data.artifacts : [];
-    return e("div", { className: "hwf-panel" },
+    const runs = Array.isArray(props.runs) ? props.runs : [];
+    const children = [
       e("div", { className: "hwf-panel-header" }, e("h2", null, "Runs"), e("p", { className: "hwf-muted" }, "Workflow → Run → Step → Artifact/Approval. Inspect a run for outputs and decisions.")),
       selected && e(Card, { className: "hwf-inspector" },
         e(CardHeader, null,
@@ -705,8 +706,17 @@
             runArtifacts.length ? runArtifacts.map(function (artifact) { return e(ArtifactCard, { key: artifact.id, artifact: artifact }); }) : e("p", { className: "hwf-muted" }, "No artifacts captured yet."),
             e("details", { className: "hwf-raw-json" },
               e("summary", null, "Recent events"),
-              e("pre", null, pretty(runStatus.recent_events || []))))),
-      (props.runs || []).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: setSelected }); })));
+              e("pre", null, pretty(runStatus.recent_events || [])))))),
+      props.loading && e(Card, null, e(CardContent, { className: "hwf-empty" }, "Loading runs…")),
+      props.error && e(Card, null, e(CardContent, { className: "hwf-empty hwf-bad" }, props.error)),
+      !props.loading && !props.error && !runs.length && e(Card, null,
+        e(CardContent, { className: "hwf-empty" },
+          e("strong", null, "No runs found for the active source."),
+          e("p", { className: "hwf-muted" }, "Source: ", props.db || "not configured", ". If a workflow just ran, hit Refresh; if this stays empty, the dashboard is looking at the wrong state source.")))
+    ].filter(Boolean).concat(runs.map(function (run) {
+      return e(RunRow, { key: run.workflow_id, run: run, onInspect: setSelected });
+    }));
+    return React.createElement.apply(React, ["div", { className: "hwf-panel" }].concat(children));
   }
 
   function OverviewPanel(props) {
@@ -820,7 +830,7 @@
       activeTab === "Workflows" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Workflows you can run"), e("p", { className: "hwf-muted" }, "See workflows I can run, then run one with JSON inputs.")),
         definitions.length ? definitions.map(function (definition) { return e(DefinitionCard, { key: definition.id, db: activeDb, definition: definition, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No runnable workflows configured yet."))),
-      activeTab === "Runs" && e(RunsPanel, { db: activeDb, runs: runs, refreshKey: refreshKey, inspectRun: inspectedRun }),
+      activeTab === "Runs" && e(RunsPanel, { db: activeDb, refreshKey: refreshKey, runs: runs, loading: runsData.loading, error: runsData.error, inspectRun: inspectedRun }),
       activeTab === "Approvals" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Active approvals"), e("p", { className: "hwf-muted" }, "See a list of active approvals needed.")),
         approvals.length ? approvals.map(function (approval) { return e(ApprovalCard, { key: approval.workflow_id + approval.key, db: activeDb, approval: approval, onView: setSelectedApproval, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active approvals."))),
