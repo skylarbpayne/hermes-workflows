@@ -507,12 +507,20 @@ def _dag_node_id_for_event(event: dict[str, Any]) -> str | None:
     key = str(payload.get("key") or event.get("key") or "")
     if event_type == "WorkflowStarted":
         return "workflow:start"
-    if event_type in {"StepRequested", "StepCompleted"}:
+    if event_type in {"StepRequested", "StepCompleted", "StepFailed"}:
+        return key or None
+    if event_type == "GatherWaiting":
+        return key or None
+    if event_type in {"ChildWorkflowRequested", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
+        return key or None
+    if event_type == "ChildWorkflowGatherWaiting":
         return key or None
     if event_type == "ApprovalRequested":
         return _approval_node_id(key)
+    if event_type == "WaitRequested":
+        return key if key.startswith("wait:") else f"wait:{key}"
     if event_type == "SignalReceived":
-        return f"signal:{key}"
+        return key if key.startswith("signal:") else f"signal:{key}"
     if event_type == "WorkflowCompleted":
         return "workflow:completed"
     if event_type == "WorkflowFailed":
@@ -529,6 +537,12 @@ def _dag_node_kind(event_type: str) -> str:
         return "approval"
     if event_type == "SignalReceived":
         return "signal"
+    if event_type == "WaitRequested":
+        return "wait"
+    if event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
+        return "gather"
+    if event_type.startswith("ChildWorkflow"):
+        return "child_workflow"
     return "workflow"
 
 
@@ -537,10 +551,22 @@ def _dag_node_status(event_type: str, existing: str | None = None) -> str:
         return existing or "requested"
     if event_type == "StepCompleted":
         return "completed"
+    if event_type == "StepFailed":
+        return "failed"
     if event_type == "ApprovalRequested":
         return "waiting"
+    if event_type == "WaitRequested":
+        return existing or "waiting"
     if event_type == "SignalReceived":
         return "received"
+    if event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
+        return existing or "waiting"
+    if event_type == "ChildWorkflowRequested":
+        return existing or "requested"
+    if event_type == "ChildWorkflowCompleted":
+        return "completed"
+    if event_type == "ChildWorkflowFailed":
+        return "failed"
     if event_type == "WorkflowCompleted":
         return "completed"
     if event_type == "WorkflowFailed":
@@ -567,11 +593,23 @@ def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
 def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
-    previous_id: str | None = None
-    for event in status.get("events") or status.get("recent_events") or []:
+    edge_keys: set[tuple[str, str]] = set()
+    frontier: set[str] = set()
+    pending_requests: list[str] = []
+    gather_children: set[str] = set()
+
+    def add_edge(source: str, target: str) -> None:
+        if not source or not target or source == target:
+            return
+        key = (source, target)
+        if key not in edge_keys:
+            edge_keys.add(key)
+            edges.append({"from": source, "to": target})
+
+    def add_node(event: dict[str, Any]) -> str | None:
         node_id = _dag_node_id_for_event(event)
         if not node_id:
-            continue
+            return None
         event_type = str(event.get("type") or "")
         payload = event.get("payload") or {}
         node = nodes.get(node_id)
@@ -595,9 +633,74 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
                 node["event_types"].append(event_type)
             if payload.get("step_name"):
                 node["label"] = payload.get("step_name")
-        if previous_id and previous_id != node_id and not any(edge["from"] == previous_id and edge["to"] == node_id for edge in edges):
-            edges.append({"from": previous_id, "to": node_id})
-        previous_id = node_id
+        return node_id
+
+    def flush_sequential_until(node_id: str | None = None) -> None:
+        nonlocal frontier
+        if not pending_requests:
+            return
+        keep: list[str] = []
+        for request_id in pending_requests:
+            if node_id is not None and request_id != node_id:
+                keep.append(request_id)
+                continue
+            for parent_id in frontier:
+                add_edge(parent_id, request_id)
+            frontier = {request_id}
+            if node_id is not None:
+                keep.extend(item for item in pending_requests if item != request_id and item not in keep)
+                break
+        pending_requests[:] = keep
+
+    for event in status.get("events") or status.get("recent_events") or []:
+        event_type = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        node_id = add_node(event)
+        if not node_id:
+            continue
+
+        if event_type == "WorkflowStarted":
+            frontier = {node_id}
+        elif event_type in {"StepRequested", "ChildWorkflowRequested"}:
+            if node_id not in pending_requests and node_id not in gather_children:
+                pending_requests.append(node_id)
+        elif event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
+            pending = [str(item) for item in payload.get("pending") or []]
+            parents = frontier or {"workflow:start"}
+            for child_id in pending:
+                gather_children.add(child_id)
+                for parent_id in parents:
+                    add_edge(parent_id, child_id)
+                add_edge(child_id, node_id)
+            pending_requests[:] = [item for item in pending_requests if item not in set(pending)]
+            frontier = {node_id}
+        elif event_type in {"StepCompleted", "StepFailed", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
+            if node_id not in gather_children:
+                flush_sequential_until(node_id)
+        elif event_type == "ApprovalRequested":
+            flush_sequential_until()
+            for parent_id in frontier:
+                add_edge(parent_id, node_id)
+            frontier = {node_id}
+        elif event_type == "WaitRequested":
+            if str(event.get("key") or "").startswith("wait:approval.decision:"):
+                continue
+            flush_sequential_until()
+            for parent_id in frontier:
+                add_edge(parent_id, node_id)
+            frontier = {node_id}
+        elif event_type == "SignalReceived":
+            flush_sequential_until()
+            for parent_id in frontier:
+                add_edge(parent_id, node_id)
+            frontier = {node_id}
+        elif event_type in {"WorkflowCompleted", "WorkflowFailed", "WorkflowCancelled"}:
+            flush_sequential_until()
+            for parent_id in frontier:
+                add_edge(parent_id, node_id)
+            frontier = {node_id}
+
+    flush_sequential_until()
     for artifact in artifacts:
         node_id = _artifact_node_id(artifact)
         if node_id and node_id in nodes:
@@ -607,7 +710,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
     return {
         "workflow_id": status.get("workflow_id"),
         "run": status,
-        "layout": "linear-event-dag",
+        "layout": "run-derived-topology",
         "nodes": list(nodes.values()),
         "edges": edges,
         "artifact_count": len(artifacts),
