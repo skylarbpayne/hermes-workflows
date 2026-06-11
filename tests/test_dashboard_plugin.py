@@ -50,6 +50,37 @@ async def dashboard_named_human_approval_workflow(ctx, inputs):
     return {"approved_by": decision.get("by"), "source_id": decision.get("source", {}).get("id")}
 
 
+@step
+async def dashboard_dynamic_seed(ctx, value):
+    return {"seed": value}
+
+
+@step
+async def dashboard_dynamic_left(ctx, seed):
+    return {"side": "left", "seed": seed["seed"]}
+
+
+@step
+async def dashboard_dynamic_right(ctx, seed):
+    return {"side": "right", "seed": seed["seed"]}
+
+
+@step
+async def dashboard_dynamic_join(ctx, left, right):
+    return {"joined": [left["side"], right["side"]]}
+
+
+@workflow
+async def dashboard_dynamic_topology_workflow(ctx, inputs):
+    seed = await dashboard_dynamic_seed(ctx, inputs["value"])
+    left, right = await ctx.gather(
+        dashboard_dynamic_left(ctx, seed),
+        dashboard_dynamic_right(ctx, seed),
+    )
+    joined = await dashboard_dynamic_join(ctx, left, right)
+    return {"joined": joined}
+
+
 def load_dashboard_api():
     plugin_file = PLUGIN_DASHBOARD / "plugin_api.py"
     spec = importlib.util.spec_from_file_location("hermes_workflows_dashboard_plugin_test", plugin_file)
@@ -173,6 +204,8 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "hwf-dag-edge-svg" in index_js
     assert "hwf-dag-edge-line" in index_js
     assert "markerEnd" in index_js
+    assert "layoutDagNodes" in index_js
+    assert "incomingByTarget" in index_js
     assert "data-dag-node-id" in index_js
     assert "Artifacts from this step" in index_js
     assert "hwf-dag-strip" not in index_js
@@ -750,6 +783,34 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
     assert audio["reference"] == {"type": "url", "href": "https://example.invalid/review.mp3"}
 
 
+def test_dashboard_run_dag_derives_dynamic_fanout_topology_from_run_events(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_dynamic_topology_workflow,
+        {"value": "run-derived"},
+        workflow_id="wf_dynamic_topology",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_dynamic_topology_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    dag = run(api.run_dag("wf_dynamic_topology", db="runtime-smoke"))
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+    nodes = {node["id"]: node for node in dag["nodes"]}
+
+    assert dag["layout"] == "run-derived-topology"
+    assert nodes["gather:0"]["kind"] == "gather"
+    assert nodes["gather:0"]["status"] == "completed"
+    assert nodes["step:dashboard_dynamic_left:0"]["status"] == "completed"
+    assert nodes["step:dashboard_dynamic_right:0"]["status"] == "completed"
+    assert ("step:dashboard_dynamic_seed:0", "step:dashboard_dynamic_left:0") in edges
+    assert ("step:dashboard_dynamic_seed:0", "step:dashboard_dynamic_right:0") in edges
+    assert ("step:dashboard_dynamic_left:0", "gather:0") in edges
+    assert ("step:dashboard_dynamic_right:0", "gather:0") in edges
+    assert ("gather:0", "step:dashboard_dynamic_join:0") in edges
+    assert ("step:dashboard_dynamic_left:0", "step:dashboard_dynamic_right:0") not in edges
+
+
 def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     artifact = {
@@ -769,7 +830,7 @@ def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
     dag = run(api.run_dag("wf_dag", db="runtime-smoke"))
 
     assert dag["workflow_id"] == "wf_dag"
-    assert dag["layout"] == "linear-event-dag"
+    assert dag["layout"] == "run-derived-topology"
     assert dag["artifact_count"] >= 1
     step_node = next(node for node in dag["nodes"] if node["id"] == "step:dashboard_path_artifact_step:0")
     assert step_node["kind"] == "step"
@@ -841,7 +902,7 @@ def test_dashboard_path_ref_workflow_source_run_and_dag(tmp_path, monkeypatch):
     assert launch["result"]["status"] == "waiting"
     assert launch["result"]["waiting_on"] == "signal:approval.decision:approve_path_ref_dag"
     assert dag["workflow_id"] == workflow_id
-    assert dag["layout"] == "linear-event-dag"
+    assert dag["layout"] == "run-derived-topology"
     step_node = next(node for node in dag["nodes"] if node["id"] == "step:build_path_ref_packet:0")
     assert step_node["kind"] == "step"
     assert step_node["status"] == "completed"

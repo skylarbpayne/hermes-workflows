@@ -458,34 +458,43 @@
 
 .hwf-dag-graph {
   position: relative;
-  overflow-x: auto;
-  min-height: 12rem;
-  padding-bottom: 0.35rem;
-  border: 1px solid var(--hwf-border);
-  border-radius: var(--radius-lg, 0.75rem);
-  background: color-mix(in srgb, var(--hwf-surface), black 5%);
+  overflow: auto;
+  min-height: 15rem;
+  padding: 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  background:
+    radial-gradient(circle at 18% 24%, rgba(113, 112, 255, 0.14), transparent 28rem),
+    radial-gradient(circle at 72% 68%, rgba(16, 185, 129, 0.08), transparent 24rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1.5rem 4rem rgba(0, 0, 0, 0.22);
 }
 
+.hwf-dag-svg,
 .hwf-dag-edge-svg {
-  position: absolute;
-  inset: 0;
+  display: block;
   min-width: 100%;
-  height: 100%;
-  pointer-events: none;
   overflow: visible;
 }
 
 .hwf-dag-edge-svg marker path {
-  fill: color-mix(in srgb, var(--color-primary, #6d7cff), white 18%);
+  fill: #9da3ff;
 }
 
 .hwf-dag-edge-line {
   fill: none;
-  stroke: color-mix(in srgb, var(--color-primary, #6d7cff), white 18%);
-  stroke-width: 2;
+  stroke: rgba(157, 163, 255, 0.62);
+  stroke-width: 2.4;
   stroke-linecap: round;
-  stroke-dasharray: 5 5;
-  opacity: 0.82;
+  opacity: 0.92;
+  filter: drop-shadow(0 0 8px rgba(113, 112, 255, 0.32));
+}
+
+.hwf-dag-edge-active {
+  stroke: #f7f8ff;
+  stroke-width: 3.2;
+  opacity: 1;
+  filter: drop-shadow(0 0 10px rgba(157, 163, 255, 0.75));
 }
 
 .hwf-dag-layer {
@@ -493,38 +502,79 @@
   z-index: 1;
 }
 
-.hwf-dag-node {
-  position: absolute;
-  display: grid;
-  gap: 0.35rem;
-  text-align: left;
-  border: 1px solid var(--hwf-border);
-  border-radius: var(--radius-md, 0.5rem);
-  background: var(--hwf-surface);
-  color: inherit;
-  padding: 0.75rem;
+.hwf-dag-svg-node {
   cursor: pointer;
-  box-shadow: 0 0.7rem 1.8rem rgba(0, 0, 0, 0.18);
+  outline: none;
 }
 
-.hwf-dag-node-selected {
-  border-color: var(--color-primary, #6d7cff);
-  box-shadow: inset 0 0 0 1px var(--color-primary, #6d7cff);
+.hwf-dag-svg-node:focus-visible .hwf-dag-node-bg,
+.hwf-dag-svg-node:hover .hwf-dag-node-bg,
+.hwf-dag-node-selected .hwf-dag-node-bg {
+  stroke: #aab1ff;
+  stroke-width: 1.6;
+  filter: drop-shadow(0 0 18px rgba(113, 112, 255, 0.38));
+}
+
+.hwf-dag-node-shadow {
+  fill: rgba(0, 0, 0, 0.28);
+  transform: translate(0, 5px);
+  filter: blur(8px);
+}
+
+.hwf-dag-node-bg,
+.hwf-dag-node {
+  stroke: rgba(255, 255, 255, 0.105);
+  stroke-width: 1;
+  fill: rgba(17, 24, 39, 0.94);
+}
+
+.hwf-dag-node-kind-gather .hwf-dag-node-bg {
+  stroke: rgba(16, 185, 129, 0.42);
+}
+
+.hwf-dag-node-kind-approval .hwf-dag-node-bg {
+  stroke: rgba(245, 158, 11, 0.52);
 }
 
 .hwf-dag-kind {
-  color: var(--color-muted-foreground);
-  font-size: 0.7rem;
+  fill: #8a8f98;
+  color: #8a8f98;
+  font-size: 0.66rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  font-weight: 800;
+  font-weight: 700;
+}
+
+.hwf-dag-label {
+  fill: #f7f8f8;
+  font-size: 0.92rem;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+}
+
+.hwf-dag-artifacts {
+  fill: #8a8f98;
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.hwf-dag-status-bg {
+  fill: rgba(16, 185, 129, 0.13);
+  stroke: rgba(16, 185, 129, 0.28);
+}
+
+.hwf-dag-status-text {
+  fill: #b7f7d4;
+  font-size: 0.57rem;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .hwf-dag-inspector {
-  border: 1px solid var(--hwf-border);
-  border-radius: var(--radius-lg, 0.75rem);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
   padding: 1rem;
-  background: var(--hwf-surface);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
 }
 
 .hwf-approval-dialog {
