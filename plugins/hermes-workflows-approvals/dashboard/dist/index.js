@@ -473,6 +473,60 @@
         approval.key && e(Pill, { label: "key: " + approval.key })));
   }
 
+  function layoutDagNodes(nodes, edges) {
+    const nodeWidth = 220;
+    const nodeHeight = 92;
+    const columnGap = 92;
+    const rowGap = 42;
+    const margin = 24;
+    const byId = {};
+    nodes.forEach(function (node) { byId[node.id] = node; });
+    const incoming = {};
+    const outgoing = {};
+    nodes.forEach(function (node) { incoming[node.id] = []; outgoing[node.id] = []; });
+    edges.forEach(function (edge) {
+      if (!byId[edge.from] || !byId[edge.to]) return;
+      incoming[edge.to].push(edge.from);
+      outgoing[edge.from].push(edge.to);
+    });
+    const depth = {};
+    nodes.forEach(function (node) { depth[node.id] = 0; });
+    nodes.forEach(function (node) {
+      (outgoing[node.id] || []).forEach(function (target) {
+        depth[target] = Math.max(depth[target] || 0, (depth[node.id] || 0) + 1);
+      });
+    });
+    const columns = {};
+    nodes.forEach(function (node) {
+      const column = depth[node.id] || 0;
+      if (!columns[column]) columns[column] = [];
+      columns[column].push(node.id);
+    });
+    const positions = {};
+    let maxRows = 1;
+    Object.keys(columns).forEach(function (columnKey) {
+      const column = Number(columnKey);
+      const ids = columns[columnKey];
+      maxRows = Math.max(maxRows, ids.length);
+      const columnHeight = ids.length * nodeHeight + Math.max(0, ids.length - 1) * rowGap;
+      ids.forEach(function (id, row) {
+        positions[id] = {
+          x: margin + column * (nodeWidth + columnGap),
+          y: margin + row * (nodeHeight + rowGap) + Math.max(0, (maxRows * nodeHeight - columnHeight) / 2)
+        };
+      });
+    });
+    const maxDepth = nodes.reduce(function (value, node) { return Math.max(value, depth[node.id] || 0); }, 0);
+    return {
+      nodeWidth: nodeWidth,
+      nodeHeight: nodeHeight,
+      positions: positions,
+      incoming: incoming,
+      graphWidth: Math.max(340, margin * 2 + (maxDepth + 1) * nodeWidth + maxDepth * columnGap),
+      graphHeight: Math.max(176, margin * 2 + maxRows * nodeHeight + Math.max(0, maxRows - 1) * rowGap)
+    };
+  }
+
   function RunDag(props) {
     const selectedState = hooks.useState(null);
     const selectedDagNodeId = selectedState[0];
@@ -484,19 +538,14 @@
     const nodes = data.nodes || [];
     const edges = data.edges || [];
     const selected = nodes.find(function (node) { return node.id === selectedDagNodeId; }) || nodes[0] || null;
-    const edgesByTarget = {};
-    edges.forEach(function (edge) { edgesByTarget[edge.to] = edge.from; });
-    const nodeWidth = 220;
-    const nodeHeight = 92;
-    const gap = 72;
-    const margin = 24;
-    const graphWidth = Math.max(340, margin * 2 + (nodes.length * nodeWidth) + (Math.max(0, nodes.length - 1) * gap));
-    const graphHeight = 176;
+    const layout = layoutDagNodes(nodes, edges);
+    const nodeWidth = layout.nodeWidth;
+    const nodeHeight = layout.nodeHeight;
+    const graphWidth = layout.graphWidth;
+    const graphHeight = layout.graphHeight;
+    const positions = layout.positions;
+    const incomingByTarget = layout.incoming;
     const markerId = "hwf-dag-arrow-" + String(props.workflowId || "run").replace(/[^A-Za-z0-9_-]/g, "-");
-    const positions = {};
-    nodes.forEach(function (node, index) {
-      positions[node.id] = { x: margin + index * (nodeWidth + gap), y: margin + ((index % 2) * 18) };
-    });
     return e("div", { className: "hwf-dag" },
       nodes.length ? e("div", { className: "hwf-dag-graph", role: "group", "aria-label": "Workflow run DAG graph" },
         e("svg", { className: "hwf-dag-edge-svg", viewBox: "0 0 " + graphWidth + " " + graphHeight, preserveAspectRatio: "none", "aria-hidden": "true", style: { width: graphWidth + "px", height: graphHeight + "px" } },
@@ -534,7 +583,7 @@
             e("strong", null, shortId(node.label || node.id)),
             e("span", { className: statusClass(node.status) }, node.status || "recorded"),
             node.artifact_count ? e("span", { className: "hwf-muted" }, node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s")) : null,
-            edgesByTarget[node.id] && e("small", { className: "hwf-muted" }, "after " + shortId(edgesByTarget[node.id])));
+            incomingByTarget[node.id] && incomingByTarget[node.id].length ? e("small", { className: "hwf-muted" }, "after " + incomingByTarget[node.id].map(shortId).join(", ")) : null);
         }))) : e("p", { className: "hwf-muted" }, "No DAG nodes recorded for this run yet."),
       selected && e("div", { className: "hwf-dag-inspector" },
         e("div", { className: "hwf-section-title" }, "Selected piece"),

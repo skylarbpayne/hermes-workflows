@@ -204,6 +204,8 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "hwf-dag-edge-svg" in index_js
     assert "hwf-dag-edge-line" in index_js
     assert "markerEnd" in index_js
+    assert "layoutDagNodes" in index_js
+    assert "incomingByTarget" in index_js
     assert "data-dag-node-id" in index_js
     assert "Artifacts from this step" in index_js
     assert "hwf-dag-strip" not in index_js
