@@ -705,8 +705,11 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         node_id = _artifact_node_id(artifact)
         if node_id and node_id in nodes:
             nodes[node_id]["artifacts"].append(artifact)
+    outgoing_targets = {edge["from"] for edge in edges}
     for node in nodes.values():
         node["artifact_count"] = len(node["artifacts"])
+        if node.get("kind") == "gather" and node.get("id") in outgoing_targets and node.get("status") == "waiting":
+            node["status"] = "completed"
     return {
         "workflow_id": status.get("workflow_id"),
         "run": status,

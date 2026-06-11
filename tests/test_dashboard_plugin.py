@@ -800,6 +800,7 @@ def test_dashboard_run_dag_derives_dynamic_fanout_topology_from_run_events(tmp_p
 
     assert dag["layout"] == "run-derived-topology"
     assert nodes["gather:0"]["kind"] == "gather"
+    assert nodes["gather:0"]["status"] == "completed"
     assert nodes["step:dashboard_dynamic_left:0"]["status"] == "completed"
     assert nodes["step:dashboard_dynamic_right:0"]["status"] == "completed"
     assert ("step:dashboard_dynamic_seed:0", "step:dashboard_dynamic_left:0") in edges

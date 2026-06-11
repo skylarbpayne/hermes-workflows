@@ -473,12 +473,32 @@
         approval.key && e(Pill, { label: "key: " + approval.key })));
   }
 
+  function dagNodeLabel(node) {
+    const value = String(node.label || node.id || "node");
+    return value.replace(/^step:/, "").replace(/:0$/, "").replace(/^workflow:/, "workflow:");
+  }
+
+  function dagNodeSubLabel(node) {
+    if (node.kind === "step") return "step";
+    if (node.kind === "gather") return "fan-in";
+    if (node.kind === "approval") return "approval";
+    if (node.id === "workflow:start") return "start";
+    if (node.id === "workflow:completed") return "completed";
+    return node.kind || "event";
+  }
+
+  function truncateDagLabel(value, max) {
+    const text = String(value || "");
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  }
+
   function layoutDagNodes(nodes, edges) {
-    const nodeWidth = 220;
-    const nodeHeight = 92;
-    const columnGap = 92;
-    const rowGap = 42;
-    const margin = 24;
+    const nodeWidth = 184;
+    const nodeHeight = 68;
+    const columnGap = 110;
+    const rowGap = 48;
+    const marginX = 52;
+    const marginY = 42;
     const byId = {};
     nodes.forEach(function (node) { byId[node.id] = node; });
     const incoming = {};
@@ -491,28 +511,39 @@
     });
     const depth = {};
     nodes.forEach(function (node) { depth[node.id] = 0; });
-    nodes.forEach(function (node) {
-      (outgoing[node.id] || []).forEach(function (target) {
-        depth[target] = Math.max(depth[target] || 0, (depth[node.id] || 0) + 1);
+    for (let pass = 0; pass < nodes.length; pass += 1) {
+      edges.forEach(function (edge) {
+        if (!byId[edge.from] || !byId[edge.to]) return;
+        depth[edge.to] = Math.max(depth[edge.to] || 0, (depth[edge.from] || 0) + 1);
       });
-    });
+    }
     const columns = {};
     nodes.forEach(function (node) {
       const column = depth[node.id] || 0;
       if (!columns[column]) columns[column] = [];
       columns[column].push(node.id);
     });
+    Object.keys(columns).forEach(function (columnKey) {
+      columns[columnKey].sort(function (a, b) {
+        const aIncoming = incoming[a] || [];
+        const bIncoming = incoming[b] || [];
+        const aHint = aIncoming.length ? Math.min.apply(null, aIncoming.map(function (id) { return nodes.findIndex(function (node) { return node.id === id; }); })) : nodes.findIndex(function (node) { return node.id === a; });
+        const bHint = bIncoming.length ? Math.min.apply(null, bIncoming.map(function (id) { return nodes.findIndex(function (node) { return node.id === id; }); })) : nodes.findIndex(function (node) { return node.id === b; });
+        return aHint - bHint;
+      });
+    });
+    const maxRows = Math.max(1, Object.keys(columns).reduce(function (value, columnKey) { return Math.max(value, columns[columnKey].length); }, 1));
+    const totalColumnHeight = maxRows * nodeHeight + Math.max(0, maxRows - 1) * rowGap;
     const positions = {};
-    let maxRows = 1;
     Object.keys(columns).forEach(function (columnKey) {
       const column = Number(columnKey);
       const ids = columns[columnKey];
-      maxRows = Math.max(maxRows, ids.length);
       const columnHeight = ids.length * nodeHeight + Math.max(0, ids.length - 1) * rowGap;
+      const yOffset = (totalColumnHeight - columnHeight) / 2;
       ids.forEach(function (id, row) {
         positions[id] = {
-          x: margin + column * (nodeWidth + columnGap),
-          y: margin + row * (nodeHeight + rowGap) + Math.max(0, (maxRows * nodeHeight - columnHeight) / 2)
+          x: marginX + column * (nodeWidth + columnGap),
+          y: marginY + yOffset + row * (nodeHeight + rowGap)
         };
       });
     });
@@ -520,10 +551,13 @@
     return {
       nodeWidth: nodeWidth,
       nodeHeight: nodeHeight,
+      marginX: marginX,
+      marginY: marginY,
       positions: positions,
       incoming: incoming,
-      graphWidth: Math.max(340, margin * 2 + (maxDepth + 1) * nodeWidth + maxDepth * columnGap),
-      graphHeight: Math.max(176, margin * 2 + maxRows * nodeHeight + Math.max(0, maxRows - 1) * rowGap)
+      outgoing: outgoing,
+      graphWidth: Math.max(520, marginX * 2 + (maxDepth + 1) * nodeWidth + maxDepth * columnGap),
+      graphHeight: Math.max(220, marginY * 2 + totalColumnHeight)
     };
   }
 
@@ -545,13 +579,19 @@
     const graphHeight = layout.graphHeight;
     const positions = layout.positions;
     const incomingByTarget = layout.incoming;
+    const outgoingBySource = layout.outgoing;
     const markerId = "hwf-dag-arrow-" + String(props.workflowId || "run").replace(/[^A-Za-z0-9_-]/g, "-");
+    function selectNode(node) { setSelectedDagNodeId(node.id); }
+    function isConnected(edge) { return selected && (edge.from === selected.id || edge.to === selected.id); }
     return e("div", { className: "hwf-dag" },
       nodes.length ? e("div", { className: "hwf-dag-graph", role: "group", "aria-label": "Workflow run DAG graph" },
-        e("svg", { className: "hwf-dag-edge-svg", viewBox: "0 0 " + graphWidth + " " + graphHeight, preserveAspectRatio: "none", "aria-hidden": "true", style: { width: graphWidth + "px", height: graphHeight + "px" } },
+        e("svg", { className: "hwf-dag-svg hwf-dag-edge-svg", viewBox: "0 0 " + graphWidth + " " + graphHeight, role: "img", "aria-label": "Run-derived workflow DAG", style: { width: graphWidth + "px", height: graphHeight + "px" } },
           e("defs", null,
-            e("marker", { id: markerId, markerWidth: "8", markerHeight: "8", refX: "7", refY: "4", orient: "auto" },
-              e("path", { d: "M0,0 L8,4 L0,8 z" }))),
+            e("linearGradient", { id: markerId + "-node", x1: "0", y1: "0", x2: "1", y2: "1" },
+              e("stop", { offset: "0%", stopColor: "rgba(113, 112, 255, 0.24)" }),
+              e("stop", { offset: "100%", stopColor: "rgba(255, 255, 255, 0.035)" })),
+            e("marker", { id: markerId, markerWidth: "12", markerHeight: "12", refX: "9", refY: "6", orient: "auto", markerUnits: "strokeWidth" },
+              e("path", { d: "M1,1 L10,6 L1,11 L4,6 z" }))),
           edges.map(function (edge, index) {
             const from = positions[edge.from];
             const to = positions[edge.to];
@@ -560,37 +600,49 @@
             const startY = from.y + nodeHeight / 2;
             const endX = to.x;
             const endY = to.y + nodeHeight / 2;
-            const midX = startX + Math.max(24, (endX - startX) / 2);
+            const bend = Math.max(46, Math.min(120, (endX - startX) * 0.48));
             return e("path", {
               key: edge.from + "->" + edge.to + ":" + index,
-              className: "hwf-dag-edge-line",
-              d: "M " + startX + " " + startY + " C " + midX + " " + startY + " " + midX + " " + endY + " " + endX + " " + endY,
+              className: "hwf-dag-edge-line " + (isConnected(edge) ? "hwf-dag-edge-active" : ""),
+              d: "M " + startX + " " + startY + " C " + (startX + bend) + " " + startY + " " + (endX - bend) + " " + endY + " " + endX + " " + endY,
               markerEnd: "url(#" + markerId + ")"
             });
-          })),
-        e("div", { className: "hwf-dag-layer", style: { width: graphWidth + "px", height: graphHeight + "px" } }, nodes.map(function (node) {
-          const pos = positions[node.id] || { x: margin, y: margin };
-          return e("button", {
-            key: node.id,
-            type: "button",
-            className: "hwf-dag-node " + (selected && selected.id === node.id ? "hwf-dag-node-selected" : ""),
-            onClick: function () { setSelectedDagNodeId(node.id); },
-            title: node.id,
-            "data-dag-node-id": node.id,
-            style: { left: pos.x + "px", top: pos.y + "px", width: nodeWidth + "px", minHeight: nodeHeight + "px" }
-          },
-            e("span", { className: "hwf-dag-kind" }, node.kind),
-            e("strong", null, shortId(node.label || node.id)),
-            e("span", { className: statusClass(node.status) }, node.status || "recorded"),
-            node.artifact_count ? e("span", { className: "hwf-muted" }, node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s")) : null,
-            incomingByTarget[node.id] && incomingByTarget[node.id].length ? e("small", { className: "hwf-muted" }, "after " + incomingByTarget[node.id].map(shortId).join(", ")) : null);
-        }))) : e("p", { className: "hwf-muted" }, "No DAG nodes recorded for this run yet."),
+          }),
+          nodes.map(function (node) {
+            const pos = positions[node.id] || { x: layout.marginX, y: layout.marginY };
+            const nodeSelected = selected && selected.id === node.id;
+            const label = truncateDagLabel(dagNodeLabel(node), 22);
+            const subLabel = dagNodeSubLabel(node);
+            const status = node.status || "recorded";
+            const artifactText = node.artifact_count ? node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s") : "";
+            return e("g", {
+              key: node.id,
+              className: "hwf-dag-svg-node " + (nodeSelected ? "hwf-dag-node-selected" : "") + " hwf-dag-node-kind-" + (node.kind || "event"),
+              transform: "translate(" + pos.x + " " + pos.y + ")",
+              onClick: function () { selectNode(node); },
+              onKeyDown: function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectNode(node); } },
+              tabIndex: 0,
+              role: "button",
+              title: node.id,
+              "data-dag-node-id": node.id
+            },
+              e("rect", { className: "hwf-dag-node-shadow", x: 0, y: 0, width: nodeWidth, height: nodeHeight, rx: 15 }),
+              e("rect", { className: "hwf-dag-node-bg", x: 0, y: 0, width: nodeWidth, height: nodeHeight, rx: 15, fill: "url(#" + markerId + "-node)" }),
+              e("text", { className: "hwf-dag-kind", x: 16, y: 21 }, subLabel),
+              e("text", { className: "hwf-dag-label", x: 16, y: 43 }, label),
+              artifactText && e("text", { className: "hwf-dag-artifacts", x: 16, y: 59 }, artifactText),
+              e("rect", { className: "hwf-dag-status-bg", x: nodeWidth - 74, y: 12, width: 58, height: 18, rx: 9 }),
+              e("text", { className: "hwf-dag-status-text", x: nodeWidth - 45, y: 25, textAnchor: "middle" }, truncateDagLabel(status, 9)));
+          }))) : e("p", { className: "hwf-muted" }, "No DAG nodes recorded for this run yet."),
       selected && e("div", { className: "hwf-dag-inspector" },
         e("div", { className: "hwf-section-title" }, "Selected piece"),
         e("div", { className: "hwf-meta" },
           e(Pill, { label: selected.kind || "node" }),
           e(Pill, { label: selected.status || "recorded", className: statusClass(selected.status) }),
           e("code", { className: "hwf-run-id", title: selected.id }, shortId(selected.id))),
+        e("p", { className: "hwf-muted" },
+          (incomingByTarget[selected.id] || []).length ? "After: " + incomingByTarget[selected.id].map(shortId).join(", ") + ". " : "No incoming edges. ",
+          (outgoingBySource[selected.id] || []).length ? "Next: " + outgoingBySource[selected.id].map(shortId).join(", ") + "." : "No outgoing edges."),
         e("div", { className: "hwf-section-title" }, "Artifacts from this step"),
         selected.artifacts && selected.artifacts.length ? selected.artifacts.map(function (artifact) {
           return e(ArtifactCard, { key: artifact.id, artifact: artifact });
