@@ -242,8 +242,25 @@ def test_dashboard_frontend_inspect_run_inspector_is_visible_before_run_list():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
 
     inspector_index = index_js.index('selected && e(Card, { className: "hwf-inspector" }')
-    run_list_index = index_js.index('(props.runs || []).map(function (run)')
+    run_list_index = index_js.index('runs.map(function (run)')
     assert inspector_index < run_list_index
+
+
+def test_dashboard_frontend_runs_panel_passes_rows_as_real_children():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    assert 'const runs = Array.isArray(props.runs) ? props.runs : [];' in index_js
+    assert '].filter(Boolean).concat(runs.map(function (run) {' in index_js
+    assert 'React.createElement.apply(React, ["div", { className: "hwf-panel" }].concat(children));' in index_js
+
+
+def test_dashboard_frontend_runs_tab_shows_empty_or_error_state_instead_of_blank_panel():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    assert "No runs found for the active source." in index_js
+    assert "dashboard is looking at the wrong state source" in index_js
+    assert "loading: runsData.loading" in index_js
+    assert "error: runsData.error" in index_js
 
 
 def test_dashboard_plugin_api_lists_configured_dbs_without_touching_credentials(tmp_path, monkeypatch):
@@ -274,6 +291,24 @@ def test_dashboard_plugin_api_marks_default_active_state_source(tmp_path, monkey
     assert [db["name"] for db in result["dbs"]] == ["aaa-missing", "default"]
     assert result["dbs"][0]["exists"] is False
     assert str(default_db) not in json.dumps(result)
+
+
+def test_dashboard_plugin_api_prefers_single_populated_source_over_empty_default(tmp_path, monkeypatch):
+    default_db = tmp_path / "empty-default.sqlite"
+    populated_db = tmp_path / "palmer-workflows.sqlite"
+    WorkflowEngine(str(default_db))
+    create_pending_approval(populated_db)
+    configure_test_dbs(monkeypatch, tmp_path, {"default": str(default_db), "Palmer workflows": str(populated_db)})
+    api = load_dashboard_api()
+
+    sources = run(api.list_dbs())
+    runs = run(api.runs())
+
+    assert sources["active_source"] == {"name": "Palmer workflows", "exists": True}
+    assert runs["db_alias"] == "Palmer workflows"
+    assert runs["count"] == 1
+    assert str(populated_db) not in json.dumps(sources)
+    assert str(populated_db) not in json.dumps(runs)
 
 
 def test_dashboard_plugin_api_overview_includes_workflow_observability_and_redacts_secrets(tmp_path, monkeypatch):
