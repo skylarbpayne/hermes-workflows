@@ -857,6 +857,80 @@ def test_dashboard_path_ref_workflow_source_run_and_dag(tmp_path, monkeypatch):
     assert "/Users/operator/private/path-ref.txt" in combined
 
 
+def test_dashboard_catalog_python_path_run_exposes_inspect_run_dag(tmp_path, monkeypatch):
+    project = tmp_path / "catalog-src-project"
+    source_root = project / "src"
+    package = source_root / "catalog_flows"
+    state_dir = tmp_path / "operator-state" / ".hermes"
+    package.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "dag_flow.py").write_text(
+        "from hermes_workflows import step, workflow\n"
+        "\n"
+        "@step\n"
+        "async def build_catalog_packet(ctx, value):\n"
+        "    return {'kind': 'packet', 'value': value, 'path': '/Users/operator/private/catalog-dag.txt'}\n"
+        "\n"
+        "@workflow\n"
+        "async def catalog_dag_workflow(ctx, inputs):\n"
+        "    packet = await build_catalog_packet(ctx, inputs.get('value', 1))\n"
+        "    decision = await ctx.approval.request(\n"
+        "        key='approve_catalog_dag',\n"
+        "        prompt='Approve catalog DAG?',\n"
+        "        artifact=packet,\n"
+        "        approver='human:operator',\n"
+        "        allowed=['approve', 'reject'],\n"
+        "    )\n"
+        "    return {'decision': decision.get('action'), 'packet': packet}\n"
+    )
+    workflow_ref = "catalog_flows.dag_flow:catalog_dag_workflow"
+    db = state_dir / "workflows.sqlite"
+    WorkflowEngine(db)  # Create the configured DB before read-only dashboard source lookup.
+    configure_test_dbs(
+        monkeypatch,
+        tmp_path,
+        {"runtime-smoke": str(db)},
+        workflow_catalog=[
+            {
+                "id": "catalog-dag",
+                "name": "Catalog DAG smoke",
+                "description": "Dashboard smoke for module refs loaded through configured python_path.",
+                "workflow_ref": workflow_ref,
+                "python_path": str(source_root),
+                "input_schema": {"type": "object", "properties": {"value": {"type": "integer"}}},
+            }
+        ],
+    )
+    api = load_dashboard_api()
+
+    source = run(api.workflow_definition_source("catalog-dag", db="runtime-smoke"))
+    launch = run(api.run_workflow({"db": "runtime-smoke", "definition_id": "catalog-dag", "input": {"value": 7}}))
+    workflow_id = launch["result"]["workflow_id"]
+    dag = run(api.run_dag(workflow_id, db="runtime-smoke"))
+
+    assert source["workflow_ref"] == workflow_ref
+    assert source["location"]["file"] == "dag_flow.py"
+    assert "async def catalog_dag_workflow" in source["code"]
+    assert launch["result"]["status"] == "waiting"
+    assert launch["result"]["waiting_on"] == "signal:approval.decision:approve_catalog_dag"
+    assert dag["workflow_id"] == workflow_id
+    assert dag["layout"] == "linear-event-dag"
+    step_node = next(node for node in dag["nodes"] if node["id"] == "step:build_catalog_packet:0")
+    assert step_node["kind"] == "step"
+    assert step_node["status"] == "completed"
+    assert step_node["artifact_count"] == 1
+    assert step_node["artifacts"][0]["artifact_render"]["render"] == "file-reference"
+    approval_node = next(node for node in dag["nodes"] if node["id"] == "approval:approve_catalog_dag")
+    assert approval_node["kind"] == "approval"
+    assert approval_node["status"] == "waiting"
+    assert any(edge["from"] == "workflow:start" and edge["to"] == "step:build_catalog_packet:0" for edge in dag["edges"])
+    assert any(edge["to"] == "approval:approve_catalog_dag" for edge in dag["edges"])
+    combined = json.dumps([source, launch, dag], sort_keys=True)
+    assert str(db) not in combined
+    assert "/Users/operator/private/catalog-dag.txt" in combined
+
+
 def test_dashboard_email_ops_review_artifacts_do_not_expose_future_approval_queue():
     api = load_dashboard_api()
     legacy_packet = {
