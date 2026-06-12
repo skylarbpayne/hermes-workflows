@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from hermes_workflows import WorkflowEngine, WorkflowRegistry, WorkflowWorkerService, step, workflow
@@ -10,6 +11,7 @@ from hermes_workflows.engine import WorkflowContext, WorkflowWaiting
 
 
 RUNS = []
+LEASE_OBSERVATIONS = []
 SHOULD_FAIL_STALE = False
 
 
@@ -35,6 +37,25 @@ async def worker_stale_sensitive(ctx):
     if SHOULD_FAIL_STALE:
         raise RuntimeError("stale worker should not win")
     return "fresh result"
+
+
+@step
+async def worker_slow_lease_probe(ctx):
+    key = "step:worker_slow_lease_probe:0"
+    row = command_row(ctx.engine.db_path, key)
+    assert row is not None
+    before = row["lease_expires_at"]
+    time.sleep(1.5)
+    row = command_row(ctx.engine.db_path, key)
+    assert row is not None
+    during = row["lease_expires_at"]
+    LEASE_OBSERVATIONS.append((before, during))
+    return "slow result"
+
+
+@workflow
+async def worker_slow_lease_workflow(ctx, inputs):
+    return await worker_slow_lease_probe(ctx)
 
 
 @workflow
@@ -233,6 +254,39 @@ def test_stale_worker_cannot_overwrite_reclaimed_command_result(tmp_path):
     assert stale_result.result == "fresh result"
     assert command_row(db, "step:worker_stale_sensitive:0")["status"] == "completed"
     assert [event["type"] for event in engine.events("wf_stale")].count("StepFailed") == 0
+
+
+def test_renewing_command_lease_prevents_premature_reclaim(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_stale_workflow, {}, workflow_id="wf_renew")
+    engine.worker_once("wf_renew", worker_id="worker-bootstrap", lease_seconds=60)
+
+    claimed = engine.claim_command("wf_renew", worker_id="worker-a", lease_seconds=-1)
+    assert claimed is not None
+    assert engine.renew_command_lease("wf_renew", claimed, lease_seconds=60) is True
+
+    assert engine.claim_command("wf_renew", worker_id="worker-b", lease_seconds=60) is None
+    row = command_row(db, "step:worker_stale_sensitive:0")
+    assert row is not None
+    assert row["claimed_by"] == "worker-a"
+    assert row["attempts"] == 1
+
+
+def test_worker_heartbeats_renew_long_running_step_lease(tmp_path):
+    LEASE_OBSERVATIONS.clear()
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_slow_lease_workflow, {}, workflow_id="wf_slow")
+    queued_step = engine.worker_once("wf_slow", worker_id="worker-bootstrap", lease_seconds=60)
+    assert queued_step.status == "waiting"
+
+    result = engine.worker_once("wf_slow", worker_id="worker-a", lease_seconds=2)
+
+    assert result.status == "running"
+    assert LEASE_OBSERVATIONS
+    before, during = LEASE_OBSERVATIONS[-1]
+    assert during > before
 
 
 

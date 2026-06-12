@@ -5,8 +5,10 @@ import importlib
 import inspect
 import json
 import sqlite3
+import threading
 import time
 from collections.abc import Mapping as MappingABC
+from contextlib import contextmanager
 from dataclasses import dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -736,6 +738,84 @@ class WorkflowEngine:
             claimed = con.execute("SELECT * FROM workflow_commands_outbox WHERE id = ?", (row["id"],)).fetchone()
 
         return self._command_payload(claimed)
+
+    def renew_command_lease(
+        self,
+        workflow_id: str,
+        command: Union[sqlite3.Row, Dict[str, Any]],
+        *,
+        lease_seconds: int,
+    ) -> bool:
+        """Extend the lease for the currently claimed command attempt.
+
+        Long-running workflow/step commands can outlive short worker leases. Renewal is
+        guarded by claimed_by + attempts so a stale worker cannot extend or complete a
+        command after another worker has legitimately reclaimed it.
+        """
+
+        self._ensure_writable("renew workflow command lease")
+        if lease_seconds <= 0:
+            return False
+        now = _now()
+        lease_expires_at = now + lease_seconds
+        with self._connect() as con:
+            changed = con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE id = ?
+                  AND workflow_id = ?
+                  AND type = ?
+                  AND status = 'running'
+                  AND claimed_by = ?
+                  AND attempts = ?
+                """,
+                (
+                    lease_expires_at,
+                    now,
+                    command["id"],
+                    workflow_id,
+                    command["type"],
+                    command["claimed_by"],
+                    command["attempts"],
+                ),
+            ).rowcount
+        return changed > 0
+
+    @contextmanager
+    def _command_lease_heartbeat(
+        self,
+        workflow_id: str,
+        command: Union[sqlite3.Row, Dict[str, Any]],
+    ):
+        lease_seconds = _lease_seconds_from_command(command)
+        if lease_seconds <= 0:
+            yield
+            return
+
+        interval = max(0.1, min(float(lease_seconds) / 3.0, 10.0))
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(interval):
+                try:
+                    renewed = self.renew_command_lease(workflow_id, command, lease_seconds=lease_seconds)
+                except Exception:
+                    continue
+                if not renewed:
+                    return
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name=f"workflow-command-lease-heartbeat:{workflow_id}:{command['id']}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
 
     def worker_once(self, workflow_id: str, *, worker_id: str, lease_seconds: int = 30) -> RunResult:
         command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds, command_type=None)
@@ -1784,7 +1864,8 @@ class WorkflowEngine:
             return self._result_from_instance(workflow_id)
 
         workflow_fn = self._workflow_fn_for_instance(self._instance(workflow_id))
-        result = self._run_decider(workflow_id, workflow_fn)
+        with self._command_lease_heartbeat(workflow_id, command):
+            result = self._run_decider(workflow_id, workflow_fn)
         now = _now()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1869,7 +1950,8 @@ class WorkflowEngine:
 
         child_id = payload["child_workflow_id"]
         child_fn = workflow_ref.load(approved=True)
-        child_result = self.run_until_idle(child_fn, payload["inputs"], workflow_id=child_id)
+        with self._command_lease_heartbeat(workflow_id, command):
+            child_result = self.run_until_idle(child_fn, payload["inputs"], workflow_id=child_id)
 
         with self._connect() as con:
             changed = con.execute(
@@ -1974,7 +2056,8 @@ class WorkflowEngine:
             return self._result_from_instance(workflow_id)
 
         try:
-            output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
+            with self._command_lease_heartbeat(workflow_id, command):
+                output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
         except Exception as exc:
             error = {"type": type(exc).__name__, "message": str(exc)}
             with self._connect() as con:
@@ -2319,6 +2402,7 @@ class WorkflowEngine:
             "status": row["status"],
             "claimed_by": row["claimed_by"],
             "lease_expires_at": row["lease_expires_at"],
+            "lease_seconds": _lease_seconds_from_row(row),
             "attempts": row["attempts"],
             "last_error": JsonCodec.loads(row["last_error_json"]),
             "created_at": row["created_at"],
@@ -3160,6 +3244,27 @@ def _history_command_payload(command: Dict[str, Any], *, payload_chars: int) -> 
 
 def _now() -> int:
     return int(time.time())
+
+
+def _lease_seconds_from_row(row: sqlite3.Row) -> int:
+    expires_at = row["lease_expires_at"]
+    updated_at = row["updated_at"]
+    if expires_at is None or updated_at is None:
+        return 0
+    return max(0, int(expires_at) - int(updated_at))
+
+
+def _lease_seconds_from_command(command: Union[sqlite3.Row, Dict[str, Any]]) -> int:
+    if isinstance(command, dict) and command.get("lease_seconds") is not None:
+        return max(0, int(command["lease_seconds"]))
+    try:
+        expires_at = command["lease_expires_at"]
+        updated_at = command["updated_at"]
+    except (KeyError, IndexError):
+        return 0
+    if expires_at is None or updated_at is None:
+        return 0
+    return max(0, int(expires_at) - int(updated_at))
 
 
 def _run_maybe_async(value: Any) -> Any:
