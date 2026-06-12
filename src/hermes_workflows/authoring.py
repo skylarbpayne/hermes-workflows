@@ -293,7 +293,15 @@ async def pipeline(items: Iterable[Any], *stages: Any, limit: int | None = None)
         for index, item in enumerate(current):
             call = _stage_call(stage, item, stage_index=stage_index, item_index=index)
             calls.append(call)
-        current = await parallel(calls, limit=limit)
+        if any(isinstance(call, ApprovalValueCall) for call in calls):
+            if not all(isinstance(call, ApprovalValueCall) for call in calls):
+                raise TypeError("pipeline approval stages cannot be mixed with agent/step calls in the same stage")
+            approved: list[Any] = []
+            for call in calls:
+                approved.append(await call)
+            current = approved
+        else:
+            current = await parallel(calls, limit=limit)
     return current
 
 

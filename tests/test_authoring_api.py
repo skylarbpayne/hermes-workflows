@@ -90,6 +90,18 @@ async def pipeline_agent_workflow(inputs):
     return [section.text for section in sections]
 
 
+@workflow
+async def pipeline_with_approval_workflow(inputs):
+    sections = await pipeline(
+        inputs["items"],
+        lambda item: agent("upper", prompt=f"Uppercase {item}", input={"item": item}, key_by=item, returns=ItemPacket),
+        approve_until("approve_section", prompt="Approve section"),
+        limit=2,
+    )
+    assert all(isinstance(section, ItemPacket) for section in sections)
+    return [section.text for section in sections]
+
+
 def test_agent_requires_prompt():
     with pytest.raises(TypeError, match="prompt"):
         agent("research")
@@ -207,3 +219,25 @@ def test_pipeline_runs_stages_over_items_with_typed_stage_outputs(tmp_path):
     step_ids = [step["id"] for step in status["steps"]]
     assert "agent:upper:alpha" in step_ids
     assert "agent:tag:ALPHA" in step_ids
+
+
+def test_pipeline_supports_approval_stages(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=lambda request: {"output": {"text": request["input"]["item"].upper()}})
+
+    first = engine.run_until_idle(pipeline_with_approval_workflow, {"items": ["alpha"]}, workflow_id="wf_pipeline_approval")
+
+    assert first.status == "waiting"
+    assert first.waiting_on == "signal:approval.decision:approve_section"
+
+    signaled = engine.signal(
+        "wf_pipeline_approval",
+        "approval.decision",
+        key="approve_section",
+        payload={"action": "approve"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m1"},
+    )
+    result = engine.drain("wf_pipeline_approval", initial=signaled)
+
+    assert result.status == "completed"
+    assert result.result == ["ALPHA"]
