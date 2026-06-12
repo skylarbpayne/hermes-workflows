@@ -1281,6 +1281,28 @@ class WorkflowEngine:
         label: str | None = None,
         payload: Dict[str, Any] | None = None,
     ) -> None:
+        existing_rows = con.execute(
+            """
+            SELECT payload_json
+            FROM workflow_events
+            WHERE workflow_id = ? AND type = 'StepRequested' AND key = ?
+            ORDER BY seq ASC
+            """,
+            (workflow_id, step_key),
+        ).fetchall()
+        for row in existing_rows:
+            existing = JsonCodec.loads(row["payload_json"])
+            existing_mode = existing.get("completion_mode") if isinstance(existing, dict) else None
+            existing_type = existing.get("step_type") if isinstance(existing, dict) else None
+            if existing_mode != completion_mode or existing_type != step_type:
+                raise ValueError(
+                    "public step key conflict: "
+                    f"{step_key!r} is already used as {existing_type or 'unknown'}"
+                    f"/{existing_mode or 'unknown'} and cannot also be used as "
+                    f"{step_type}/{completion_mode}. Use a distinct step key before "
+                    "runtime plumbing prefixes are collapsed for operator-facing topology."
+                )
+
         step_payload: Dict[str, Any] = {
             "key": step_key,
             "step_name": label or step_key,
