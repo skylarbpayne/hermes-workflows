@@ -423,7 +423,7 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "allowed": ["approve", "reject"],
             "authority": [],
             "timeout": None,
-            "requested_seq": 5,
+            "requested_seq": 6,
             "decision": None,
             "source": None,
         }
@@ -442,7 +442,7 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "allowed": ["approve", "reject"],
             "authority": [],
             "timeout": None,
-            "requested_seq": 5,
+            "requested_seq": 6,
             "decision": {"action": "approve", "by": "skylar"},
             "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/3"},
         }

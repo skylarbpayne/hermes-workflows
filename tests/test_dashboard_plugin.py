@@ -4,13 +4,15 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step, workflow
+from hermes_workflows.workflows.coding import coding_workflow
 from tests.test_hermes_plugin_approvals import create_pending_approval
 
 
@@ -205,6 +207,8 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "hwf-dag-edge-line" in index_js
     assert "markerEnd" in index_js
     assert "layoutDagNodes" in index_js
+    assert "completion_mode === \"approval\"" in index_js
+    assert "completion_mode === \"worker\"" in index_js
     assert "incomingByTarget" in index_js
     assert "data-dag-node-id" in index_js
     assert "Artifacts from this step" in index_js
@@ -874,12 +878,89 @@ def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
     assert step_node["artifacts"][0]["kind"] == "step_output"
     assert step_node["artifacts"][0]["source"]["key"] == "step:dashboard_path_artifact_step:0"
     assert step_node["artifacts"][0]["artifact_render"]["render"] == "inline-json"
-    approval_node = next(node for node in dag["nodes"] if node["id"] == "approval:approve_path_artifact")
-    assert approval_node["kind"] == "approval"
+    approval_node = next(node for node in dag["nodes"] if node["id"] == "approve_path_artifact")
+    assert approval_node["kind"] == "step"
+    assert approval_node["completion_mode"] == "approval"
     assert approval_node["status"] == "waiting"
     assert any(edge["from"] == "workflow:start" and edge["to"] == "step:dashboard_path_artifact_step:0" for edge in dag["edges"])
-    assert any(edge["to"] == "approval:approve_path_artifact" for edge in dag["edges"])
+    assert any(edge["to"] == "approve_path_artifact" for edge in dag["edges"])
     assert str(db) not in json.dumps(dag)
+
+
+def test_dashboard_run_dag_collapses_coding_workflow_approvals_and_handoff_to_steps(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "feature.txt").write_text("before\n")
+    for args in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "tests@example.invalid"],
+        ["git", "config", "user.name", "Workflow Tests"],
+        ["git", "add", "feature.txt"],
+        ["git", "commit", "-q", "-m", "initial"],
+    ):
+        subprocess.run(args, cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    workflow_id = "wf_step_oriented_coding_dag"
+    inputs = {
+        "repo_path": str(repo),
+        "goal": "prove step-oriented coding DAG",
+        "verification_commands": ["python -c 'print(\"ok\")'"],
+        "verification_timeout": 30,
+        "commit": False,
+        "push": False,
+    }
+    result = engine.run_until_idle(
+        coding_workflow,
+        inputs,
+        workflow_id=workflow_id,
+        workflow_ref="hermes_workflows.workflows.coding:coding_workflow",
+    )
+    assert result.status == "waiting"
+
+    receipt = engine.submit_approval_decision(
+        ApprovalDecisionInput(
+            workflow_id=workflow_id,
+            key="approve_coding_plan",
+            action="approve",
+            by="skylar",
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "plan-ok"},
+        )
+    )
+    assert receipt.status == "waiting"
+    (repo / "feature.txt").write_text("after\n")
+    engine.signal(
+        workflow_id,
+        "handoff.completed",
+        key="coding_ready",
+        payload={"by": "agent:implementer", "summary": "updated feature.txt"},
+        source={"kind": "worker", "id": "worker-1"},
+    )
+
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+    dag = run(api.run_dag(workflow_id, db="runtime-smoke"))
+    nodes = {node["id"]: node for node in dag["nodes"]}
+    node_ids = set(nodes)
+
+    assert "approve_coding_plan" in node_ids
+    assert "coding_ready" in node_ids
+    assert "approve_coding_review" in node_ids
+    assert nodes["approve_coding_plan"]["kind"] == "step"
+    assert nodes["approve_coding_plan"]["completion_mode"] == "approval"
+    assert nodes["approve_coding_plan"]["status"] == "completed"
+    assert "StepRequested" in nodes["approve_coding_plan"]["event_types"]
+    assert "StepCompleted" in nodes["approve_coding_plan"]["event_types"]
+    assert nodes["coding_ready"]["kind"] == "step"
+    assert nodes["coding_ready"]["completion_mode"] == "worker"
+    assert nodes["coding_ready"]["status"] == "completed"
+    assert "StepRequested" in nodes["coding_ready"]["event_types"]
+    assert "StepCompleted" in nodes["coding_ready"]["event_types"]
+    assert nodes["approve_coding_review"]["kind"] == "step"
+    assert nodes["approve_coding_review"]["completion_mode"] == "approval"
+    assert nodes["approve_coding_review"]["status"] == "waiting"
+    assert not any(node_id.startswith(("approval:", "signal:", "handoff:", "wait:")) for node_id in node_ids)
 
 
 def test_dashboard_path_ref_workflow_source_run_and_dag(tmp_path, monkeypatch):
@@ -943,11 +1024,12 @@ def test_dashboard_path_ref_workflow_source_run_and_dag(tmp_path, monkeypatch):
     assert step_node["status"] == "completed"
     assert step_node["artifact_count"] == 1
     assert step_node["artifacts"][0]["artifact_render"]["render"] == "file-reference"
-    approval_node = next(node for node in dag["nodes"] if node["id"] == "approval:approve_path_ref_dag")
-    assert approval_node["kind"] == "approval"
+    approval_node = next(node for node in dag["nodes"] if node["id"] == "approve_path_ref_dag")
+    assert approval_node["kind"] == "step"
+    assert approval_node["completion_mode"] == "approval"
     assert approval_node["status"] == "waiting"
     assert any(edge["from"] == "workflow:start" and edge["to"] == "step:build_path_ref_packet:0" for edge in dag["edges"])
-    assert any(edge["to"] == "approval:approve_path_ref_dag" for edge in dag["edges"])
+    assert any(edge["to"] == "approve_path_ref_dag" for edge in dag["edges"])
     combined = json.dumps([source, launch, dag], sort_keys=True)
     assert str(db) not in combined
     assert "/Users/operator/private/path-ref.txt" in combined
