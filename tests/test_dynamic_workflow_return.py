@@ -393,6 +393,7 @@ def test_parent_completes_after_waiting_child_is_signaled_and_reconciled(tmp_pat
         payload={"ok": True},
         source={"kind": "test", "id": "unit"},
     )
+    child_after_signal = engine.drain(child_id, initial=child_after_signal)
     assert child_after_signal.status == "completed"
     parent_status_before_reconcile = engine.workflow_status("wf_waiting_child_resume", recent_events=1)
     assert parent_status_before_reconcile["status"] == "waiting"
@@ -408,6 +409,7 @@ def test_parent_completes_after_waiting_child_is_signaled_and_reconciled(tmp_pat
     ]
 
     final = engine.reconcile_child_result("wf_waiting_child_resume", child_key)
+    final = engine.drain("wf_waiting_child_resume", initial=final)
 
     assert final.status == "completed"
     assert final.result == {"payload": {"ok": True}}
@@ -428,6 +430,7 @@ def test_reconcile_children_replays_parent_after_terminal_child_crash_window(tmp
     child_key = child_requested["key"]
     child_id = child_requested["payload"]["child_workflow_id"]
     child_after_signal = engine.signal(child_id, "dynamic.ready", key="crash-window", payload={"ok": True}, source={"kind": "test", "id": "unit"})
+    child_after_signal = engine.drain(child_id, initial=child_after_signal)
     assert child_after_signal.status == "completed"
     # Simulate: terminal child event committed, but parent replay crashed before WorkflowCompleted.
     with engine._connect() as con:
@@ -436,6 +439,7 @@ def test_reconcile_children_replays_parent_after_terminal_child_crash_window(tmp
         con.execute("UPDATE workflow_instances SET status = 'running', waiting_on = NULL WHERE id = ?", ("wf_child_terminal_crash_window",))
     assert engine.pending_child_workflow_keys("wf_child_terminal_crash_window") == []
     recovered = engine.reconcile_children("wf_child_terminal_crash_window")
+    recovered = engine.drain("wf_child_terminal_crash_window", initial=recovered)
     assert recovered.status == "completed"
     assert recovered.result == {"payload": {"ok": True}}
     assert [event["type"] for event in engine.events("wf_child_terminal_crash_window")].count("WorkflowCompleted") == 1
@@ -463,14 +467,18 @@ def test_map_workflow_waits_on_gather_and_completes_after_children_reconcile_in_
 
     assert engine.pending_child_workflow_keys("wf_waiting_child_map") == [event["key"] for event in requested]
 
-    assert engine.signal(child_ids["b"], "dynamic.ready", key="b", payload={"letter": "B"}).status == "completed"
+    child_b = engine.signal(child_ids["b"], "dynamic.ready", key="b", payload={"letter": "B"})
+    assert engine.drain(child_ids["b"], initial=child_b).status == "completed"
     after_one = engine.reconcile_children("wf_waiting_child_map")
+    after_one = engine.drain("wf_waiting_child_map", initial=after_one)
     assert after_one.status == "waiting"
     assert after_one.waiting_on == first.waiting_on
     assert [event["type"] for event in engine.events("wf_waiting_child_map")].count("ChildWorkflowCompleted") == 1
 
-    assert engine.signal(child_ids["a"], "dynamic.ready", key="a", payload={"letter": "A"}).status == "completed"
+    child_a = engine.signal(child_ids["a"], "dynamic.ready", key="a", payload={"letter": "A"})
+    assert engine.drain(child_ids["a"], initial=child_a).status == "completed"
     final = engine.reconcile_children("wf_waiting_child_map")
+    final = engine.drain("wf_waiting_child_map", initial=final)
     assert final.status == "completed"
     assert final.result == {"processed": [{"payload": {"letter": "B"}}, {"payload": {"letter": "A"}}]}
     assert engine.pending_child_workflow_keys("wf_waiting_child_map") == []
@@ -555,6 +563,7 @@ def test_failed_waiting_child_fails_parent_when_reconciled(tmp_path):
     child_id = child_requested["payload"]["child_workflow_id"]
 
     child_after_signal = engine.signal(child_id, "dynamic.ready", key="boom", payload={"go": True})
+    child_after_signal = engine.drain(child_id, initial=child_after_signal)
     assert child_after_signal.status == "failed"
 
     reconciled = engine.reconcile_child_result("wf_failing_child", child_requested["key"])
@@ -602,6 +611,7 @@ def test_unapproved_live_generated_workflow_does_not_start_child_until_approved(
         payload={"action": "approve", "by": "skylar", "message": "unit test approval"},
         source={"kind": "human", "id": "skylar", "channel": "unit-test", "event_id": "evt-approval"},
     )
+    after_approval = engine.drain("wf_live_generated_waiting_child", initial=after_approval)
     assert after_approval.status == "waiting"
     assert after_approval.waiting_on is not None
     assert after_approval.waiting_on.startswith("child:")
@@ -613,9 +623,11 @@ def test_unapproved_live_generated_workflow_does_not_start_child_until_approved(
     assert engine.workflow_status(child_id, recent_events=1)["waiting_on"] == "signal:dynamic.ready:needs-approval"
 
     child_done = engine.signal(child_id, "dynamic.ready", key="needs-approval", payload={"ok": True})
+    child_done = engine.drain(child_id, initial=child_done)
     assert child_done.status == "completed"
 
     final = engine.reconcile_child_result("wf_live_generated_waiting_child", child_requested["key"])
+    final = engine.drain("wf_live_generated_waiting_child", initial=final)
     assert final.status == "completed"
     assert final.result == {"payload": {"ok": True}}
 

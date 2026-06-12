@@ -3,12 +3,15 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, WorkflowRegistry, WorkflowWorkerService, step, workflow
+from hermes_workflows.engine import WorkflowContext, WorkflowWaiting
 
 
 RUNS = []
+LEASE_OBSERVATIONS = []
 SHOULD_FAIL_STALE = False
 
 
@@ -36,6 +39,25 @@ async def worker_stale_sensitive(ctx):
     return "fresh result"
 
 
+@step
+async def worker_slow_lease_probe(ctx):
+    key = "step:worker_slow_lease_probe:0"
+    row = command_row(ctx.engine.db_path, key)
+    assert row is not None
+    before = row["lease_expires_at"]
+    time.sleep(1.5)
+    row = command_row(ctx.engine.db_path, key)
+    assert row is not None
+    during = row["lease_expires_at"]
+    LEASE_OBSERVATIONS.append((before, during))
+    return "slow result"
+
+
+@workflow
+async def worker_slow_lease_workflow(ctx, inputs):
+    return await worker_slow_lease_probe(ctx)
+
+
 @workflow
 async def worker_gather_workflow(ctx, inputs):
     left, right = await ctx.gather(
@@ -55,28 +77,63 @@ async def worker_stale_workflow(ctx, inputs):
     return await worker_stale_sensitive(ctx)
 
 
+@workflow
+async def worker_signal_wait_workflow(ctx, inputs):
+    signal = await ctx.wait_for("go", key="k")
+    return {"signal": signal}
+
+
 def command_row(db, key):
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
     try:
-        return dict(con.execute("SELECT * FROM workflow_commands_outbox WHERE key = ?", (key,)).fetchone())
+        row = con.execute("SELECT * FROM workflow_commands_outbox WHERE key = ?", (key,)).fetchone()
+        return dict(row) if row is not None else None
     finally:
         con.close()
 
 
-def test_worker_claims_one_pending_command_with_a_lease(tmp_path):
+def command_rows(db):
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        return [
+            dict(row)
+            for row in con.execute("SELECT * FROM workflow_commands_outbox ORDER BY id ASC").fetchall()
+        ]
+    finally:
+        con.close()
+
+
+def test_start_enqueues_workflow_run_without_inline_step_requests(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_worker")
+
+    assert result.status == "running"
+    assert result.waiting_on is None
+    rows = command_rows(db)
+    assert [(row["type"], row["key"], row["status"]) for row in rows] == [
+        ("run_workflow", "workflow:run", "pending")
+    ]
+    assert [event["type"] for event in engine.events("wf_worker")] == ["WorkflowStarted"]
+
+
+def test_worker_claims_one_pending_workflow_run_with_a_lease(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_worker")
 
-    claimed = engine.claim_command("wf_worker", worker_id="worker-a", lease_seconds=60)
+    claimed = engine.claim_command("wf_worker", worker_id="worker-a", lease_seconds=60, command_type=None)
 
-    assert claimed["key"] == "step:worker_left:0"
+    assert claimed["type"] == "run_workflow"
+    assert claimed["key"] == "workflow:run"
     assert claimed["status"] == "running"
     assert claimed["claimed_by"] == "worker-a"
     assert claimed["attempts"] == 1
-    assert engine.claim_command("wf_worker", worker_id="worker-b", lease_seconds=60)["key"] == "step:worker_right:0"
-    assert command_row(db, "step:worker_left:0")["claimed_by"] == "worker-a"
+    assert engine.claim_command("wf_worker", worker_id="worker-b", lease_seconds=60, command_type=None) is None
+    assert command_row(db, "workflow:run")["claimed_by"] == "worker-a"
 
 
 def test_expired_running_command_can_be_reclaimed(tmp_path):
@@ -84,15 +141,16 @@ def test_expired_running_command_can_be_reclaimed(tmp_path):
     engine = WorkflowEngine(db)
     engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_worker")
 
-    first = engine.claim_command("wf_worker", worker_id="worker-a", lease_seconds=-1)
-    reclaimed = engine.claim_command("wf_worker", worker_id="worker-b", lease_seconds=60)
+    first = engine.claim_command("wf_worker", worker_id="worker-a", lease_seconds=-1, command_type=None)
+    reclaimed = engine.claim_command("wf_worker", worker_id="worker-b", lease_seconds=60, command_type=None)
 
     assert reclaimed["id"] == first["id"]
+    assert reclaimed["key"] == "workflow:run"
     assert reclaimed["claimed_by"] == "worker-b"
     assert reclaimed["attempts"] == 2
 
 
-def test_worker_once_executes_claimed_steps_until_workflow_completes(tmp_path):
+def test_worker_once_executes_workflow_run_and_steps_until_workflow_completes(tmp_path):
     RUNS.clear()
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
@@ -100,15 +158,36 @@ def test_worker_once_executes_claimed_steps_until_workflow_completes(tmp_path):
 
     first = engine.worker_once("wf_worker", worker_id="worker-a", lease_seconds=60)
     assert first.status == "waiting"
-    assert RUNS == [("left", 1)]
+    assert first.waiting_on == "gather:0"
+    assert RUNS == []
+    assert [(row["type"], row["key"], row["status"]) for row in command_rows(db)] == [
+        ("run_workflow", "workflow:run", "completed"),
+        ("run_step", "step:worker_left:0", "pending"),
+        ("run_step", "step:worker_right:0", "pending"),
+    ]
 
     second = engine.worker_once("wf_worker", worker_id="worker-b", lease_seconds=60)
-    assert second.status == "completed"
-    assert second.result == {
+    assert second.status == "running"
+    assert RUNS == [("left", 1)]
+    assert command_row(db, "workflow:run")["status"] == "pending"
+
+    third = engine.worker_once("wf_worker", worker_id="worker-c", lease_seconds=60)
+    assert third.status == "waiting"
+    assert third.waiting_on == "gather:0"
+    assert RUNS == [("left", 1)]
+
+    fourth = engine.worker_once("wf_worker", worker_id="worker-d", lease_seconds=60)
+    assert fourth.status == "running"
+    assert RUNS == [("left", 1), ("right", 2)]
+
+    final = engine.worker_once("wf_worker", worker_id="worker-e", lease_seconds=60)
+    assert final.status == "completed"
+    assert final.result == {
         "left": {"side": "left", "value": 1},
         "right": {"side": "right", "value": 2},
     }
     assert RUNS == [("left", 1), ("right", 2)]
+    assert command_row(db, "workflow:run")["status"] == "completed"
     assert command_row(db, "step:worker_left:0")["status"] == "completed"
     assert command_row(db, "step:worker_right:0")["status"] == "completed"
 
@@ -118,7 +197,11 @@ def test_worker_records_step_failure_and_marks_command_failed(tmp_path):
     engine = WorkflowEngine(db)
     engine.start(worker_failure_workflow, {"value": "bad"}, workflow_id="wf_fail")
 
-    result = engine.worker_once("wf_fail", worker_id="worker-a", lease_seconds=60)
+    queued_step = engine.worker_once("wf_fail", worker_id="worker-a", lease_seconds=60)
+    assert queued_step.status == "waiting"
+    assert queued_step.waiting_on == "step:worker_boom:0"
+
+    result = engine.worker_once("wf_fail", worker_id="worker-b", lease_seconds=60)
 
     assert result.status == "failed"
     assert result.error is not None
@@ -127,7 +210,7 @@ def test_worker_records_step_failure_and_marks_command_failed(tmp_path):
     assert row["status"] == "failed"
     assert json.loads(row["last_error_json"]) == {"type": "RuntimeError", "message": "boom bad"}
 
-    reloaded = WorkflowEngine(db).worker_once("wf_fail", worker_id="worker-b", lease_seconds=60)
+    reloaded = WorkflowEngine(db).worker_once("wf_fail", worker_id="worker-c", lease_seconds=60)
     assert reloaded.status == "failed"
     assert reloaded.error is not None
     assert "RuntimeError: boom bad" in reloaded.error
@@ -143,6 +226,9 @@ def test_stale_worker_cannot_overwrite_reclaimed_command_result(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.start(worker_stale_workflow, {}, workflow_id="wf_stale")
+    queued_step = engine.worker_once("wf_stale", worker_id="worker-bootstrap", lease_seconds=60)
+    assert queued_step.status == "waiting"
+    assert queued_step.waiting_on == "step:worker_stale_sensitive:0"
 
     stale = engine.claim_command("wf_stale", worker_id="worker-a", lease_seconds=-1)
     fresh = engine.claim_command("wf_stale", worker_id="worker-b", lease_seconds=60)
@@ -151,8 +237,12 @@ def test_stale_worker_cannot_overwrite_reclaimed_command_result(tmp_path):
     assert fresh["attempts"] == 2
 
     completed = engine._execute_run_step_command("wf_stale", fresh)
-    assert completed.status == "completed"
-    assert completed.result == "fresh result"
+    assert completed.status == "running"
+    assert command_row(db, "workflow:run")["status"] == "pending"
+
+    final = engine.worker_once("wf_stale", worker_id="worker-c", lease_seconds=60)
+    assert final.status == "completed"
+    assert final.result == "fresh result"
 
     SHOULD_FAIL_STALE = True
     try:
@@ -164,6 +254,190 @@ def test_stale_worker_cannot_overwrite_reclaimed_command_result(tmp_path):
     assert stale_result.result == "fresh result"
     assert command_row(db, "step:worker_stale_sensitive:0")["status"] == "completed"
     assert [event["type"] for event in engine.events("wf_stale")].count("StepFailed") == 0
+
+
+def test_renewing_command_lease_prevents_premature_reclaim(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_stale_workflow, {}, workflow_id="wf_renew")
+    engine.worker_once("wf_renew", worker_id="worker-bootstrap", lease_seconds=60)
+
+    claimed = engine.claim_command("wf_renew", worker_id="worker-a", lease_seconds=-1)
+    assert claimed is not None
+    assert engine.renew_command_lease("wf_renew", claimed, lease_seconds=60) is True
+
+    assert engine.claim_command("wf_renew", worker_id="worker-b", lease_seconds=60) is None
+    row = command_row(db, "step:worker_stale_sensitive:0")
+    assert row is not None
+    assert row["claimed_by"] == "worker-a"
+    assert row["attempts"] == 1
+
+
+def test_worker_heartbeats_renew_long_running_step_lease(tmp_path):
+    LEASE_OBSERVATIONS.clear()
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_slow_lease_workflow, {}, workflow_id="wf_slow")
+    queued_step = engine.worker_once("wf_slow", worker_id="worker-bootstrap", lease_seconds=60)
+    assert queued_step.status == "waiting"
+
+    result = engine.worker_once("wf_slow", worker_id="worker-a", lease_seconds=2)
+
+    assert result.status == "running"
+    assert LEASE_OBSERVATIONS
+    before, during = LEASE_OBSERVATIONS[-1]
+    assert during > before
+
+
+
+def test_workflow_run_wakeup_during_leased_run_is_preserved(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    original_wait_for = WorkflowContext.wait_for
+    injected = {"done": False}
+
+    async def wait_for_with_concurrent_signal(self, signal_type, *, key):
+        try:
+            return await original_wait_for(self, signal_type, key=key)
+        except WorkflowWaiting:
+            if signal_type == "go" and key == "k" and not injected["done"]:
+                injected["done"] = True
+                self.engine.signal(
+                    self.workflow_id,
+                    "go",
+                    key="k",
+                    payload={"value": "arrived while workflow:run was leased"},
+                    source={"kind": "test"},
+                    idempotency_key="concurrent-signal",
+                )
+            raise
+
+    monkeypatch.setattr(WorkflowContext, "wait_for", wait_for_with_concurrent_signal)
+    engine.start(worker_signal_wait_workflow, {}, workflow_id="wf_lost_wakeup")
+
+    first = engine.worker_once("wf_lost_wakeup", worker_id="worker-a", lease_seconds=60)
+
+    assert first.status == "waiting"
+    assert command_row(db, "workflow:run")["status"] == "pending"
+    final = engine.worker_once("wf_lost_wakeup", worker_id="worker-b", lease_seconds=60)
+    assert final.status == "completed"
+    assert final.result == {"signal": {"value": "arrived while workflow:run was leased"}}
+    assert command_row(db, "workflow:run")["status"] == "completed"
+
+def test_worker_service_drains_runnable_commands_across_configured_sources(tmp_path):
+    db_one = tmp_path / "one.sqlite"
+    db_two = tmp_path / "two.sqlite"
+    WorkflowEngine(db_one).start(
+        worker_gather_workflow,
+        {"left": 1, "right": 2},
+        workflow_id="wf_one",
+        workflow_ref="tests.test_worker:worker_gather_workflow",
+    )
+    WorkflowEngine(db_two).start(
+        worker_gather_workflow,
+        {"left": 3, "right": 4},
+        workflow_id="wf_two",
+        workflow_ref="tests.test_worker:worker_gather_workflow",
+    )
+
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"one": str(db_one), "two": str(db_two)},
+            "workflows": {
+                "one-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "one"},
+                "two-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "two"},
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+
+    summary = service.tick()
+
+    assert summary.executed == 10
+    assert summary.errors == []
+    assert WorkflowEngine(db_one).workflow_status("wf_one")["status"] == "completed"
+    assert WorkflowEngine(db_two).workflow_status("wf_two")["status"] == "completed"
+
+
+
+def test_worker_service_rejects_db_row_workflow_name_mismatch_for_allowlisted_ref(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(
+        worker_gather_workflow,
+        {"left": 1, "right": 2},
+        workflow_id="wf_tampered",
+        workflow_ref="tests.test_worker:worker_gather_workflow",
+    )
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "UPDATE workflow_instances SET workflow_name = ? WHERE id = ?",
+            ("worker_signal_wait_workflow", "wf_tampered"),
+        )
+
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "safe-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+
+    summary = service.tick()
+
+    assert summary.executed == 0
+    assert len(summary.errors) == 1
+    assert "does not match allowlisted workflow_ref" in summary.errors[0]["error"]
+    assert command_row(db, "workflow:run")["status"] == "pending"
+
+
+def test_worker_service_rejects_db_only_sources_without_allowlisted_workflows(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    registry = WorkflowRegistry.from_sources(config={"dbs": {"service": str(db)}})
+
+    try:
+        WorkflowWorkerService.from_registry(registry, db="service")
+    except ValueError as exc:
+        assert "has no configured workflow refs" in str(exc)
+    else:
+        raise AssertionError("worker service should reject DB-only sources without workflow ref allowlists")
+
+def test_runnable_workflows_lists_pending_commands_without_known_workflow_id(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(
+        worker_gather_workflow,
+        {"left": 1, "right": 2},
+        workflow_id="wf_runnable",
+        workflow_ref="tests.test_worker:worker_gather_workflow",
+    )
+
+    runnable = engine.runnable_workflows()
+
+    assert [row["workflow_id"] for row in runnable] == ["wf_runnable"]
+    assert [row["command_type"] for row in runnable] == ["run_workflow"]
+    assert [row["command_key"] for row in runnable] == ["workflow:run"]
+
+    status = engine.workflow_status("wf_runnable")
+    assert [command["diagnostic_label"] for command in status["pending_commands"]] == ["runnable_work"]
+    assert status["diagnostics"] == [
+        {
+            "command_key": "workflow:run",
+            "command_type": "run_workflow",
+            "label": "runnable_work",
+            "message": "Workflow has runnable work queued; a worker must claim this command for autonomous continuation.",
+            "severity": "info",
+        }
+    ]
+
+    first_pass = engine.worker_once("wf_runnable", worker_id="resident-worker", lease_seconds=60)
+    assert first_pass.status == "waiting"
+
+    runnable_after_workflow_run = engine.runnable_workflows()
+    assert [row["command_type"] for row in runnable_after_workflow_run] == ["run_step", "run_step"]
+    assert [row["command_key"] for row in runnable_after_workflow_run] == ["step:worker_left:0", "step:worker_right:0"]
 
 
 CLI_WORKFLOW_MODULE = '''
@@ -209,9 +483,10 @@ def test_cli_worker_process_executes_pending_command_across_processes(tmp_path):
         "--input-json",
         '{"destination":"NYC"}',
     )
-    assert json.loads(start_result.stdout)["waiting_on"] == "step:make_worker_plan:0"
+    assert json.loads(start_result.stdout)["status"] == "running"
+    assert json.loads(start_result.stdout)["waiting_on"] is None
 
-    worker_result = run_cli(
+    first_worker_result = run_cli(
         tmp_path,
         "worker",
         "worker_wf:cli_worker_workflow",
@@ -223,6 +498,21 @@ def test_cli_worker_process_executes_pending_command_across_processes(tmp_path):
         "cli-worker-1",
         "--once",
     )
+    assert json.loads(first_worker_result.stdout)["waiting_on"] == "step:make_worker_plan:0"
+
+    worker_result = run_cli(
+        tmp_path,
+        "worker",
+        "worker_wf:cli_worker_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_cli_worker",
+        "--worker-id",
+        "cli-worker-1",
+        "--max-commands",
+        "2",
+    )
 
     assert json.loads(worker_result.stdout) == {
         "workflow_id": "wf_cli_worker",
@@ -231,3 +521,62 @@ def test_cli_worker_process_executes_pending_command_across_processes(tmp_path):
         "result": {"plan": {"summary": "Plan for NYC"}},
         "error": None,
     }
+
+
+def test_cli_worker_service_executes_pending_command_without_workflow_id_or_ref(tmp_path):
+    (tmp_path / "worker_wf.py").write_text(CLI_WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    registry = tmp_path / "workflows.registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "dbs": {"service": str(db)},
+                "workflows": {
+                    "cli-worker": {"workflow_ref": "worker_wf:cli_worker_workflow", "db": "service"}
+                },
+            }
+        )
+    )
+
+    start_result = run_cli(
+        tmp_path,
+        "start",
+        "worker_wf:cli_worker_workflow",
+        "--db",
+        str(db),
+        "--id",
+        "wf_cli_worker_service",
+        "--input-json",
+        '{"destination":"SFO"}',
+    )
+    assert json.loads(start_result.stdout)["status"] == "running"
+    assert json.loads(start_result.stdout)["waiting_on"] is None
+
+    worker_result = run_cli(
+        tmp_path,
+        "worker-service",
+        "--config",
+        str(registry),
+        "--db",
+        "service",
+        "--worker-id",
+        "resident-cli-worker",
+        "--max-commands",
+        "3",
+    )
+
+    payload = json.loads(worker_result.stdout)
+    assert payload["executed"] == 3
+    assert payload["errors"] == []
+    assert payload["executions"][0]["workflow_id"] == "wf_cli_worker_service"
+    assert payload["executions"][-1]["status"] == "completed"
+
+    status_result = run_cli(
+        tmp_path,
+        "status",
+        "--db",
+        str(db),
+        "--id",
+        "wf_cli_worker_service",
+    )
+    assert json.loads(status_result.stdout)["status"] == "completed"

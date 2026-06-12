@@ -52,6 +52,7 @@ def test_approval_and_worker_completion_are_operator_facing_steps(tmp_path):
         source=human_source("approve-plan"),
         idempotency_key="approve-plan",
     )
+    after_approval = engine.drain("wf_step_model", initial=after_approval)
 
     assert after_approval.status == "waiting"
     assert after_approval.waiting_on == "signal:handoff.completed:run_worker_step"
@@ -71,6 +72,7 @@ def test_approval_and_worker_completion_are_operator_facing_steps(tmp_path):
         source={"kind": "worker", "id": "worker-1"},
         idempotency_key="worker-step-complete",
     )
+    done = engine.drain("wf_step_model", initial=done)
 
     assert done.status == "completed"
     completed_steps = {step["id"]: step for step in engine.workflow_status("wf_step_model")["steps"]}
@@ -87,7 +89,7 @@ def test_internal_signal_and_wait_records_remain_events_not_public_steps(tmp_pat
         {"goal": "private plumbing"},
         workflow_id="wf_private_plumbing",
     )
-    engine.signal(
+    signal_result = engine.signal(
         "wf_private_plumbing",
         "approval.decision",
         key="approve_plan",
@@ -95,6 +97,7 @@ def test_internal_signal_and_wait_records_remain_events_not_public_steps(tmp_pat
         source=human_source("approve-private"),
         idempotency_key="approve-private",
     )
+    engine.drain("wf_private_plumbing", initial=signal_result)
 
     event_keys = {event["key"] for event in engine.events("wf_private_plumbing")}
     assert "wait:approval.decision:approve_plan" in event_keys
@@ -136,6 +139,7 @@ def test_conflicting_public_step_keys_fail_before_topology_merge(tmp_path):
         source=human_source("approve-duplicate-key"),
         idempotency_key="approve-duplicate-key",
     )
+    result = engine.drain("wf_duplicate_step_key", initial=result)
 
     assert result.status == "failed"
     assert "public step key conflict" in str(result.error)

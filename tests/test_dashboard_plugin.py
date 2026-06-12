@@ -367,9 +367,10 @@ def test_dashboard_plugin_api_approval_decision_records_and_resumes(tmp_path, mo
 
     assert receipt["success"] is True
     assert receipt["receipt"]["resume_requested"] is True
-    assert receipt["receipt"]["status"] == "completed"
-    assert receipt["post_resume"]["status"] == "completed"
-    assert receipt["next_step"] == "Workflow completed. Review result and receipts."
+    assert receipt["receipt"]["status"] == "running"
+    assert receipt["post_resume"]["status"] == "running"
+    completed = WorkflowEngine(db).drain("wf_plugin")
+    assert completed.status == "completed"
     assert WorkflowEngine(db).workflow_status("wf_plugin")["status"] == "completed"
 
 
@@ -426,7 +427,9 @@ def test_dashboard_plugin_api_approval_decision_loads_project_workflow_ref_befor
     )
 
     assert receipt["success"] is True
-    assert receipt["post_resume"]["status"] == "completed"
+    assert receipt["post_resume"]["status"] == "running"
+    completed = WorkflowEngine(db).drain("wf_project_import_required")
+    assert completed.status == "completed"
     assert WorkflowEngine(db).workflow_status("wf_project_import_required")["status"] == "completed"
 
 
@@ -522,12 +525,13 @@ def test_dashboard_approval_records_configured_actor_without_rewriting_to_workfl
         )
     )
 
-    status = WorkflowEngine(db).workflow_status("wf_named_human")
-    signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
-
     assert receipt["success"] is True
     assert receipt["receipt"]["by"] == "skylar"
-    assert receipt["post_resume"]["status"] == "completed"
+    assert receipt["post_resume"]["status"] == "running"
+    completed = WorkflowEngine(db).drain("wf_named_human")
+    assert completed.status == "completed"
+    status = WorkflowEngine(db).workflow_status("wf_named_human")
+    signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
     assert status["result"] == {"approved_by": "skylar", "source_id": "skylar"}
     assert signal["payload"]["source"]["id"] == "skylar"
     assert signal["payload"]["payload"] == {"action": "approve", "by": "skylar"}
@@ -555,12 +559,13 @@ def test_dashboard_approval_does_not_permission_check_workflow_approver(tmp_path
         )
     )
 
-    status = WorkflowEngine(db).workflow_status("wf_named_human_mismatch")
-    signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
-
     assert receipt["success"] is True
     assert receipt["receipt"]["by"] == "operator"
-    assert receipt["post_resume"]["status"] == "completed"
+    assert receipt["post_resume"]["status"] == "running"
+    completed = WorkflowEngine(db).drain("wf_named_human_mismatch")
+    assert completed.status == "completed"
+    status = WorkflowEngine(db).workflow_status("wf_named_human_mismatch")
+    signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
     assert status["result"] == {"approved_by": "operator", "source_id": "operator"}
     assert signal["payload"]["source"]["id"] == "operator"
     assert signal["payload"]["payload"] == {"action": "approve", "by": "operator"}
@@ -917,6 +922,7 @@ def test_dashboard_run_dag_collapses_coding_workflow_approvals_and_handoff_to_st
         workflow_id=workflow_id,
         workflow_ref="hermes_workflows.workflows.coding:coding_workflow",
     )
+    result = engine.drain(workflow_id, initial=result)
     assert result.status == "waiting"
 
     receipt = engine.submit_approval_decision(
@@ -928,15 +934,17 @@ def test_dashboard_run_dag_collapses_coding_workflow_approvals_and_handoff_to_st
             source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "plan-ok"},
         )
     )
-    assert receipt.status == "waiting"
+    after_plan = engine.drain(workflow_id)
+    assert after_plan.status == "waiting"
     (repo / "feature.txt").write_text("after\n")
-    engine.signal(
+    signal_result = engine.signal(
         workflow_id,
         "handoff.completed",
         key="coding_ready",
         payload={"by": "agent:implementer", "summary": "updated feature.txt"},
         source={"kind": "worker", "id": "worker-1"},
     )
+    engine.drain(workflow_id, initial=signal_result)
 
     configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()

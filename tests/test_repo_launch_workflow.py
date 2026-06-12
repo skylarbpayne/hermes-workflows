@@ -52,7 +52,8 @@ def test_repo_launch_workflow_runs_tests_waits_for_approval_then_writes_report(t
     assert "1 passed" in artifact["tests"]["output"]
     assert artifact["git"]["clean"] is True
 
-    completed = WorkflowEngine(db).signal(
+    signal_engine = WorkflowEngine(db)
+    completed = signal_engine.signal(
         "wf_repo_launch",
         "approval.decision",
         key="approve_repo_launch",
@@ -60,6 +61,7 @@ def test_repo_launch_workflow_runs_tests_waits_for_approval_then_writes_report(t
         source={"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/20"},
         idempotency_key="test-approval-1",
     )
+    completed = signal_engine.drain("wf_repo_launch", initial=completed)
 
     assert completed.status == "completed"
     assert completed.result["report_path"] == str(report)

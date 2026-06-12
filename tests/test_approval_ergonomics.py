@@ -111,7 +111,7 @@ def test_ctx_approve_returns_typed_decision_and_derives_key(tmp_path):
     assert approval.key == key
     assert approval.artifact == {"plan": "typed"}
 
-    result = engine.signal(
+    recorded = engine.signal(
         "wf_typed",
         "approval.decision",
         key=key,
@@ -120,6 +120,8 @@ def test_ctx_approve_returns_typed_decision_and_derives_key(tmp_path):
         idempotency_key="approve-auto-key",
     )
 
+    assert recorded.status == "running"
+    result = engine.drain("wf_typed")
     assert result.status == "completed"
     assert result.result == {"typed": True, "approved": True, "by": "skylar", "legacy_action": "approve"}
     completed_step = engine.workflow_status("wf_typed")["steps"][0]
@@ -136,7 +138,7 @@ def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_
     first = engine.run_until_idle(handoff_workflow, {"goal": "ergonomics"}, workflow_id="wf_handoff")
     assert first.waiting_on == "signal:approval.decision:approve_handoff_plan"
 
-    after_approval = engine.signal(
+    recorded_approval = engine.signal(
         "wf_handoff",
         "approval.decision",
         key="approve_handoff_plan",
@@ -144,6 +146,8 @@ def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_
         source=human_source(),
         idempotency_key="approve-handoff",
     )
+    assert recorded_approval.status == "running"
+    after_approval = engine.drain("wf_handoff")
     assert after_approval.status == "waiting"
     assert after_approval.waiting_on == "signal:handoff.completed:implementation_ready"
     after_approval_steps = {step["id"]: step for step in engine.workflow_status("wf_handoff")["steps"]}
@@ -157,13 +161,15 @@ def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_
     assert handoff_commands[0]["key"] == "handoff:implementation_ready"
     assert handoff_commands[0]["payload"]["assignee"] == "agent:implementer"
 
-    done = engine.signal(
+    recorded_done = engine.signal(
         "wf_handoff",
         "handoff.completed",
         key="implementation_ready",
         payload={"summary": "source changed", "artifacts": ["diff.patch"]},
         idempotency_key="handoff-ready",
     )
+    assert recorded_done.status == "running"
+    done = engine.drain("wf_handoff")
     assert done.status == "completed"
     assert done.result["handoff"]["summary"] == "source changed"
     done_steps = {step["id"]: step for step in engine.workflow_status("wf_handoff")["steps"]}
@@ -181,7 +187,7 @@ def test_feedback_loop_uses_new_attempt_keys_after_revision_feedback(tmp_path):
     first = engine.run_until_idle(feedback_loop_workflow, {"draft": "v1"}, workflow_id="wf_loop")
     assert first.waiting_on == "signal:approval.decision:approve_packet"
 
-    after_edit = engine.signal(
+    recorded_edit = engine.signal(
         "wf_loop",
         "approval.decision",
         key="approve_packet",
@@ -189,14 +195,12 @@ def test_feedback_loop_uses_new_attempt_keys_after_revision_feedback(tmp_path):
         source=human_source("edit-1"),
         idempotency_key="edit-1",
     )
-    assert after_edit.status == "completed" or after_edit.status == "waiting"
-    if after_edit.status == "completed":
-        # local drain ran the revision step and decider may already be waiting on retry in fast environments
-        after_edit = engine.resume(feedback_loop_workflow, "wf_loop")
+    assert recorded_edit.status == "running"
+    after_edit = engine.drain("wf_loop")
     assert after_edit.status == "waiting"
     assert after_edit.waiting_on == "signal:approval.decision:approve_packet_retry_1"
 
-    approved = engine.signal(
+    recorded_approval = engine.signal(
         "wf_loop",
         "approval.decision",
         key="approve_packet_retry_1",
@@ -204,6 +208,8 @@ def test_feedback_loop_uses_new_attempt_keys_after_revision_feedback(tmp_path):
         source=human_source("approve-2"),
         idempotency_key="approve-2",
     )
+    assert recorded_approval.status == "running"
+    approved = engine.drain("wf_loop")
     assert approved.status == "completed"
     assert approved.result["status"] == "approved"
     assert approved.result["decisions"] == [

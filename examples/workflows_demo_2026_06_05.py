@@ -156,6 +156,7 @@ def run_full_demo(*, db_path: Path, workflow_id: str = "wf_workflows_demo_2026_0
         source=_human_source("demo-generated-workflow-approval"),
         idempotency_key="demo-generated-workflow-approval",
     )
+    result = engine.drain(workflow_id, initial=result)
     stage_results.append(_stage("approved_generated_workflow_and_started_child", result))
 
     child_id = _first_child_workflow_id(engine, workflow_id)
@@ -167,9 +168,11 @@ def run_full_demo(*, db_path: Path, workflow_id: str = "wf_workflows_demo_2026_0
         source=_agent_source("email_quality_reviewer", "demo-agent-email-quality-approval"),
         idempotency_key="demo-agent-email-quality-approval",
     )
+    result = engine.drain(child_id, initial=result)
     stage_results.append(_stage("agent_approved_email_quality_review", result, workflow_id=child_id))
 
     result = engine.reconcile_children(workflow_id)
+    result = engine.drain(workflow_id, initial=result)
     stage_results.append(_stage("reconciled_child_and_waiting_on_human_email_batch_approval", result))
 
     result = engine.signal(
@@ -180,6 +183,7 @@ def run_full_demo(*, db_path: Path, workflow_id: str = "wf_workflows_demo_2026_0
         source=_human_source("demo-human-email-batch-approval"),
         idempotency_key="demo-human-email-batch-approval",
     )
+    result = engine.drain(workflow_id, initial=result)
     stage_results.append(_stage("human_approved_email_batch_and_completed", result))
 
     snapshot = build_snapshot(engine, workflow_id, stage_results=stage_results)

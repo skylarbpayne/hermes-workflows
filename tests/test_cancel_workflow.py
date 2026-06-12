@@ -165,7 +165,7 @@ def test_late_signal_after_cancel_does_not_resume_or_append_signal_event(tmp_pat
 def test_cancel_terminal_completed_workflow_is_noop(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
-    completed = engine.start(immediate_success_workflow, {"item": "plan"}, workflow_id="wf_done")
+    completed = engine.run_until_idle(immediate_success_workflow, {"item": "plan"}, workflow_id="wf_done")
     assert completed.status == "completed"
 
     cancelled = engine.cancel_workflow("wf_done", reason="too late")
@@ -177,6 +177,7 @@ def test_cancel_terminal_completed_workflow_is_noop(tmp_path):
     assert status["terminal_reason"] is None
     assert [event["type"] for event in engine.events("wf_done")] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "WorkflowCompleted",
     ]
 
@@ -184,7 +185,7 @@ def test_cancel_terminal_completed_workflow_is_noop(tmp_path):
 def test_cancel_terminal_failed_workflow_is_noop(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
-    failed = engine.start(immediate_failure_workflow, {"item": "plan"}, workflow_id="wf_failed")
+    failed = engine.run_until_idle(immediate_failure_workflow, {"item": "plan"}, workflow_id="wf_failed")
     assert failed.status == "failed"
 
     cancelled = engine.cancel_workflow("wf_failed", reason="too late")
@@ -196,6 +197,7 @@ def test_cancel_terminal_failed_workflow_is_noop(tmp_path):
     assert status["terminal_reason"] is None
     assert [event["type"] for event in engine.events("wf_failed")] == [
         "WorkflowStarted",
+        "CommandClaimed",
     ]
 
 
@@ -204,6 +206,7 @@ def test_claimed_step_cancelled_before_execution_does_not_run_body(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.start(step_wait_workflow, {"item": "plan"}, workflow_id="wf_claimed_cancel")
+    engine.worker_once("wf_claimed_cancel", worker_id="worker-start")
     command = engine.claim_command("wf_claimed_cancel", worker_id="worker-a", lease_seconds=60)
     assert command is not None
 
@@ -214,6 +217,7 @@ def test_claimed_step_cancelled_before_execution_does_not_run_body(tmp_path):
     assert STEP_RUNS == []
     assert [event["type"] for event in engine.events("wf_claimed_cancel")] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "StepRequested",
         "CommandClaimed",
         "WorkflowCancelled",
@@ -224,6 +228,7 @@ def test_claim_command_refuses_stale_pending_command_on_cancelled_workflow(tmp_p
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.start(step_wait_workflow, {"item": "plan"}, workflow_id="wf_stale_pending")
+    engine.worker_once("wf_stale_pending", worker_id="worker-start")
     engine.cancel_workflow("wf_stale_pending", reason="operator cancelled")
     with sqlite3.connect(db) as con:
         con.execute(
@@ -237,6 +242,7 @@ def test_claim_command_refuses_stale_pending_command_on_cancelled_workflow(tmp_p
     assert engine.claim_command("wf_stale_pending", worker_id="worker-a", lease_seconds=60) is None
     assert [event["type"] for event in engine.events("wf_stale_pending")] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "StepRequested",
         "WorkflowCancelled",
     ]
@@ -246,7 +252,7 @@ def test_cancel_committed_during_decider_cannot_be_overwritten_by_completion(tmp
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
 
-    result = engine.start(cancels_itself_then_returns, {"item": "plan"}, workflow_id="wf_race")
+    result = engine.run_until_idle(cancels_itself_then_returns, {"item": "plan"}, workflow_id="wf_race")
 
     assert result.status == "cancelled"
     status = engine.workflow_status("wf_race")
@@ -254,6 +260,7 @@ def test_cancel_committed_during_decider_cannot_be_overwritten_by_completion(tmp
     assert status["terminal_reason"]["reason"] == "operator cancelled during decider"
     assert [event["type"] for event in engine.events("wf_race")] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "WorkflowCancelled",
     ]
 
@@ -262,7 +269,7 @@ def test_cancelled_decider_cannot_enqueue_new_waits_after_cancel(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
 
-    result = engine.start(cancels_itself_then_requests_approval, {"item": "plan"}, workflow_id="wf_late_wait")
+    result = engine.run_until_idle(cancels_itself_then_requests_approval, {"item": "plan"}, workflow_id="wf_late_wait")
 
     assert result.status == "cancelled"
     status = engine.workflow_status("wf_late_wait")
@@ -271,6 +278,7 @@ def test_cancelled_decider_cannot_enqueue_new_waits_after_cancel(tmp_path):
     assert status["pending_commands"] == []
     assert [event["type"] for event in engine.events("wf_late_wait")] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "WorkflowCancelled",
     ]
 

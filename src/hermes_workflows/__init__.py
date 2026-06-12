@@ -16,6 +16,7 @@ from .prompts import AgentPrompt, AgentStep, render_prompt
 from .receipts import build_workflow_receipt, redact_secrets
 from .registry import WorkflowDbConfig, WorkflowRefConfig, WorkflowRegistry
 from .runners import AgentRunnerError, SubprocessAgentRunner
+from .worker_service import WorkflowWorkerService
 from .workflow_values import Workflow
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "WorkflowEngine",
     "WorkflowRefConfig",
     "WorkflowRegistry",
+    "WorkflowWorkerService",
     "build_workflow_receipt",
     "redact_secrets",
     "render_prompt",

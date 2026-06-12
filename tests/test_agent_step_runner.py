@@ -174,6 +174,7 @@ def test_live_generated_workflow_requires_human_approval_before_child_runs(tmp_p
         payload={"action": "approve", "by": "skylar", "message": "approved in test"},
         source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-1"},
     )
+    approved = engine.drain("wf_live_workflow", initial=approved)
 
     assert approved.status == "completed"
     assert approved.result == {"processed": {"id": "a", "label": "ALPHA"}}
@@ -234,6 +235,7 @@ def test_generated_workflow_approval_is_bound_to_selected_symbol(tmp_path):
         payload={"action": "approve", "by": "skylar", "message": "approve harmless only"},
         source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-harmless"},
     )
+    after_harmless = engine.drain("wf_multi_symbol", initial=after_harmless)
 
     assert after_harmless.status == "waiting"
     approvals = engine.workflow_status("wf_multi_symbol")["approvals"]
@@ -274,6 +276,7 @@ def test_generated_workflow_child_identity_is_bound_to_selected_symbol_when_grou
         payload={"action": "approve", "by": "skylar", "message": "approve harmless only"},
         source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-harmless"},
     )
+    after_harmless = engine.drain("wf_multi_symbol_same_group", initial=after_harmless)
 
     assert after_harmless.status == "waiting"
     approvals = engine.workflow_status("wf_multi_symbol_same_group")["approvals"]

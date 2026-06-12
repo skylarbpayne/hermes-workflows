@@ -81,7 +81,7 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
     engine = WorkflowEngine(db)
     engine.run_until_idle(bulk_approval_workflow, {}, workflow_id="wf_bulk_approval")
 
-    after_first = engine.signal(
+    recorded_first = engine.signal(
         "wf_bulk_approval",
         "approval.decision",
         key="entity_a",
@@ -90,12 +90,14 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
         idempotency_key="approval-a",
     )
 
+    assert recorded_first.status == "running"
+    after_first = engine.drain("wf_bulk_approval")
     assert after_first.status == "waiting"
     assert after_first.waiting_on == "signals:approval.decision:entity_b"
     assert [item.key for item in engine.list_approvals(status="waiting")] == ["entity_b"]
     assert engine.workflow_status("wf_bulk_approval")["result"] is None
 
-    after_second = engine.signal(
+    recorded_second = engine.signal(
         "wf_bulk_approval",
         "approval.decision",
         key="entity_b",
@@ -104,6 +106,8 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
         idempotency_key="approval-b",
     )
 
+    assert recorded_second.status == "running"
+    after_second = engine.drain("wf_bulk_approval")
     assert after_second.status == "completed"
     assert after_second.result["decisions"][0] == {
         "key": "entity_a",
@@ -145,9 +149,11 @@ def test_run_until_idle_executes_local_steps_once_then_waits_for_approval(tmp_pa
     events = engine.events("wf_real_trip")
     assert [event["type"] for event in events] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "StepRequested",
         "CommandClaimed",
         "StepCompleted",
+        "CommandClaimed",
         "StepRequested",
         "ApprovalRequested",
         "WaitRequested",
@@ -176,7 +182,7 @@ def test_signal_approval_resumes_and_drains_downstream_steps(tmp_path):
     engine.run_until_idle(approval_trip_workflow, {"destination": "NYC"}, workflow_id="wf_real_trip")
 
     restarted = WorkflowEngine(db)
-    completed = restarted.signal(
+    recorded = restarted.signal(
         "wf_real_trip",
         "approval.decision",
         key="approve_trip_plan",
@@ -185,6 +191,8 @@ def test_signal_approval_resumes_and_drains_downstream_steps(tmp_path):
         idempotency_key="discord-approval-1",
     )
 
+    assert recorded.status == "running"
+    completed = restarted.drain("wf_real_trip")
     assert completed.status == "completed"
     assert completed.result == {
         "package": {
@@ -209,16 +217,20 @@ def test_signal_approval_resumes_and_drains_downstream_steps(tmp_path):
 
     assert [event["type"] for event in restarted.events("wf_real_trip")] == [
         "WorkflowStarted",
+        "CommandClaimed",
         "StepRequested",
         "CommandClaimed",
         "StepCompleted",
+        "CommandClaimed",
         "StepRequested",
         "ApprovalRequested",
         "WaitRequested",
         "SignalReceived",
         "StepCompleted",
+        "CommandClaimed",
         "StepRequested",
         "CommandClaimed",
         "StepCompleted",
+        "CommandClaimed",
         "WorkflowCompleted",
     ]

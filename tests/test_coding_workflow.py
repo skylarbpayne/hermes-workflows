@@ -18,6 +18,12 @@ def _human_source(message_id: str = "10") -> dict:
     }
 
 
+def _drain_signal(db: Path, workflow_id: str, signal_type: str, **kwargs):
+    engine = WorkflowEngine(db)
+    result = engine.signal(workflow_id, signal_type, **kwargs)
+    return engine.drain(workflow_id, initial=result)
+
+
 def test_coding_workflow_has_typed_public_input_and_output_contract():
     hints = get_type_hints(coding_workflow)
     input_hints = get_type_hints(CodingWorkflowInput)
@@ -116,7 +122,8 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
 
     assert run(["git", "status", "--short"], repo).stdout.strip() == ""
 
-    after_plan = WorkflowEngine(db).signal(
+    after_plan = _drain_signal(
+        db,
         "wf_coding",
         "approval.decision",
         key="approve_coding_plan",
@@ -128,7 +135,8 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert after_plan.waiting_on == "signal:handoff.completed:coding_ready"
 
     (repo / "demo.py").write_text("VALUE = 2\n")
-    after_ready = WorkflowEngine(db).signal(
+    after_ready = _drain_signal(
+        db,
         "wf_coding",
         "handoff.completed",
         key="coding_ready",
@@ -153,7 +161,8 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert "Implementation signaled by: palmer" in review
     assert "Recommendation: approve" in review
 
-    final = WorkflowEngine(db).signal(
+    final = _drain_signal(
+        db,
         "wf_coding",
         "approval.decision",
         key="approve_coding_review",
@@ -191,7 +200,8 @@ def test_coding_workflow_rejection_stops_before_implementation(tmp_path):
     assert "implementation_handoff" in plan
     assert "handoff.completed:coding_ready" not in plan
     assert "ctx.handoff" not in plan
-    result = WorkflowEngine(db).signal(
+    result = _drain_signal(
+        db,
         "wf_coding_reject",
         "approval.decision",
         key="approve_coding_plan",
@@ -223,7 +233,8 @@ def test_coding_workflow_allows_review_approver_to_match_implementer(tmp_path):
         },
         workflow_id="wf_coding_same_person",
     )
-    WorkflowEngine(db).signal(
+    _drain_signal(
+        db,
         "wf_coding_same_person",
         "approval.decision",
         key="approve_coding_plan",
@@ -232,7 +243,8 @@ def test_coding_workflow_allows_review_approver_to_match_implementer(tmp_path):
         idempotency_key="plan-approval",
     )
     (repo / "demo.py").write_text("VALUE = 1\n")
-    WorkflowEngine(db).signal(
+    _drain_signal(
+        db,
         "wf_coding_same_person",
         "handoff.completed",
         key="coding_ready",
@@ -240,7 +252,8 @@ def test_coding_workflow_allows_review_approver_to_match_implementer(tmp_path):
         idempotency_key="implementation-ready",
     )
 
-    final = WorkflowEngine(db).signal(
+    final = _drain_signal(
+        db,
         "wf_coding_same_person",
         "approval.decision",
         key="approve_coding_review",

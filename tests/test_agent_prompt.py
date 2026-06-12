@@ -76,11 +76,12 @@ def test_agent_prompt_step_requested_snapshots_prompt_text(tmp_path):
     prompt.write_text("Goal: {{goal}}\n")
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
 
-    first = engine.start(
+    engine.start(
         prompt_then_approval_workflow,
         {"prompt_path": str(prompt), "goal": "Ship it"},
         workflow_id="wf_prompt_snapshot",
     )
+    first = engine.worker_once("wf_prompt_snapshot", worker_id="worker-start")
 
     assert first.status == "waiting"
     requested = [event for event in engine.events("wf_prompt_snapshot") if event["type"] == "StepRequested"][0]
@@ -119,11 +120,12 @@ def test_pending_agent_prompt_uses_requested_snapshot_after_file_edit(tmp_path):
     prompt.write_text("Goal: {{goal}}\n")
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
 
-    started = engine.start(
+    engine.start(
         prompt_workflow,
         {"prompt_path": str(prompt), "goal": "Original", "commands": []},
         workflow_id="wf_prompt_edit",
     )
+    started = engine.worker_once("wf_prompt_edit", worker_id="worker-start")
     assert started.status == "waiting"
 
     prompt.write_text("CHANGED: {{goal}}\n")

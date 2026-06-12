@@ -166,7 +166,7 @@ class TrustedResumer:
         self._assert_trusted_db_binding(workflow_config, db)
         db_config = self._db_for_workflow(workflow_config, db)
         read_engine = WorkflowEngine(db_config.path, read_only=True)
-        workflows = read_engine.list_workflows(status="waiting")
+        workflows = read_engine.list_workflows(status=None)
         receipts: list[dict[str, Any]] = []
         for item in workflows:
             if len(receipts) >= limit:
