@@ -230,8 +230,8 @@ def _runtime_semantics() -> dict[str, Any]:
     return {
         "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; approval decisions also resume trusted local workflow code immediately after recording human provenance.",
         "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
-        "agent_steps": "AgentStep calls run through the engine's configured agent_runner when present, otherwise deterministic mock/rendered output is used. Runner requests and live responses are persisted as step metadata for replay.",
-        "approval_decisions": "Dashboard approve/reject records server-derived human provenance, then resumes the trusted local workflow immediately in the same Hermes process.",
+        "agent_steps": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. AgentStep calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
+        "approval_decisions": "Approval steps are completed by trusted approval surfaces setting approval output with human provenance, then resuming trusted local workflow code.",
         "artifacts": "Approval and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
 
@@ -520,10 +520,26 @@ def _workflow_source_payload(definition: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _approval_node_id(key: str) -> str | None:
+def _approval_step_id(key: str) -> str | None:
     if not key:
         return None
-    return key if key.startswith("approval:") else f"approval:{key}"
+    return key.split(":", 1)[1] if key.startswith("approval:") else key
+
+
+def _handoff_step_id(key: str) -> str | None:
+    if not key:
+        return None
+    return key.split(":", 1)[1] if key.startswith("handoff:") else key
+
+
+def _signal_step_id(payload: dict[str, Any]) -> str | None:
+    signal_type = str(payload.get("signal_type") or "")
+    key = str(payload.get("key") or "")
+    if signal_type == "approval.decision":
+        return _approval_step_id(key)
+    if signal_type == "handoff.completed":
+        return _handoff_step_id(key)
+    return None
 
 
 def _dag_node_id_for_event(event: dict[str, Any]) -> str | None:
@@ -541,11 +557,13 @@ def _dag_node_id_for_event(event: dict[str, Any]) -> str | None:
     if event_type == "ChildWorkflowGatherWaiting":
         return key or None
     if event_type == "ApprovalRequested":
-        return _approval_node_id(key)
+        return _approval_step_id(key)
+    if event_type == "HandoffRequested":
+        return _handoff_step_id(key)
     if event_type == "WaitRequested":
-        return key if key.startswith("wait:") else f"wait:{key}"
+        return None
     if event_type == "SignalReceived":
-        return key if key.startswith("signal:") else f"signal:{key}"
+        return _signal_step_id(payload)
     if event_type == "WorkflowCompleted":
         return "workflow:completed"
     if event_type == "WorkflowFailed":
@@ -559,11 +577,11 @@ def _dag_node_kind(event_type: str) -> str:
     if event_type.startswith("Step"):
         return "step"
     if event_type == "ApprovalRequested":
-        return "approval"
-    if event_type == "SignalReceived":
-        return "signal"
-    if event_type == "WaitRequested":
-        return "wait"
+        return "step"
+    if event_type == "HandoffRequested":
+        return "step"
+    if event_type in {"SignalReceived", "WaitRequested"}:
+        return "step"
     if event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
         return "gather"
     if event_type.startswith("ChildWorkflow"):
@@ -580,10 +598,12 @@ def _dag_node_status(event_type: str, existing: str | None = None) -> str:
         return "failed"
     if event_type == "ApprovalRequested":
         return "waiting"
+    if event_type == "HandoffRequested":
+        return existing or "waiting"
     if event_type == "WaitRequested":
         return existing or "waiting"
     if event_type == "SignalReceived":
-        return "received"
+        return "completed"
     if event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
         return existing or "waiting"
     if event_type == "ChildWorkflowRequested":
@@ -603,6 +623,34 @@ def _dag_node_status(event_type: str, existing: str | None = None) -> str:
     return existing or "recorded"
 
 
+def _dag_completion_mode(event_type: str, payload: dict[str, Any]) -> str | None:
+    if event_type.startswith("Step") and payload.get("completion_mode"):
+        return str(payload.get("completion_mode"))
+    if event_type == "ApprovalRequested":
+        return "approval"
+    if event_type == "HandoffRequested":
+        return "worker"
+    if event_type == "SignalReceived":
+        signal_type = str(payload.get("signal_type") or "")
+        if signal_type == "approval.decision":
+            return "approval"
+        if signal_type == "handoff.completed":
+            return "worker"
+    if event_type.startswith("Step"):
+        return "worker"
+    return None
+
+
+def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, Any]) -> str:
+    if event_type == "ApprovalRequested":
+        return str(payload.get("key") or event.get("key") or "Approval step")
+    if event_type == "HandoffRequested":
+        return str(payload.get("key") or event.get("key") or "Worker step")
+    if event_type == "SignalReceived":
+        return str(payload.get("key") or event.get("key") or "Step output")
+    return str(payload.get("step_name") or event.get("key") or event_type)
+
+
 def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
     source = artifact.get("source") or {}
     key = source.get("key")
@@ -611,7 +659,7 @@ def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
             return "workflow:completed"
         return None
     if artifact.get("kind") == "approval_artifact":
-        return f"approval:{key}"
+        return _approval_step_id(str(key))
     return str(key)
 
 
@@ -642,7 +690,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
             node = {
                 "id": node_id,
                 "kind": _dag_node_kind(event_type),
-                "label": payload.get("step_name") or event.get("key") or event_type,
+                "label": _dag_node_label(event_type, payload, event),
                 "status": _dag_node_status(event_type),
                 "first_seq": event.get("seq"),
                 "last_seq": event.get("seq"),
@@ -650,14 +698,20 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
                 "artifacts": [],
                 "artifact_count": 0,
             }
+            completion_mode = _dag_completion_mode(event_type, payload)
+            if completion_mode:
+                node["completion_mode"] = completion_mode
             nodes[node_id] = node
         else:
             node["status"] = _dag_node_status(event_type, str(node.get("status") or ""))
             node["last_seq"] = event.get("seq")
             if event_type not in node["event_types"]:
                 node["event_types"].append(event_type)
-            if payload.get("step_name"):
-                node["label"] = payload.get("step_name")
+            completion_mode = _dag_completion_mode(event_type, payload)
+            if completion_mode:
+                node["completion_mode"] = completion_mode
+            if payload.get("step_name") or event_type in {"ApprovalRequested", "HandoffRequested"}:
+                node["label"] = _dag_node_label(event_type, payload, event)
         return node_id
 
     def flush_sequential_until(node_id: str | None = None) -> None:
@@ -702,18 +756,13 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         elif event_type in {"StepCompleted", "StepFailed", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
             if node_id not in gather_children:
                 flush_sequential_until(node_id)
-        elif event_type == "ApprovalRequested":
+        elif event_type in {"ApprovalRequested", "HandoffRequested"}:
             flush_sequential_until()
             for parent_id in frontier:
                 add_edge(parent_id, node_id)
             frontier = {node_id}
         elif event_type == "WaitRequested":
-            if str(event.get("key") or "").startswith("wait:approval.decision:"):
-                continue
-            flush_sequential_until()
-            for parent_id in frontier:
-                add_edge(parent_id, node_id)
-            frontier = {node_id}
+            continue
         elif event_type == "SignalReceived":
             flush_sequential_until()
             for parent_id in frontier:

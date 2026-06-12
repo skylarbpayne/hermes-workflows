@@ -269,6 +269,15 @@ class WorkflowEngine:
                 ignore_duplicate=True,
             )
             if inserted:
+                self._append_signal_step_completed(
+                    con,
+                    workflow_id,
+                    signal_type=signal_type,
+                    key=key,
+                    output=payload,
+                    source=source,
+                    idempotency_key=dedupe,
+                )
                 con.execute(
                     """
                     UPDATE workflow_instances
@@ -430,6 +439,15 @@ class WorkflowEngine:
                 ignore_duplicate=True,
             )
             if inserted:
+                self._append_signal_step_completed(
+                    con,
+                    decision.workflow_id,
+                    signal_type="approval.decision",
+                    key=decision.key,
+                    output=payload,
+                    source=sanitized_source,
+                    idempotency_key=dedupe,
+                )
                 con.execute(
                     """
                     UPDATE workflow_commands_outbox
@@ -1001,6 +1019,7 @@ class WorkflowEngine:
             "diagnostics": self._command_diagnostics(pending_commands),
             "child_workflows": child_workflows,
             "approvals": self._approval_summaries(events),
+            "steps": self._step_summaries(events),
         }
         if command_history is not None:
             history, truncated = self._command_history(
@@ -1114,6 +1133,205 @@ class WorkflowEngine:
                 summary["validation_error"] = validation_error
             approvals.append(summary)
         return approvals
+
+    def _step_summaries(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return operator-facing step state derived from durable events.
+
+        Runtime wait/signal/handoff records remain replay plumbing. API clients
+        get a step lifecycle: requested/waiting/completed/failed, completion
+        mode, output, and provenance.
+        """
+
+        steps: dict[str, Dict[str, Any]] = {}
+        order: list[str] = []
+
+        def strip_prefix(value: str, prefix: str) -> str:
+            return value.split(":", 1)[1] if value.startswith(prefix) else value
+
+        def ensure(step_id: str, *, first_seq: Any = None) -> Dict[str, Any]:
+            if step_id not in steps:
+                steps[step_id] = {
+                    "id": step_id,
+                    "key": step_id,
+                    "status": "recorded",
+                    "first_seq": first_seq,
+                    "last_seq": first_seq,
+                }
+                order.append(step_id)
+            return steps[step_id]
+
+        for event in events:
+            event_type = str(event.get("type") or "")
+            payload = event.get("payload") or {}
+            raw_key = str(event.get("key") or payload.get("key") or "")
+            seq = event.get("seq")
+
+            if event_type == "StepRequested":
+                step_id = raw_key
+                if not step_id:
+                    continue
+                step = ensure(step_id, first_seq=seq)
+                mode = payload.get("completion_mode")
+                step["status"] = "waiting" if mode in {"approval", "worker"} else "requested"
+                step["label"] = payload.get("step_name") or payload.get("label") or step.get("label") or step_id
+                if mode:
+                    step["completion_mode"] = mode
+                if payload.get("step_type"):
+                    step["step_type"] = payload.get("step_type")
+                step["last_seq"] = seq
+                continue
+
+            if event_type == "ApprovalRequested":
+                step_id = strip_prefix(raw_key, "approval:")
+                if not step_id:
+                    continue
+                step = ensure(step_id, first_seq=seq)
+                step.update(
+                    {
+                        "status": "completed" if step.get("status") == "completed" else "waiting",
+                        "label": payload.get("prompt") or step.get("label") or step_id,
+                        "completion_mode": "approval",
+                        "step_type": "approval",
+                        "requested_seq": seq,
+                    }
+                )
+                step["last_seq"] = seq
+                continue
+
+            if event_type == "HandoffRequested":
+                step_id = strip_prefix(raw_key, "handoff:")
+                if not step_id:
+                    continue
+                step = ensure(step_id, first_seq=seq)
+                step.update(
+                    {
+                        "status": "completed" if step.get("status") == "completed" else "waiting",
+                        "label": payload.get("prompt") or step.get("label") or step_id,
+                        "completion_mode": "worker",
+                        "step_type": "worker",
+                        "requested_seq": seq,
+                    }
+                )
+                if payload.get("assignee"):
+                    step["assignee"] = payload.get("assignee")
+                step["last_seq"] = seq
+                continue
+
+            if event_type == "StepCompleted":
+                step_id = raw_key
+                if not step_id:
+                    continue
+                step = ensure(step_id, first_seq=seq)
+                step["status"] = "completed"
+                step["output"] = payload.get("output")
+                if payload.get("metadata") is not None:
+                    step["metadata"] = payload.get("metadata")
+                if payload.get("completion_mode"):
+                    step["completion_mode"] = payload.get("completion_mode")
+                if payload.get("step_type"):
+                    step["step_type"] = payload.get("step_type")
+                if payload.get("source"):
+                    step["source"] = payload.get("source")
+                step["last_seq"] = seq
+                continue
+
+            if event_type == "StepFailed":
+                step_id = raw_key
+                if not step_id:
+                    continue
+                step = ensure(step_id, first_seq=seq)
+                step["status"] = "failed"
+                step["error"] = payload.get("error")
+                step["last_seq"] = seq
+                continue
+
+            if event_type == "SignalReceived":
+                signal_type = str(payload.get("signal_type") or "")
+                if signal_type == "approval.decision":
+                    step_id = str(payload.get("key") or "")
+                    mode = "approval"
+                    step_type = "approval"
+                elif signal_type == "handoff.completed":
+                    step_id = str(payload.get("key") or "")
+                    mode = "worker"
+                    step_type = "worker"
+                else:
+                    continue
+                if not step_id:
+                    continue
+                step = ensure(step_id, first_seq=seq)
+                step["status"] = "completed"
+                step["completion_mode"] = mode
+                step["step_type"] = step_type
+                step["output"] = payload.get("payload")
+                if payload.get("source"):
+                    step["source"] = payload.get("source")
+                step["last_seq"] = seq
+
+        return [steps[step_id] for step_id in order]
+
+    def _append_step_requested(
+        self,
+        con: sqlite3.Connection,
+        workflow_id: str,
+        step_key: str,
+        *,
+        completion_mode: str,
+        step_type: str,
+        label: str | None = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> None:
+        step_payload: Dict[str, Any] = {
+            "key": step_key,
+            "step_name": label or step_key,
+            "completion_mode": completion_mode,
+            "step_type": step_type,
+        }
+        if payload is not None:
+            step_payload["request"] = payload
+        self._append_event(
+            con,
+            workflow_id,
+            "StepRequested",
+            key=step_key,
+            payload=step_payload,
+            idempotency_key=f"step-requested:{step_type}:{step_key}",
+            ignore_duplicate=True,
+        )
+
+    def _append_signal_step_completed(
+        self,
+        con: sqlite3.Connection,
+        workflow_id: str,
+        *,
+        signal_type: str,
+        key: str,
+        output: Any,
+        source: Optional[Dict[str, Any]],
+        idempotency_key: str,
+    ) -> None:
+        if signal_type == "approval.decision":
+            completion_mode = "approval"
+            step_type = "approval"
+        elif signal_type == "handoff.completed":
+            completion_mode = "worker"
+            step_type = "worker"
+        else:
+            return
+        self._append_event(
+            con,
+            workflow_id,
+            "StepCompleted",
+            key=key,
+            payload={
+                "output": output,
+                "completion_mode": completion_mode,
+                "step_type": step_type,
+                "source": source,
+            },
+            idempotency_key=f"step-completed:{signal_type}:{key}:{idempotency_key}",
+            ignore_duplicate=True,
+        )
 
     def _active_commands(self, workflow_id: str) -> List[Dict[str, Any]]:
         with self._connect() as con:
@@ -2196,6 +2414,15 @@ class WorkflowContext:
             with self.engine._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
                 self._raise_if_cancelled_in_connection(con)
+                self.engine._append_step_requested(
+                    con,
+                    self.workflow_id,
+                    handoff_key,
+                    completion_mode="worker",
+                    step_type="worker",
+                    label=prompt,
+                    payload=payload,
+                )
                 inserted = self.engine._append_event(
                     con,
                     self.workflow_id,
@@ -2269,6 +2496,15 @@ class ApprovalClient:
 
     def _emit_request_if_missing(self, con: sqlite3.Connection, *, key: str, payload: Dict[str, Any]) -> None:
         event_key = f"approval:{key}"
+        self.ctx.engine._append_step_requested(
+            con,
+            self.ctx.workflow_id,
+            key,
+            completion_mode="approval",
+            step_type="approval",
+            label=str(payload.get("prompt") or key),
+            payload=payload,
+        )
         inserted = self.ctx.engine._append_event(
             con,
             self.ctx.workflow_id,

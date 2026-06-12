@@ -123,7 +123,11 @@ def test_repo_change_plan_workflow_writes_agent_prompt_plan_then_waits_for_appro
     assert first.waiting_on == "signal:approval.decision:approve_implementation_plan"
     events = engine.events("wf_plan")
     requested_steps = [event for event in events if event["type"] == "StepRequested"]
-    assert [event["key"] for event in requested_steps] == ["step:agent_prompt:0", "step:write_implementation_plan:0"]
+    assert [event["key"] for event in requested_steps] == [
+        "step:agent_prompt:0",
+        "step:write_implementation_plan:0",
+        "approve_implementation_plan",
+    ]
     prompt_request = requested_steps[0]["payload"]["args"][0]
     assert prompt_request["kind"] == "agent_prompt.request.v1"
     assert prompt_request["prompt_path"].endswith("examples/prompts/repo_change_plan.md")

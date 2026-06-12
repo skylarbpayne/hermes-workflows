@@ -93,6 +93,20 @@ def test_ctx_approve_returns_typed_decision_and_derives_key(tmp_path):
     assert first.status == "waiting"
     assert first.waiting_on.startswith("signal:approval.decision:approve_plan_artifact")
     key = first.waiting_on.rsplit(":", 1)[1]
+    first_status = engine.workflow_status("wf_typed")
+    assert first_status["steps"] == [
+        {
+            "id": key,
+            "key": key,
+            "status": "waiting",
+            "first_seq": first_status["steps"][0]["first_seq"],
+            "last_seq": first_status["steps"][0]["last_seq"],
+            "label": "Approve plan artifact?",
+            "completion_mode": "approval",
+            "step_type": "approval",
+            "requested_seq": first_status["steps"][0]["requested_seq"],
+        }
+    ]
     approval = engine.get_approval("wf_typed", key)
     assert approval.key == key
     assert approval.artifact == {"plan": "typed"}
@@ -108,6 +122,12 @@ def test_ctx_approve_returns_typed_decision_and_derives_key(tmp_path):
 
     assert result.status == "completed"
     assert result.result == {"typed": True, "approved": True, "by": "skylar", "legacy_action": "approve"}
+    completed_step = engine.workflow_status("wf_typed")["steps"][0]
+    assert completed_step["id"] == key
+    assert completed_step["status"] == "completed"
+    assert completed_step["completion_mode"] == "approval"
+    assert completed_step["output"] == {"action": "approve", "by": "skylar"}
+    assert completed_step["source"]["kind"] == "human"
 
 
 def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_path):
@@ -126,6 +146,11 @@ def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_
     )
     assert after_approval.status == "waiting"
     assert after_approval.waiting_on == "signal:handoff.completed:implementation_ready"
+    after_approval_steps = {step["id"]: step for step in engine.workflow_status("wf_handoff")["steps"]}
+    assert after_approval_steps["approve_handoff_plan"]["status"] == "completed"
+    assert after_approval_steps["approve_handoff_plan"]["completion_mode"] == "approval"
+    assert after_approval_steps["implementation_ready"]["status"] == "waiting"
+    assert after_approval_steps["implementation_ready"]["completion_mode"] == "worker"
     pending = engine.pending_commands("wf_handoff")
     handoff_commands = [command for command in pending if command["type"] == "external_handoff"]
     assert len(handoff_commands) == 1
@@ -141,6 +166,10 @@ def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_
     )
     assert done.status == "completed"
     assert done.result["handoff"]["summary"] == "source changed"
+    done_steps = {step["id"]: step for step in engine.workflow_status("wf_handoff")["steps"]}
+    assert done_steps["implementation_ready"]["status"] == "completed"
+    assert done_steps["implementation_ready"]["completion_mode"] == "worker"
+    assert done_steps["implementation_ready"]["output"] == {"summary": "source changed", "artifacts": ["diff.patch"]}
     history = engine.workflow_status("wf_handoff", command_history="all")["command_history"]
     statuses = {command["key"]: command["status"] for command in history}
     assert statuses["handoff:implementation_ready"] == "completed"

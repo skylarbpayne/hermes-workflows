@@ -479,9 +479,10 @@
   }
 
   function dagNodeSubLabel(node) {
+    if (node.kind === "step" && node.completion_mode === "approval") return "approval step";
+    if (node.kind === "step" && node.completion_mode === "worker") return "worker step";
     if (node.kind === "step") return "step";
     if (node.kind === "gather") return "fan-in";
-    if (node.kind === "approval") return "approval";
     if (node.id === "workflow:start") return "start";
     if (node.id === "workflow:completed") return "completed";
     return node.kind || "event";
