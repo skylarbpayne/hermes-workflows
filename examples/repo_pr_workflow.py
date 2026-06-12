@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_workflows import AgentPrompt, step, workflow
+from hermes_workflows import render_prompt, step, workflow
 
 
 DEFAULT_VERIFICATION_COMMANDS = ["pytest -q"]
@@ -104,6 +104,10 @@ def _implementation_plan_line(plan: Dict[str, Any]) -> str:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _has_matching_plan_approval_event(events: List[Dict[str, Any]], durable_plan: Dict[str, Any]) -> bool:
@@ -553,17 +557,25 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     verification = inputs.get("verification_commands") or DEFAULT_VERIFICATION_COMMANDS
     plan_prompt_path = Path(inputs.get("plan_prompt_path") or DEFAULT_PLAN_PROMPT_PATH)
-    rendered_plan = await AgentPrompt(
-        plan_prompt_path,
-        goal=inputs["goal"],
-        repo_path=str(repo),
-        workflow_id=ctx.workflow_id,
-        non_goals=_bullets(inputs.get("non_goals") or DEFAULT_NON_GOALS),
-        proposed_changes=_bullets(inputs.get("proposed_changes") or DEFAULT_PROPOSED_CHANGES),
-        api_or_event_changes=_bullets(inputs.get("api_or_event_changes") or DEFAULT_API_CHANGES),
-        verification_commands=_bullets([f"`{command}`" for command in verification]),
-        open_questions=_bullets(inputs.get("open_questions") or DEFAULT_OPEN_QUESTIONS),
-    )(ctx)
+    prompt_text = plan_prompt_path.read_text()
+    prompt_vars = {
+        "goal": inputs["goal"],
+        "repo_path": str(repo),
+        "workflow_id": ctx.workflow_id,
+        "non_goals": _bullets(inputs.get("non_goals") or DEFAULT_NON_GOALS),
+        "proposed_changes": _bullets(inputs.get("proposed_changes") or DEFAULT_PROPOSED_CHANGES),
+        "api_or_event_changes": _bullets(inputs.get("api_or_event_changes") or DEFAULT_API_CHANGES),
+        "verification_commands": _bullets([f"`{command}`" for command in verification]),
+        "open_questions": _bullets(inputs.get("open_questions") or DEFAULT_OPEN_QUESTIONS),
+    }
+    rendered_plan = {
+        "kind": "prompt.rendered.v1",
+        "prompt_path": str(plan_prompt_path),
+        "prompt_text": prompt_text,
+        "prompt_sha256": _sha256_text(prompt_text),
+        "rendered_prompt": render_prompt(prompt_text, prompt_vars),
+        "rendered_prompt_sha256": _sha256_text(render_prompt(prompt_text, prompt_vars)),
+    }
     plan = await write_implementation_plan(ctx, inputs, rendered_plan)
     decision = await ctx.approval.request(
         f"Approve implementation plan for: {inputs['goal']}?",

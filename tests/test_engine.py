@@ -1,4 +1,4 @@
-from hermes_workflows import WorkflowEngine, workflow
+from hermes_workflows import WorkflowEngine, agent, workflow
 
 
 def human_source(message_id="msg-1"):
@@ -11,7 +11,7 @@ def human_source(message_id="msg-1"):
 
 
 @workflow
-async def approval_then_worker_step_workflow(ctx, inputs):
+async def approval_then_agent_workflow(ctx, inputs):
     decision = await ctx.approve(
         "Approve plan?",
         key="approve_plan",
@@ -20,19 +20,18 @@ async def approval_then_worker_step_workflow(ctx, inputs):
     )
     if not decision.approved:
         return {"ready": False, "stage": "plan_rejected"}
-    worker_output = await ctx.handoff(
-        "Run worker step",
-        key="run_worker_step",
-        assignee="agent:worker",
-        instructions="Complete this worker step and return output.",
+    agent_output = await agent(
+        "run_agent_request",
+        prompt="Run agent request",
+        key="run_agent_request",
     )
-    return {"ready": True, "worker_output": worker_output}
+    return {"ready": True, "agent_output": agent_output}
 
 
-def test_approval_and_worker_completion_are_operator_facing_steps(tmp_path):
+def test_approval_and_agent_completion_are_operator_facing_steps(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     first = engine.run_until_idle(
-        approval_then_worker_step_workflow,
+        approval_then_agent_workflow,
         {"goal": "step model"},
         workflow_id="wf_step_model",
     )
@@ -55,37 +54,37 @@ def test_approval_and_worker_completion_are_operator_facing_steps(tmp_path):
     after_approval = engine.drain("wf_step_model", initial=after_approval)
 
     assert after_approval.status == "waiting"
-    assert after_approval.waiting_on == "signal:handoff.completed:run_worker_step"
+    assert after_approval.waiting_on == "signal:agent.completed:run_agent_request"
     after_approval_steps = {step["id"]: step for step in engine.workflow_status("wf_step_model")["steps"]}
-    assert set(after_approval_steps) == {"approve_plan", "run_worker_step"}
+    assert set(after_approval_steps) == {"approve_plan", "run_agent_request"}
     assert after_approval_steps["approve_plan"]["status"] == "completed"
     assert after_approval_steps["approve_plan"]["output"] == {"action": "approve", "by": "skylar"}
     assert after_approval_steps["approve_plan"]["source"]["kind"] == "human"
-    assert after_approval_steps["run_worker_step"]["completion_mode"] == "worker"
-    assert after_approval_steps["run_worker_step"]["status"] == "waiting"
+    assert after_approval_steps["run_agent_request"]["completion_mode"] == "agent"
+    assert after_approval_steps["run_agent_request"]["status"] == "waiting"
 
     done = engine.signal(
         "wf_step_model",
-        "handoff.completed",
-        key="run_worker_step",
-        payload={"summary": "worker completed the step", "artifact": "diff.patch"},
-        source={"kind": "worker", "id": "worker-1"},
-        idempotency_key="worker-step-complete",
+        "agent.completed",
+        key="run_agent_request",
+        payload={"summary": "agent completed the request", "artifact": "diff.patch"},
+        source={"kind": "agent", "id": "agent-1"},
+        idempotency_key="agent-request-complete",
     )
     done = engine.drain("wf_step_model", initial=done)
 
     assert done.status == "completed"
     completed_steps = {step["id"]: step for step in engine.workflow_status("wf_step_model")["steps"]}
-    assert completed_steps["run_worker_step"]["status"] == "completed"
-    assert completed_steps["run_worker_step"]["completion_mode"] == "worker"
-    assert completed_steps["run_worker_step"]["output"] == {"summary": "worker completed the step", "artifact": "diff.patch"}
-    assert not any(step_id.startswith(("approval:", "signal:", "handoff:", "wait:")) for step_id in completed_steps)
+    assert completed_steps["run_agent_request"]["status"] == "completed"
+    assert completed_steps["run_agent_request"]["completion_mode"] == "agent"
+    assert completed_steps["run_agent_request"]["output"] == {"summary": "agent completed the request", "artifact": "diff.patch"}
+    assert not any(step_id.startswith(("approval:", "signal:", "agent:", "wait:")) for step_id in completed_steps)
 
 
 def test_internal_signal_and_wait_records_remain_events_not_public_steps(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     engine.run_until_idle(
-        approval_then_worker_step_workflow,
+        approval_then_agent_workflow,
         {"goal": "private plumbing"},
         workflow_id="wf_private_plumbing",
     )
@@ -102,10 +101,10 @@ def test_internal_signal_and_wait_records_remain_events_not_public_steps(tmp_pat
     event_keys = {event["key"] for event in engine.events("wf_private_plumbing")}
     assert "wait:approval.decision:approve_plan" in event_keys
     assert "signal:approval.decision:approve_plan" in event_keys
-    assert "handoff:run_worker_step" in event_keys
+    assert "agent:run_agent_request" in event_keys
 
     step_ids = {step["id"] for step in engine.workflow_status("wf_private_plumbing")["steps"]}
-    assert step_ids == {"approve_plan", "run_worker_step"}
+    assert step_ids == {"approve_plan", "run_agent_request"}
 
 
 @workflow
@@ -117,11 +116,10 @@ async def duplicate_public_step_key_workflow(ctx, inputs):
     )
     if not decision.approved:
         return {"ready": False}
-    await ctx.handoff(
-        "Worker step reuses approval key",
+    await agent(
+        "shared_step_agent",
+        prompt="Agent request reuses approval key",
         key="shared_step",
-        assignee="agent:worker",
-        instructions="This should fail before public topology merges two lifecycles.",
     )
     return {"ready": True}
 
@@ -146,4 +144,4 @@ def test_conflicting_public_step_keys_fail_before_topology_merge(tmp_path):
     steps = {step["id"]: step for step in engine.workflow_status("wf_duplicate_step_key")["steps"]}
     assert set(steps) == {"shared_step"}
     assert steps["shared_step"]["completion_mode"] == "approval"
-    assert not any(step_id.startswith(("approval:", "signal:", "handoff:", "wait:")) for step_id in steps)
+    assert not any(step_id.startswith(("approval:", "signal:", "agent:", "wait:")) for step_id in steps)

@@ -20,6 +20,12 @@ title: hermes-workflows docs
 - **[Runtime boundary](architecture/runtime-vs-skills-subagents.html)**
   What belongs in durable workflow state versus prompts, skills, subagents, and operators.
 
+- **[Agent / parallel / pipeline API grill](architecture/agent-parallel-pipeline-api-grill.html)**
+  Shared language and design pressure test for the workflow authoring API rehaul.
+
+- **[Visual API plan](plans/2026-06-12-agent-parallel-pipeline-api-visual-plan.html)**
+  Mermaid maps for the target API, runtime layering, roadmap, topology, and decision checkpoints.
+
 - **[Inspectability cookbook](operations/inspectability-cookbook.html)**
   Commands for status, event history, outbox, approvals, and failed commands.
 
@@ -33,6 +39,8 @@ title: hermes-workflows docs
 
 ## Deeper notes
 
+- [Agent / parallel / pipeline API grill](architecture/agent-parallel-pipeline-api-grill.html)
+- [Agent / parallel / pipeline API visual plan](plans/2026-06-12-agent-parallel-pipeline-api-visual-plan.html)
 - [Dynamic sub-workflows](architecture/dynamic-sub-workflows.html)
 - [Dashboard runtime semantics and approval artifacts](architecture/dashboard-runtime-semantics-agentstep-approvals.html)
 - [Launch hardening review](architecture/launch-hardening-review-2026-06-05.html)

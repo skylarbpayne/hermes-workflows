@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hermes_workflows import AgentStep, SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows import SubprocessAgentRunner, Workflow, WorkflowEngine, agent, workflow
 from hermes_workflows.engine import JsonCodec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,50 +27,49 @@ DEFAULT_INPUTS = {
 
 @workflow
 async def workflows_meeting_demo(ctx, inputs):
-    roster = await AgentStep(
+    roster = await agent(
         "participant_roster_agent",
         prompt="Find the hackathon participant roster that needs post-event follow-up emails.",
-        variables={"event": inputs["event"], "constraints": inputs["constraints"]},
-    )(ctx)
+        input={"event": inputs["event"], "constraints": inputs["constraints"]},
+    )
 
-    projects = await AgentStep(
+    projects = await agent(
         "project_lookup_agent",
         prompt="Fetch project submission context for every participant in the roster.",
-        variables={"participants": roster["participants"], "event": inputs["event"]},
-    )(ctx)
+        input={"participants": roster["participants"], "event": inputs["event"]},
+    )
 
-    prizes = await AgentStep(
+    prizes = await agent(
         "prize_lookup_agent",
         prompt="Fetch judging results and prize context for each participant project.",
-        variables={"projects": projects["projects"], "event": inputs["event"]},
-    )(ctx)
+        input={"projects": projects["projects"], "event": inputs["event"]},
+    )
 
-    draft_batch = await AgentStep(
+    draft_batch = await agent(
         "participant_email_drafter_agent",
         prompt="Generate personalized post-hackathon email drafts using participant, project, and prize context. Do not send anything.",
-        variables={
+        input={
             "participants": roster["participants"],
             "projects": projects["projects"],
             "prizes": prizes["prizes"],
             "event": inputs["event"],
         },
-    )(ctx)
+    )
 
-    quality_review = await AgentStep(
+    quality_review = await agent(
         "email_quality_reviewer_agent",
         prompt="Review every generated participant email for factual accuracy, tone, missing prize context, and send-risk. Return an approval recommendation.",
-        variables={"draft_batch": draft_batch, "projects": projects["projects"], "prizes": prizes["prizes"]},
-    )(ctx)
+        input={"draft_batch": draft_batch, "projects": projects["projects"], "prizes": prizes["prizes"]},
+    )
 
-    generated_workflow = await AgentStep(
+    generated_workflow = await agent(
         "workflow_architect_agent",
         prompt="Generate a Python @workflow that gates the reviewed participant email draft batch behind agent approval.",
-        variables={"roster": roster, "projects": projects, "prizes": prizes, "draft_batch": draft_batch, "quality_review": quality_review, "constraints": inputs["constraints"]},
+        input={"roster": roster, "projects": projects, "prizes": prizes, "draft_batch": draft_batch, "quality_review": quality_review, "constraints": inputs["constraints"]},
         returns=Workflow,
-    )(ctx)
+    )
 
     email_packet = await generated_workflow(
-        ctx,
         {
             "event": inputs["event"],
             "participants": roster["participants"],
@@ -106,11 +105,11 @@ async def workflows_meeting_demo(ctx, inputs):
             "side_effects": {"gmail_drafts_created": 0, "emails_sent": 0},
         }
 
-    draft_creation_packet = await AgentStep(
+    draft_creation_packet = await agent(
         "draft_creation_packet_agent",
         prompt="Prepare the post-approval Gmail draft creation packet without creating drafts or sending email in the demo.",
-        variables={"draft_batch": email_packet["draft_batch"], "quality_review": email_packet["quality_review"], "human_approval": human_decision},
-    )(ctx)
+        input={"draft_batch": email_packet["draft_batch"], "quality_review": email_packet["quality_review"], "human_approval": human_decision},
+    )
 
     return {
         "ready_to_create_drafts": True,
@@ -607,7 +606,7 @@ def _agent_calls(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if event["type"] != "StepCompleted":
             continue
         metadata = (event.get("payload") or {}).get("metadata") or {}
-        if metadata.get("kind") != "agent_step.live_result.v1":
+        if metadata.get("kind") != "agent.live_result.v1":
             continue
         request = metadata.get("request") or {}
         response = metadata.get("response") or {}

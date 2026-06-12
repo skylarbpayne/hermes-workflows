@@ -144,7 +144,7 @@ Blocked without explicit approval:
 - Decide package identity: `hermes-workflows` as standalone runtime vs experimental subproject under Hermes Agent.
 - Create an examples page for:
   - approval request primitive
-  - subprocess `AgentStep`
+  - subprocess `agent(...)`
   - dynamic Python workflow returns
   - hackathon participant email workflow
 
@@ -197,7 +197,7 @@ The post should show the system solving those exact risks, not hand-waving “hu
    - Metadata can be exported, but humans review code.
 
 4. **Agents as bounded workers**
-   - `AgentStep` calls out through a subprocess runner.
+   - `agent(...)` calls out through a subprocess runner.
    - Deterministic demo runner for reliability; same boundary as real provider-backed agents.
    - The runtime records request/response/provenance and fails closed.
 

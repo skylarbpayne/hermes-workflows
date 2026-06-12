@@ -64,7 +64,7 @@ def main() -> int:
     if "WORKFLOW_OUTPUT" in prompt:
         output = {"source": GENERATED_WORKFLOW_SOURCE, "symbol": "process_item"}
     else:
-        output = {"kind": "fake.agent_response.v1", "prompt_seen": "AgentStep request:" in prompt}
+        output = {"kind": "fake.agent_response.v1", "prompt_seen": "agent(...) request:" in prompt}
     provider_provenance: dict[str, Any] = {"runner": "fake_json_cli_agent", "model": "fake-1"}
     if args.provenance_note:
         provider_provenance["notes"] = args.provenance_note

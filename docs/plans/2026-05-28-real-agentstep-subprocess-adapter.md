@@ -1,12 +1,12 @@
-# Real Hermes/Codex AgentStep Subprocess Adapter Implementation Plan
+# Real Hermes/Codex agent(...) Subprocess Adapter Implementation Plan
 
 > **For Hermes:** This is an approval artifact. Do not implement until the maintainer explicitly approves this plan. After approval, use the `subagent-driven-development` skill to implement task-by-task with review after each slice.
 
-**Goal:** Add the first real CLI-backed AgentStep adapter so `WorkflowEngine(agent_runner=SubprocessAgentRunner(...))` can call a Hermes/Codex-style subprocess through the existing JSON stdin/stdout boundary instead of only static fixture scripts.
+**Goal:** Add the first real CLI-backed agent(...) adapter so `WorkflowEngine(agent_runner=SubprocessAgentRunner(...))` can call a Hermes/Codex-style subprocess through the existing JSON stdin/stdout boundary instead of only static fixture scripts.
 
-**Architecture:** Keep `SubprocessAgentRunner` provider-agnostic. Add a small JSON-contract adapter command that is run by `SubprocessAgentRunner`; the adapter reads `agent_step.runner_request.v1` from stdin, invokes a configured agent CLI using argv-only subprocess calls, parses a strict JSON answer, and writes `{output, provenance}` to stdout. Tests use fake CLI commands first; any real Hermes/Codex local smoke is opt-in and skipped by default.
+**Architecture:** Keep `SubprocessAgentRunner` provider-agnostic. Add a small JSON-contract adapter command that is run by `SubprocessAgentRunner`; the adapter reads `agent.runner_request.v1` from stdin, invokes a configured agent CLI using argv-only subprocess calls, parses a strict JSON answer, and writes `{output, provenance}` to stdout. Tests use fake CLI commands first; any real Hermes/Codex local smoke is opt-in and skipped by default.
 
-**Tech Stack:** Python stdlib (`argparse`, `json`, `subprocess`, `hashlib`, `time`, `os`), existing `hermes_workflows.AgentStep`, `WorkflowEngine`, `SubprocessAgentRunner`, pytest.
+**Tech Stack:** Python stdlib (`argparse`, `json`, `subprocess`, `hashlib`, `time`, `os`), existing `hermes_workflows.agent(...)`, `WorkflowEngine`, `SubprocessAgentRunner`, pytest.
 
 ---
 
@@ -32,9 +32,9 @@ Not approved by this plan:
 ## Current codebase facts this plan relies on
 
 - `src/hermes_workflows/runners.py` already provides `SubprocessAgentRunner(command, timeout_seconds, cwd, env, max_stdout_bytes)`.
-- `src/hermes_workflows/prompts.py` builds `agent_step.runner_request.v1` with `name`, `prompt`, hashes, `rendered_prompt`, `variables`, `returns`, `workflow_id`, and `step_key`.
-- Live AgentStep metadata already persists the runner request, response, and provenance in `StepCompleted.metadata`.
-- `AgentStep(..., returns=Workflow)` already marks live generated workflow output as `approval_required=True` and waits for `approval.decision` before import/execution.
+- `src/hermes_workflows/prompts.py` builds `agent.runner_request.v1` with `name`, `prompt`, hashes, `rendered_prompt`, `input`, `returns`, `workflow_id`, and `step_key`.
+- Live agent(...) metadata already persists the runner request, response, and provenance in `StepCompleted.metadata`.
+- `agent(...)(..., returns=Workflow)` already marks live generated workflow output as `approval_required=True` and waits for `approval.decision` before import/execution.
 - `examples/runners/static_json_agent.py` is only a deterministic fixture; it is not a real agent/provider adapter.
 
 ## Proposed public usage
@@ -45,15 +45,15 @@ Default fake/local example:
 from pathlib import Path
 import sys
 
-from hermes_workflows import AgentStep, SubprocessAgentRunner, WorkflowEngine, workflow
+from hermes_workflows import agent(...), SubprocessAgentRunner, WorkflowEngine, workflow
 
 
 @workflow
 async def summarize_with_cli_agent(ctx, inputs):
-    return await AgentStep(
+    return await agent(...)(
         "summarize_item",
         prompt="Summarize this item as JSON: {{item}}",
-        variables={"item": inputs["item"]},
+        input={"item": inputs["item"]},
     )(ctx)
 
 
@@ -105,24 +105,24 @@ Request on stdin from `SubprocessAgentRunner`:
 
 ```json
 {
-  "kind": "agent_step.runner_request.v1",
+  "kind": "agent.runner_request.v1",
   "name": "summarize_item",
   "prompt": "Summarize this item as JSON: {{item}}",
   "prompt_sha256": "...",
   "rendered_prompt": "Summarize this item as JSON: alpha",
   "rendered_prompt_sha256": "...",
-  "variables": {"item": "alpha"},
-  "variables_sha256": "...",
+  "input": {"item": "alpha"},
+  "input_sha256": "...",
   "returns": "json",
   "workflow_id": "wf_summary",
-  "step_key": "step:agent_step:0"
+  "step_key": "step:agent:0"
 }
 ```
 
 The adapter transforms it into the provider prompt packet:
 
 ```text
-You are being called by hermes-workflows AgentStep.
+You are being called by hermes-workflows agent(...).
 Return exactly one JSON object and no surrounding prose.
 
 Required response schema:
@@ -137,7 +137,7 @@ If the requested return type is "workflow", output must be:
   "symbol": "workflow_function_name"
 }
 
-AgentStep request:
+agent(...) request:
 <pretty-printed request JSON>
 ```
 
@@ -152,7 +152,7 @@ Adapter response on stdout back to `SubprocessAgentRunner`:
     "runner": "hermes_workflows.agent_cli_adapter",
     "adapter_version": 1,
     "agent_command": {"argv0": "codex", "argv": ["codex", "exec", "--json"]},
-    "request_kind": "agent_step.runner_request.v1",
+    "request_kind": "agent.runner_request.v1",
     "request_name": "summarize_item",
     "request_sha256": "sha256 of canonical request JSON",
     "rendered_prompt_sha256": "...",
@@ -244,7 +244,7 @@ Create:
 
 Modify:
 
-- `README.md` — add a short “CLI-backed AgentStep adapter” section after the existing subprocess runner section.
+- `README.md` — add a short “CLI-backed agent(...) adapter” section after the existing subprocess runner section.
 - `docs/architecture/dynamic-sub-workflows.md` — replace the current limitation “no built-in vendor/LLM adapter yet” with the new state: generic CLI adapter exists, real provider smoke is opt-in, no default credentials/config mutation.
 - `src/hermes_workflows/__init__.py` only if the adapter exposes a reusable Python helper. Do not export it if the implementation is purely `python -m hermes_workflows.agent_cli_adapter`.
 
@@ -278,7 +278,7 @@ def main() -> int:
             "symbol": "process_item",
         }
     else:
-        output = {"kind": "fake.agent_response.v1", "prompt_seen": "AgentStep request:" in prompt}
+        output = {"kind": "fake.agent_response.v1", "prompt_seen": "agent(...) request:" in prompt}
     json.dump({"output": output, "provenance": {"runner": "fake_json_cli_agent", "model": "fake-1"}}, sys.stdout)
     return 0
 
@@ -307,7 +307,7 @@ Expected: JSON object containing `output` and fake provenance.
 **Tests to write:**
 
 1. `test_agent_cli_adapter_turns_agentstep_request_into_provider_prompt_and_records_provenance`
-   - Build a fake request with `kind=agent_step.runner_request.v1`.
+   - Build a fake request with `kind=agent.runner_request.v1`.
    - Call the adapter module through `SubprocessAgentRunner([sys.executable, "-m", "hermes_workflows.agent_cli_adapter", ...])`.
    - Assert output comes from fake CLI.
    - Assert provenance includes adapter runner, adapter version, sanitized agent command metadata, request name, request hash, prompt hash.
@@ -336,7 +336,7 @@ Expected: JSON object containing `output` and fake provenance.
 
 7. `test_agent_cli_adapter_generated_workflow_still_waits_for_approval`
    - Use `WorkflowEngine(..., agent_runner=SubprocessAgentRunner(adapter argv))`.
-   - Run an `AgentStep(..., returns=Workflow)` pipeline.
+   - Run an `agent(...)(..., returns=Workflow)` pipeline.
    - Assert workflow status is `waiting` on generated-workflow approval.
    - Assert no `ChildWorkflowRequested` occurred before approval.
    - Assert approval artifact includes adapter provenance.
@@ -404,15 +404,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from hermes_workflows import AgentStep, SubprocessAgentRunner, WorkflowEngine, workflow
+from hermes_workflows import agent(...), SubprocessAgentRunner, WorkflowEngine, workflow
 
 
 @workflow
 async def cli_agent_adapter_example(ctx, inputs):
-    return await AgentStep(
+    return await agent(...)(
         "summarize_item",
         prompt="Summarize {{item}} as JSON.",
-        variables={"item": inputs["item"]},
+        input={"item": inputs["item"]},
     )(ctx)
 
 
@@ -551,7 +551,7 @@ Then block for review/merge approval instead of auto-merging.
 This slice is done only when all default acceptance criteria are true:
 
 1. `SubprocessAgentRunner` can launch `python -m hermes_workflows.agent_cli_adapter ...` as its command.
-2. The adapter reads `agent_step.runner_request.v1` from stdin and writes exactly one `{output, provenance}` JSON object to stdout on success.
+2. The adapter reads `agent.runner_request.v1` from stdin and writes exactly one `{output, provenance}` JSON object to stdout on success.
 3. The adapter invokes the provider/fake CLI using argv-only subprocess calls, never shell strings.
 4. Fake CLI tests cover success, invalid JSON, non-zero exit, timeout/redaction, and generated-workflow approval wait.
 5. Live generated workflow output from the adapter still waits for `approval.decision` before import or child execution.

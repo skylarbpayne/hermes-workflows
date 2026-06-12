@@ -18,7 +18,7 @@ class AgentRunnerError(RuntimeError):
 
 
 class SubprocessAgentRunner:
-    """JSON-over-stdin adapter for trusted external AgentStep runner commands."""
+    """JSON-over-stdin adapter for trusted external agent(...) runner commands."""
 
     def __init__(
         self,

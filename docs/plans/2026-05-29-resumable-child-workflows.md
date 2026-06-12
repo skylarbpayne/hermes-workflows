@@ -12,7 +12,7 @@
 
 ## Why this is the next slice
 
-PR #20 landed the real CLI-backed `AgentStep` adapter. That means the workflow tool can now ask a trusted local agent command to produce strict JSON and even generate a `Workflow` typed value behind approval.
+PR #20 landed the real CLI-backed `agent(...)` adapter. That means the workflow tool can now ask a trusted local agent command to produce strict JSON and even generate a `Workflow` typed value behind approval.
 
 The next product blocker is not another provider. It is orchestration: generated or normal child workflows can currently complete synchronously, but a child that waits for a signal or human approval makes the parent fail with `ChildWorkflowIncomplete`.
 
@@ -47,7 +47,7 @@ Given this parent:
 ```python
 @workflow
 async def parent(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(...)(
         "build_waiting_child",
         prompt="Write a Python workflow that waits for a signal.",
         returns=Workflow,

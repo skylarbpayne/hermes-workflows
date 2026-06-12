@@ -230,7 +230,7 @@ def _runtime_semantics() -> dict[str, Any]:
     return {
         "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; approval decisions also resume trusted local workflow code immediately after recording human provenance.",
         "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
-        "agent_steps": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. AgentStep calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
+        "agent_requests": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. agent(...) calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
         "approval_decisions": "Approval steps are completed by trusted approval surfaces setting approval output with human provenance, then resuming trusted local workflow code.",
         "artifacts": "Approval and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
@@ -526,10 +526,10 @@ def _approval_step_id(key: str) -> str | None:
     return key.split(":", 1)[1] if key.startswith("approval:") else key
 
 
-def _handoff_step_id(key: str) -> str | None:
+def _agent_request_step_id(key: str) -> str | None:
     if not key:
         return None
-    return key.split(":", 1)[1] if key.startswith("handoff:") else key
+    return key.split(":", 1)[1] if key.startswith("agent:") else key
 
 
 def _signal_step_id(payload: dict[str, Any]) -> str | None:
@@ -537,8 +537,8 @@ def _signal_step_id(payload: dict[str, Any]) -> str | None:
     key = str(payload.get("key") or "")
     if signal_type == "approval.decision":
         return _approval_step_id(key)
-    if signal_type == "handoff.completed":
-        return _handoff_step_id(key)
+    if signal_type == "agent.completed":
+        return _agent_request_step_id(key)
     return None
 
 
@@ -558,8 +558,8 @@ def _dag_node_id_for_event(event: dict[str, Any]) -> str | None:
         return key or None
     if event_type == "ApprovalRequested":
         return _approval_step_id(key)
-    if event_type == "HandoffRequested":
-        return _handoff_step_id(key)
+    if event_type == "AgentRequested":
+        return _agent_request_step_id(key)
     if event_type == "WaitRequested":
         return None
     if event_type == "SignalReceived":
@@ -578,7 +578,7 @@ def _dag_node_kind(event_type: str) -> str:
         return "step"
     if event_type == "ApprovalRequested":
         return "step"
-    if event_type == "HandoffRequested":
+    if event_type == "AgentRequested":
         return "step"
     if event_type in {"SignalReceived", "WaitRequested"}:
         return "step"
@@ -598,7 +598,7 @@ def _dag_node_status(event_type: str, existing: str | None = None) -> str:
         return "failed"
     if event_type == "ApprovalRequested":
         return "waiting"
-    if event_type == "HandoffRequested":
+    if event_type == "AgentRequested":
         return existing or "waiting"
     if event_type == "WaitRequested":
         return existing or "waiting"
@@ -628,24 +628,24 @@ def _dag_completion_mode(event_type: str, payload: dict[str, Any]) -> str | None
         return str(payload.get("completion_mode"))
     if event_type == "ApprovalRequested":
         return "approval"
-    if event_type == "HandoffRequested":
-        return "worker"
+    if event_type == "AgentRequested":
+        return "agent"
     if event_type == "SignalReceived":
         signal_type = str(payload.get("signal_type") or "")
         if signal_type == "approval.decision":
             return "approval"
-        if signal_type == "handoff.completed":
-            return "worker"
+        if signal_type == "agent.completed":
+            return "agent"
     if event_type.startswith("Step"):
-        return "worker"
+        return "agent"
     return None
 
 
 def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, Any]) -> str:
     if event_type == "ApprovalRequested":
         return str(payload.get("key") or event.get("key") or "Approval step")
-    if event_type == "HandoffRequested":
-        return str(payload.get("key") or event.get("key") or "Worker step")
+    if event_type == "AgentRequested":
+        return str(payload.get("key") or event.get("key") or "Agent step")
     if event_type == "SignalReceived":
         return str(payload.get("key") or event.get("key") or "Step output")
     return str(payload.get("step_name") or event.get("key") or event_type)
@@ -710,7 +710,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
             completion_mode = _dag_completion_mode(event_type, payload)
             if completion_mode:
                 node["completion_mode"] = completion_mode
-            if payload.get("step_name") or event_type in {"ApprovalRequested", "HandoffRequested"}:
+            if payload.get("step_name") or event_type in {"ApprovalRequested", "AgentRequested"}:
                 node["label"] = _dag_node_label(event_type, payload, event)
         return node_id
 
@@ -756,7 +756,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         elif event_type in {"StepCompleted", "StepFailed", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
             if node_id not in gather_children:
                 flush_sequential_until(node_id)
-        elif event_type in {"ApprovalRequested", "HandoffRequested"}:
+        elif event_type in {"ApprovalRequested", "AgentRequested"}:
             flush_sequential_until()
             for parent_id in frontier:
                 add_edge(parent_id, node_id)

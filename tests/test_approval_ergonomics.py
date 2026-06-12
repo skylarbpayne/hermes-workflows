@@ -1,7 +1,6 @@
 import pytest
 
-from hermes_workflows import ApprovalDecision, WorkflowEngine, step, workflow
-from hermes_workflows.prompts import build_agent_step_payload
+from hermes_workflows import ApprovalDecision, WorkflowEngine, agent, step, workflow
 
 
 def human_source(message_id="msg-1"):
@@ -29,23 +28,22 @@ async def typed_auto_key_workflow(ctx, inputs):
 
 
 @workflow
-async def handoff_workflow(ctx, inputs):
+async def agent_workflow(ctx, inputs):
     approved = await ctx.approve(
-        "Approve implementation handoff?",
-        key="approve_handoff_plan",
+        "Approve implementation agent work?",
+        key="approve_agent_plan",
         artifact={"goal": inputs.get("goal", "demo")},
         approver="human:skylar",
     )
     if not approved.approved:
         return {"status": "not-approved", "feedback": approved.feedback}
-    handoff = await ctx.handoff(
-        "Implement approved plan",
+    agent_output = await agent(
+        "implement_approved_plan",
+        prompt="Implement approved plan",
         key="implementation_ready",
-        artifact={"goal": inputs.get("goal", "demo")},
-        assignee="agent:implementer",
-        instructions="Make the source change, then signal handoff.completed.",
+        input={"goal": inputs.get("goal", "demo")},
     )
-    return {"status": "done", "handoff": handoff}
+    return {"status": "done", "agent": agent_output}
 
 
 @step
@@ -132,53 +130,53 @@ def test_ctx_approve_returns_typed_decision_and_derives_key(tmp_path):
     assert completed_step["source"]["kind"] == "human"
 
 
-def test_ctx_handoff_records_external_work_and_resumes_on_completion_signal(tmp_path):
+def test_agent_records_external_work_and_resumes_on_completion_signal(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
-    first = engine.run_until_idle(handoff_workflow, {"goal": "ergonomics"}, workflow_id="wf_handoff")
-    assert first.waiting_on == "signal:approval.decision:approve_handoff_plan"
+    first = engine.run_until_idle(agent_workflow, {"goal": "ergonomics"}, workflow_id="wf_agent")
+    assert first.waiting_on == "signal:approval.decision:approve_agent_plan"
 
     recorded_approval = engine.signal(
-        "wf_handoff",
+        "wf_agent",
         "approval.decision",
-        key="approve_handoff_plan",
+        key="approve_agent_plan",
         payload={"action": "approve", "by": "skylar"},
         source=human_source(),
-        idempotency_key="approve-handoff",
+        idempotency_key="approve-agent",
     )
     assert recorded_approval.status == "running"
-    after_approval = engine.drain("wf_handoff")
+    after_approval = engine.drain("wf_agent")
     assert after_approval.status == "waiting"
-    assert after_approval.waiting_on == "signal:handoff.completed:implementation_ready"
-    after_approval_steps = {step["id"]: step for step in engine.workflow_status("wf_handoff")["steps"]}
-    assert after_approval_steps["approve_handoff_plan"]["status"] == "completed"
-    assert after_approval_steps["approve_handoff_plan"]["completion_mode"] == "approval"
+    assert after_approval.waiting_on == "signal:agent.completed:implementation_ready"
+    after_approval_steps = {step["id"]: step for step in engine.workflow_status("wf_agent")["steps"]}
+    assert after_approval_steps["approve_agent_plan"]["status"] == "completed"
+    assert after_approval_steps["approve_agent_plan"]["completion_mode"] == "approval"
     assert after_approval_steps["implementation_ready"]["status"] == "waiting"
-    assert after_approval_steps["implementation_ready"]["completion_mode"] == "worker"
-    pending = engine.pending_commands("wf_handoff")
-    handoff_commands = [command for command in pending if command["type"] == "external_handoff"]
-    assert len(handoff_commands) == 1
-    assert handoff_commands[0]["key"] == "handoff:implementation_ready"
-    assert handoff_commands[0]["payload"]["assignee"] == "agent:implementer"
+    assert after_approval_steps["implementation_ready"]["completion_mode"] == "agent"
+    pending = engine.pending_commands("wf_agent")
+    agent_commands = [command for command in pending if command["type"] == "external_agent"]
+    assert len(agent_commands) == 1
+    assert agent_commands[0]["key"] == "agent:implementation_ready"
+    assert agent_commands[0]["payload"]["assignee"] == "implement_approved_plan"
 
     recorded_done = engine.signal(
-        "wf_handoff",
-        "handoff.completed",
+        "wf_agent",
+        "agent.completed",
         key="implementation_ready",
         payload={"summary": "source changed", "artifacts": ["diff.patch"]},
-        idempotency_key="handoff-ready",
+        idempotency_key="agent-ready",
     )
     assert recorded_done.status == "running"
-    done = engine.drain("wf_handoff")
+    done = engine.drain("wf_agent")
     assert done.status == "completed"
-    assert done.result["handoff"]["summary"] == "source changed"
-    done_steps = {step["id"]: step for step in engine.workflow_status("wf_handoff")["steps"]}
+    assert done.result["agent"]["summary"] == "source changed"
+    done_steps = {step["id"]: step for step in engine.workflow_status("wf_agent")["steps"]}
     assert done_steps["implementation_ready"]["status"] == "completed"
-    assert done_steps["implementation_ready"]["completion_mode"] == "worker"
+    assert done_steps["implementation_ready"]["completion_mode"] == "agent"
     assert done_steps["implementation_ready"]["output"] == {"summary": "source changed", "artifacts": ["diff.patch"]}
-    history = engine.workflow_status("wf_handoff", command_history="all")["command_history"]
+    history = engine.workflow_status("wf_agent", command_history="all")["command_history"]
     statuses = {command["key"]: command["status"] for command in history}
-    assert statuses["handoff:implementation_ready"] == "completed"
+    assert statuses["agent:implementation_ready"] == "completed"
 
 
 def test_feedback_loop_uses_new_attempt_keys_after_revision_feedback(tmp_path):
@@ -218,30 +216,29 @@ def test_feedback_loop_uses_new_attempt_keys_after_revision_feedback(tmp_path):
     ]
 
 
-def test_agent_step_variables_accept_typed_approval_decisions():
-    payload = build_agent_step_payload(
+def test_agent_input_accepts_typed_approval_decisions():
+    decision = ApprovalDecision(
+        action="approve",
+        by="skylar",
+        source=human_source(),
+        note="ship the packet",
+    )
+    call = agent(
         "draft_packet_agent",
-        "prepare packet",
-        dict,
-        variables={
-            "human_approval": ApprovalDecision(
-                action="approve",
-                by="skylar",
-                source=human_source(),
-                note="ship the packet",
-            )
-        },
+        prompt="Prepare packet from approved decision",
+        input={"human_approval": decision},
         mock_output={"ok": True},
     )
+    payload = call._payload("agent:draft_packet_agent:0")
 
     request = payload["args"][0]
-    assert request["variables"]["human_approval"] == {
+    assert request["input"]["human_approval"] == {
         "action": "approve",
         "by": "skylar",
         "note": "ship the packet",
         "source": human_source(),
     }
-    assert request["variables_sha256"]
+    assert request["input_sha256"]
 
 
 def test_human_gate_rejects_agent_authored_named_gate_approval(tmp_path):

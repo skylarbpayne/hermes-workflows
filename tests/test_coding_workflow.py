@@ -94,10 +94,10 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert "# Coding workflow plan" in plan
     assert "Change demo module VALUE" in plan
     assert "approve_coding_plan" in plan
-    assert "implementation_handoff" in plan
+    assert "implementation_agent" in plan
     assert "approve_coding_review" in plan
-    assert "handoff.completed:coding_ready" not in plan
-    assert "ctx.handoff" not in plan
+    assert "agent.completed:coding_ready" not in plan
+    assert "ctx.agent" not in plan
     assert "## Before / after" in plan
     assert "## Concrete implementation steps" in plan
     assert "## Dashboard preview" in plan
@@ -132,13 +132,13 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
         idempotency_key="plan-approval",
     )
     assert after_plan.status == "waiting"
-    assert after_plan.waiting_on == "signal:handoff.completed:coding_ready"
+    assert after_plan.waiting_on == "signal:agent.completed:coding_ready"
 
     (repo / "demo.py").write_text("VALUE = 2\n")
     after_ready = _drain_signal(
         db,
         "wf_coding",
-        "handoff.completed",
+        "agent.completed",
         key="coding_ready",
         payload={"by": "palmer", "summary": "Added demo module and ran local implementation."},
         source={"kind": "agent", "id": "palmer", "channel": "test"},
@@ -149,7 +149,7 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     review_approval = WorkflowEngine(db).get_approval("wf_coding", "approve_coding_review")
     assert review_approval.authority == []
     assert "authority" not in review_approval.artifact
-    assert "handoff.completed:coding_ready" not in review_approval.artifact["plan"]["markdown"]
+    assert "agent.completed:coding_ready" not in review_approval.artifact["plan"]["markdown"]
 
     evidence = (tmp_path / "coding-evidence.md").read_text()
     assert "# Coding workflow evidence" in evidence
@@ -174,7 +174,7 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert final.result["ready"] is True
     assert final.result["committed"] is False
     assert final.result["pushed"] is False
-    assert final.result["approval_gates"] == ["approve_coding_plan", "implementation_handoff", "approve_coding_review"]
+    assert final.result["approval_gates"] == ["approve_coding_plan", "implementation_agent", "approve_coding_review"]
 
 
 def test_coding_workflow_rejection_stops_before_implementation(tmp_path):
@@ -197,9 +197,9 @@ def test_coding_workflow_rejection_stops_before_implementation(tmp_path):
     )
     assert first.status == "waiting"
     plan = (tmp_path / "plan.md").read_text()
-    assert "implementation_handoff" in plan
-    assert "handoff.completed:coding_ready" not in plan
-    assert "ctx.handoff" not in plan
+    assert "implementation_agent" in plan
+    assert "agent.completed:coding_ready" not in plan
+    assert "ctx.agent" not in plan
     result = _drain_signal(
         db,
         "wf_coding_reject",
@@ -246,7 +246,7 @@ def test_coding_workflow_allows_review_approver_to_match_implementer(tmp_path):
     _drain_signal(
         db,
         "wf_coding_same_person",
-        "handoff.completed",
+        "agent.completed",
         key="coding_ready",
         payload={"by": "skylar", "summary": "Changed code directly."},
         idempotency_key="implementation-ready",

@@ -50,12 +50,12 @@ CHILD = Workflow.from_source(
 
 @workflow
 async def parent_workflow(ctx, inputs):
-    return await CHILD(ctx, inputs["item"], key=inputs["item"]["id"])
+    return await CHILD(inputs["item"], key=inputs["item"]["id"])
 '''
 
 
 DYNAMIC_CHILD_WORKFLOW_MODULE = '''
-from hermes_workflows import AgentStep, Workflow, workflow
+from hermes_workflows import agent, Workflow, workflow
 
 WAITING_SOURCE = """
 from hermes_workflows import workflow
@@ -68,13 +68,14 @@ async def waiting_child(ctx, item):
 
 @workflow
 async def generated_parent_workflow(ctx, inputs):
-    child = await AgentStep(
+    child = await agent(
         "build_waiting_child",
         prompt="Build a child workflow that waits for a signal.",
+        input={"purpose": "wait for a signal"},
         returns=Workflow,
         mock_output={"source": WAITING_SOURCE, "symbol": "waiting_child"},
-    )(ctx)
-    return await child(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await child(inputs["item"], key=inputs["item"]["id"])
 '''
 
 

@@ -12,7 +12,7 @@ The runtime is correctly shaped as a code-first durable control plane, not an ag
 
 - `WorkflowEngine` owns SQLite persistence, replay, outbox commands, signals, child workflow reconciliation, cancellation, and status packets.
 - `WorkflowContext` exposes workflow author APIs: durable steps, gather, child workflow starts, generated-workflow approval checks, generic signal waits, and `ctx.approval.request(...)`.
-- `AgentStep` / `SubprocessAgentRunner` keep model/tool execution outside the runtime and store generated child workflow source as inspectable values.
+- `agent(...)` / `SubprocessAgentRunner` keep model/tool execution outside the runtime and store generated child workflow source as inspectable values.
 - CLI commands are thin operators around the same engine API, which is good: no hidden second approval path.
 
 The biggest launch risk was not durability; it was approval ambiguity. Workflows can only be trusted for high-blast-radius ops if approval state is concrete, inspectable, and fail-closed.

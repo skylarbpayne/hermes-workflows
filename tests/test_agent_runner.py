@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from hermes_workflows import AgentStep, Workflow, WorkflowEngine, workflow
+from hermes_workflows import Workflow, WorkflowEngine, agent, workflow
 
 
 GENERATED_SOURCE = '''
@@ -32,70 +32,70 @@ async def dangerous(ctx, item):
 
 @workflow
 async def live_json_agent_pipeline(ctx, inputs):
-    return await AgentStep(
+    return await agent(
         "summarize_item",
-        prompt="Summarize {{item}}",
-        variables={"item": inputs["item"]},
-    )(ctx)
+        prompt=f"Summarize {inputs['item']}",
+        input={"item": inputs["item"]},
+    )
 
 
 @workflow
 async def live_generated_workflow_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_processor",
-        prompt="Write a Python workflow for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"Write a Python workflow for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 
 
 @workflow
 async def live_multi_symbol_pipeline(ctx, inputs):
-    harmless_workflow = await AgentStep(
+    harmless_workflow = await agent(
         "build_harmless",
-        prompt="Write a harmless workflow for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"Write a harmless workflow for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
-    first = await harmless_workflow(ctx, inputs["item"], key="first")
-    dangerous_workflow = await AgentStep(
+    )
+    first = await harmless_workflow(inputs["item"], key="first")
+    dangerous_workflow = await agent(
         "build_dangerous",
-        prompt="Write a dangerous workflow for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"Write a dangerous workflow for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
-    second = await dangerous_workflow(ctx, inputs["item"], key="second")
+    )
+    second = await dangerous_workflow(inputs["item"], key="second")
     return {"first": first, "second": second}
 
 
 @workflow
 async def live_multi_symbol_same_group_pipeline(ctx, inputs):
-    harmless_workflow = await AgentStep(
+    harmless_workflow = await agent(
         "build_harmless",
-        prompt="Write a harmless workflow for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"Write a harmless workflow for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
+    )
     first = await ctx.start_child(harmless_workflow, inputs["item"], key="same", group="shared")
-    dangerous_workflow = await AgentStep(
+    dangerous_workflow = await agent(
         "build_dangerous",
-        prompt="Write a dangerous workflow for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"Write a dangerous workflow for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
+    )
     second = await ctx.start_child(dangerous_workflow, inputs["item"], key="same", group="shared")
     return {"first": first, "second": second}
 
 
-def test_agent_step_dispatches_to_live_runner_and_replays_stored_result(tmp_path):
+def test_agent_dispatches_to_live_runner_and_replays_stored_result(tmp_path):
     db = tmp_path / "workflow.sqlite"
     calls = []
 
     def runner(request):
         calls.append(request)
         return {
-            "output": {"summary": request["variables"]["item"].upper()},
+            "output": {"summary": request["input"]["item"].upper()},
             "provenance": {"runner": "fake", "run_id": "run-1"},
         }
 
@@ -105,19 +105,19 @@ def test_agent_step_dispatches_to_live_runner_and_replays_stored_result(tmp_path
     assert result.status == "completed"
     assert result.result == {"summary": "ALPHA"}
     assert len(calls) == 1
-    assert calls[0]["kind"] == "agent_step.runner_request.v1"
+    assert calls[0]["kind"] == "agent.runner_request.v1"
     assert calls[0]["name"] == "summarize_item"
-    assert calls[0]["prompt"] == "Summarize {{item}}"
-    assert calls[0]["variables"] == {"item": "alpha"}
+    assert calls[0]["prompt"] == "Summarize alpha"
+    assert calls[0]["input"] == {"item": "alpha"}
     assert calls[0]["returns"] == "json"
     assert calls[0]["workflow_id"] == "wf_live_json"
-    assert calls[0]["step_key"] == "step:agent_step:0"
+    assert calls[0]["step_key"] == "agent:summarize_item:0"
 
     completed = [event for event in engine.events("wf_live_json") if event["type"] == "StepCompleted"][0]
     assert completed["payload"]["output"] == {"summary": "ALPHA"}
-    assert completed["payload"]["metadata"]["kind"] == "agent_step.live_result.v1"
+    assert completed["payload"]["metadata"]["kind"] == "agent.live_result.v1"
     assert completed["payload"]["metadata"]["provenance"] == {"runner": "fake", "run_id": "run-1"}
-    assert completed["payload"]["metadata"]["request"]["step_key"] == "step:agent_step:0"
+    assert completed["payload"]["metadata"]["request"]["step_key"] == "agent:summarize_item:0"
 
     replay_calls = []
     replay_engine = WorkflowEngine(db, agent_runner=lambda request: replay_calls.append(request) or {"output": "wrong"})
@@ -290,12 +290,12 @@ def test_generated_workflow_child_identity_is_bound_to_selected_symbol_when_grou
     assert "harmless" in child_requests[0]["key"]
 
 
-def test_live_agent_step_supports_async_runner(tmp_path):
+def test_live_agent_supports_async_runner(tmp_path):
     db = tmp_path / "workflow.sqlite"
 
     async def runner(request):
         return {
-            "output": {"summary": request["variables"]["item"] + "!"},
+            "output": {"summary": request["input"]["item"] + "!"},
             "provenance": {"runner": "async-fake"},
         }
 
