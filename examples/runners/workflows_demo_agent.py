@@ -227,16 +227,16 @@ def _draft_for(participant: dict, *, projects: list[dict] | None = None, prizes:
 def main() -> int:
     request = json.loads(sys.stdin.read())
     name = request.get("name")
-    variables = request.get("variables") or {}
+    request_input = request.get("input") or {}
     request_hash = hashlib.sha256(json.dumps(request, sort_keys=True).encode("utf-8")).hexdigest()[:12]
     snapshot = _snapshot()
 
     if name == "intake_agent":
         output = {
             "kind": "hackathon_email_demo_intake.v1",
-            "event": variables.get("event"),
-            "goal": variables.get("goal"),
-            "constraints": variables.get("constraints", []),
+            "event": request_input.get("event"),
+            "goal": request_input.get("goal"),
+            "constraints": request_input.get("constraints", []),
             "recommended_shape": "participant roster → project submissions → prize lookup → personalized email drafts → agent approval → human approval",
             "evidence": [
                 "The demo uses realistic hackathon data objects instead of a toy example.",
@@ -254,7 +254,7 @@ def main() -> int:
             "privacy_note": snapshot.get("privacy_note", "Synthetic demo data; no real participant emails are rendered from a production system."),
         }
     elif name == "project_lookup_agent":
-        participant_ids = [p["participant_id"] for p in (variables.get("participants") or [])]
+        participant_ids = [p["participant_id"] for p in (request_input.get("participants") or [])]
         projects = _projects()
         output = {
             "kind": "project_lookup.v1",
@@ -275,9 +275,9 @@ def main() -> int:
     elif name == "workflow_architect_agent":
         output = {"source": DYNAMIC_WORKFLOW_SOURCE, "symbol": "participant_email_personalization_workflow"}
     elif name == "participant_email_drafter_agent":
-        participants = variables.get("participants") or _participants()
-        projects = variables.get("projects") or _projects()
-        prizes = variables.get("prizes") or _prizes()
+        participants = request_input.get("participants") or _participants()
+        projects = request_input.get("projects") or _projects()
+        prizes = request_input.get("prizes") or _prizes()
         drafts = [_draft_for(participant, projects=projects, prizes=prizes) for participant in participants]
         output = {
             "kind": "participant_email_draft_batch.v1",
@@ -287,7 +287,7 @@ def main() -> int:
             "guardrail": "Draft text only. The workflow has not created Gmail drafts and has not sent emails.",
         }
     elif name == "email_quality_reviewer_agent":
-        draft_batch = variables.get("draft_batch") or {}
+        draft_batch = request_input.get("draft_batch") or {}
         drafts = draft_batch.get("drafts", [])
         output = {
             "kind": "email_quality_review.v1",
@@ -302,8 +302,8 @@ def main() -> int:
             "required_human_review": ["Spot-check prize names", "Approve Gmail draft creation", "Confirm no participant should be excluded"],
         }
     elif name == "draft_creation_packet_agent":
-        draft_batch = variables.get("draft_batch") or {}
-        human_approval = variables.get("human_approval") or {}
+        draft_batch = request_input.get("draft_batch") or {}
+        human_approval = request_input.get("human_approval") or {}
         output = {
             "kind": "draft_creation_packet.v1",
             "ready_to_create_drafts": True,
@@ -314,7 +314,7 @@ def main() -> int:
             "next_real_action": "If this were live, the next workflow step would create Gmail drafts only after this human approval. Sending would be a separate approval gate.",
         }
     elif name == "final_comms_agent":
-        dynamic_packet = variables.get("dynamic_packet") or {}
+        dynamic_packet = request_input.get("dynamic_packet") or {}
         output = {
             "kind": "hackathon_email_demo_final_packet.v1",
             "summary": "Hackathon personalized participant-email workflow completed with generated-code, agent-quality, and human batch approvals.",
@@ -332,7 +332,7 @@ def main() -> int:
         output = {
             "kind": "unknown_agent.v1",
             "name": name,
-            "echo": variables,
+            "echo": request_input,
         }
 
     print(json.dumps({
@@ -342,7 +342,7 @@ def main() -> int:
             "agent_name": name,
             "request_id": f"demo-{request_hash}",
             "model": "deterministic-demo-agent-v2",
-            "notes": "Deterministic subprocess agent used for reliable live demo; same AgentStep boundary as provider-backed runners.",
+            "notes": "Deterministic subprocess agent used for reliable live demo; same agent(...) boundary as provider-backed runners.",
         },
     }, sort_keys=True))
     return 0

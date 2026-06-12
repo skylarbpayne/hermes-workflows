@@ -5,11 +5,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, TypedDict, cast
 
-from hermes_workflows import step, workflow
+from hermes_workflows import agent, step, workflow
 
 
-PUBLIC_APPROVAL_GATES = ["approve_coding_plan", "implementation_handoff", "approve_coding_review"]
-INTERNAL_IMPLEMENTATION_HANDOFF_KEY = "coding_ready"
+PUBLIC_APPROVAL_GATES = ["approve_coding_plan", "implementation_agent", "approve_coding_review"]
+INTERNAL_IMPLEMENTATION_AGENT_KEY = "coding_ready"
 
 
 class CodingWorkflowInput(TypedDict, total=False):
@@ -553,12 +553,13 @@ async def coding_workflow(ctx, inputs: CodingWorkflowInput) -> CodingWorkflowRes
     if not plan_decision.approved:
         return {"ready": False, "stage": "plan_rejected", "plan": plan, "decision": plan_decision.to_dict()}
 
-    implementation_signal = await ctx.handoff(
-        f"Implement approved coding plan for: {plan['goal']}.",
-        key=INTERNAL_IMPLEMENTATION_HANDOFF_KEY,
-        artifact=plan,
-        assignee=inputs.get("implementer", "agent:implementer"),
-        instructions="Make the approved source changes, run local checks, then mark the implementation handoff complete with summary/artifacts.",
+    implementation_signal = await agent(
+        "implement_coding_plan",
+        prompt=f"Implement approved coding plan for: {plan['goal']}.",
+        input={"plan": plan},
+        context=[plan],
+        key=INTERNAL_IMPLEMENTATION_AGENT_KEY,
+        tools=["terminal", "file"],
     )
     diff = await coding_collect_diff(ctx, inputs)
     verification = await coding_run_verification(ctx, inputs)

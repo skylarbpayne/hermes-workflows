@@ -8,13 +8,13 @@ Date: 2026-05-28
 Static durable workflows are useful, but the dynamic-workflow unlock is this shape:
 
 ```python
-items = await agent_step_producing_items(ctx, inputs)
+items = await producing_items(ctx, inputs)
 processor = await build_item_workflow(ctx, items)  # returns a Workflow value
 for item in items:
     await processor(ctx, item, key=item["id"])
 ```
 
-The missing primitive was not a YAML/JSON workflow DSL. The missing primitive was making `Workflow` a normal typed value that an `AgentStep` can return.
+The missing primitive was not a YAML/JSON workflow DSL. The missing primitive was making `Workflow` a normal typed value that an `agent(...)` can return.
 
 ## Design stance
 
@@ -30,23 +30,23 @@ An agent step may return executable Python source. If the caller declares `retur
 6. imports/registers the generated `@workflow` only after approval or for deterministic `mock_output`,
 7. rehydrates the same value on replay without calling the agent again.
 
-That keeps the magic where it belongs: `AgentStep` returns a value. One possible value is `Workflow`.
+That keeps the magic where it belongs: `agent(...)` returns a value. One possible value is `Workflow`.
 
 ## Authoring surface
 
 ```python
-from hermes_workflows import AgentStep, Workflow, workflow
+from hermes_workflows import agent(...), Workflow, workflow
 
 
 @workflow
 async def dynamic_pipeline(ctx, inputs):
-    items = await AgentStep(
+    items = await agent(...)(
         "produce_items",
         prompt="Return items to process.",
         returns=list,
     )(ctx)
 
-    processor = await AgentStep(
+    processor = await agent(...)(
         "build_processor",
         prompt="Write Python defining @workflow async def process_item(ctx, item).",
         returns=Workflow,
@@ -63,7 +63,7 @@ async def dynamic_pipeline(ctx, inputs):
 Examples/tests can still use `mock_output` for deterministic generated Python without configuring a live agent runner:
 
 ```python
-processor = await AgentStep(
+processor = await agent(...)(
     "build_processor",
     prompt="Write Python defining @workflow async def process_item(ctx, item).",
     returns=Workflow,
@@ -71,7 +71,7 @@ processor = await AgentStep(
 )(ctx)
 ```
 
-For live execution, pass an `agent_runner` to `WorkflowEngine`. The runner receives a JSON-safe request packet with the prompt, rendered prompt, variables, return type, workflow id, and step key. Its exact response and provenance are persisted as `StepCompleted.metadata`.
+For live execution, pass an `agent_runner` to `WorkflowEngine`. The runner receives a JSON-safe request packet with the prompt, rendered prompt, input, return type, workflow id, and step key. Its exact response and provenance are persisted as `StepCompleted.metadata`.
 
 The built-in `SubprocessAgentRunner` lets that live runner be a trusted argv command instead of a Python callable. For a generic local CLI that can return strict JSON, run the optional adapter command behind it:
 
@@ -96,7 +96,7 @@ engine = WorkflowEngine(
 )
 ```
 
-The subprocess boundary still receives an `agent_step.runner_request.v1` JSON object on stdin. The adapter turns that request into a provider prompt, invokes the configured provider CLI using argv-only `subprocess.Popen`, and requires the provider to return strict JSON on stdout:
+The subprocess boundary still receives an `agent.runner_request.v1` JSON object on stdin. The adapter turns that request into a provider prompt, invokes the configured provider CLI using argv-only `subprocess.Popen`, and requires the provider to return strict JSON on stdout:
 
 ```json
 {
@@ -109,11 +109,11 @@ The subprocess boundary still receives an `agent_step.runner_request.v1` JSON ob
 
 Default tests and examples use `examples/runners/fake_json_cli_agent.py`, so they require no network, credentials, Hermes/Codex install, provider auth, or config mutation. Real local provider smoke is opt-in only via `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` and a caller-supplied `HERMES_WORKFLOWS_AGENT_COMMAND`; otherwise it is skipped.
 
-If a live `AgentStep(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(ctx, item)`, or `ctx.map_workflow(...)` first records an `ApprovalRequested` event and waits for `approval.decision`. No generated module is imported and no child workflow is requested until that approval is accepted.
+If a live `agent(...)(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(ctx, item)`, or `ctx.map_workflow(...)` first records an `ApprovalRequested` event and waits for `approval.decision`. No generated module is imported and no child workflow is requested until that approval is accepted.
 
 ## Replay rule
 
-Generated Python is dynamic only at creation time. After the `AgentStep` completes, replay uses the stored `Workflow` value from history:
+Generated Python is dynamic only at creation time. After the `agent(...)` completes, replay uses the stored `Workflow` value from history:
 
 ```json
 {

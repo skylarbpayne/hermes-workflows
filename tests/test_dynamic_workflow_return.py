@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from hermes_workflows import AgentStep, Workflow, WorkflowEngine, step, workflow
+from hermes_workflows import Workflow, WorkflowEngine, agent, step, workflow
 from hermes_workflows.engine import JsonCodec
 
 
@@ -62,28 +62,30 @@ async def signal_then_fail_child(ctx, item):
 @workflow
 async def dynamic_processor_pipeline(ctx, inputs):
     items = await produce_items(ctx, inputs)
-    processor = await AgentStep(
+    processor = await agent(
         "build_processor",
         prompt="Write a Python workflow that processes one discovered item.",
+        input={"purpose": "process one discovered item"},
         returns=Workflow,
         mock_output={"source": GENERATED_PROCESSOR_SOURCE, "symbol": "process_item"},
-    )(ctx)
+    )
 
     results = []
     for item in items:
-        results.append(await processor(ctx, item, key=item["id"]))
+        results.append(await processor(item, key=item["id"]))
     return {"processed": results, "workflow_symbol": processor.symbol}
 
 
 @workflow
 async def dynamic_processor_map_pipeline(ctx, inputs):
     items = await produce_items(ctx, inputs)
-    processor = await AgentStep(
+    processor = await agent(
         "build_processor",
         prompt="Write a Python workflow that processes one discovered item.",
+        input={"purpose": "process one discovered item"},
         returns=Workflow,
         mock_output={"source": GENERATED_PROCESSOR_SOURCE, "symbol": "process_item"},
-    )(ctx)
+    )
 
     results = await ctx.map_workflow(
         processor,
@@ -96,23 +98,25 @@ async def dynamic_processor_map_pipeline(ctx, inputs):
 
 @workflow
 async def dynamic_waiting_child_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_waiting_child",
         prompt="Write a Python workflow that waits for a signal.",
+        input={"purpose": "wait for signal"},
         returns=Workflow,
         mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 
 
 @workflow
 async def dynamic_waiting_child_map_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_waiting_child_map",
         prompt="Write a Python workflow that waits for a signal.",
+        input={"purpose": "wait for signal"},
         returns=Workflow,
         mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
-    )(ctx)
+    )
     results = await ctx.map_workflow(
         processor,
         inputs["items"],
@@ -124,26 +128,28 @@ async def dynamic_waiting_child_map_pipeline(ctx, inputs):
 
 @workflow
 async def dynamic_signal_then_fail_child_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_signal_then_fail_child",
         prompt="Write a Python workflow that fails after a signal.",
+        input={"purpose": "fail after signal"},
         returns=Workflow,
         mock_output={"source": SIGNAL_THEN_FAIL_CHILD_SOURCE, "symbol": "signal_then_fail_child"},
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 
 
 @workflow
 async def live_generated_waiting_child_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_live_waiting_child",
         prompt="Write a Python workflow that waits for a signal.",
+        input={"purpose": "wait for signal"},
         returns=Workflow,
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 
 
-def test_agent_step_can_return_workflow_and_call_it_for_each_item(tmp_path):
+def test_agent_can_return_workflow_and_call_it_for_each_item(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
 
@@ -163,8 +169,8 @@ def test_agent_step_can_return_workflow_and_call_it_for_each_item(tmp_path):
     }
 
     events = engine.events("wf_dynamic")
-    completed_agent_step = [event for event in events if event["type"] == "StepCompleted" and event["key"] == "step:agent_step:0"][0]
-    workflow_value = completed_agent_step["payload"]["output"]
+    completed_agent = [event for event in events if event["type"] == "StepCompleted" and event["key"] == "agent:build_processor:0"][0]
+    workflow_value = completed_agent["payload"]["output"]
     assert isinstance(workflow_value, Workflow)
     assert workflow_value.symbol == "process_item"
     assert workflow_value.source_sha256
@@ -203,7 +209,7 @@ def test_returned_workflow_survives_replay_without_regenerating_or_duplicating_c
     assert replayed.status == "completed"
     assert replayed.result == first.result
     events = restarted.events("wf_dynamic_replay")
-    assert [event["type"] for event in events].count("StepRequested") == 2  # produce_items + AgentStep once each
+    assert [event["type"] for event in events].count("StepRequested") == 2  # produce_items + agent once each
     assert [event["type"] for event in events].count("ChildWorkflowRequested") == 1
 
     with sqlite3.connect(db) as con:
@@ -231,7 +237,7 @@ def test_map_workflow_starts_generated_workflow_for_items_and_preserves_order(tm
         ]
     }
     workflow_value = [
-        event for event in engine.events("wf_dynamic_map") if event["type"] == "StepCompleted" and event["key"] == "step:agent_step:0"
+        event for event in engine.events("wf_dynamic_map") if event["type"] == "StepCompleted" and event["key"] == "agent:build_processor:0"
     ][0]["payload"]["output"]
     child_group = f"map:0:process_item:{workflow_value.source_sha256[:12]}"
     assert [

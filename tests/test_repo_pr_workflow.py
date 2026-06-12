@@ -130,17 +130,15 @@ def test_repo_change_plan_workflow_writes_agent_prompt_plan_then_waits_for_appro
     events = engine.events("wf_plan")
     requested_steps = [event for event in events if event["type"] == "StepRequested"]
     assert [event["key"] for event in requested_steps] == [
-        "step:agent_prompt:0",
         "step:write_implementation_plan:0",
         "approve_implementation_plan",
     ]
-    prompt_request = requested_steps[0]["payload"]["args"][0]
-    assert prompt_request["kind"] == "agent_prompt.request.v1"
-    assert prompt_request["prompt_path"].endswith("examples/prompts/repo_change_plan.md")
-    assert prompt_request["variables"]["workflow_id"] == "wf_plan"
-    assert "# Implementation plan: Add workflow-backed PR path" in prompt_request["rendered_prompt"]
-    write_request = requested_steps[1]["payload"]
+    write_request = requested_steps[0]["payload"]
     assert write_request["step_name"] == "write_implementation_plan"
+    prompt_request = write_request["args"][1]
+    assert prompt_request["kind"] == "prompt.rendered.v1"
+    assert prompt_request["prompt_path"].endswith("examples/prompts/repo_change_plan.md")
+    assert "# Implementation plan: Add workflow-backed PR path" in prompt_request["rendered_prompt"]
     assert write_request["args"][1]["rendered_prompt_sha256"] == prompt_request["rendered_prompt_sha256"]
     plan = (tmp_path / "implementation-plan.md").read_text()
     assert plan == prompt_request["rendered_prompt"]
@@ -173,16 +171,15 @@ def test_repo_change_plan_workflow_renders_plan_from_agentprompt_template(tmp_pa
 
     assert first.status == "waiting"
     events = engine.workflow_status("wf_plan", recent_events=50)["events"]
-    prompt_requests = [
+    write_requests = [
         event
         for event in events
-        if event["type"] == "StepRequested" and event["payload"].get("step_name") == "agent_prompt"
+        if event["type"] == "StepRequested" and event["payload"].get("step_name") == "write_implementation_plan"
     ]
-    assert prompt_requests
-    prompt_payload = prompt_requests[0]["payload"]["args"][0]
+    assert write_requests
+    prompt_payload = write_requests[0]["payload"]["args"][1]
     assert prompt_payload["prompt_path"] == str(prompt)
     assert prompt_payload["prompt_text"].startswith("# Custom plan")
-    assert prompt_payload["variables"]["workflow_id"] == "wf_plan"
 
     plan_text = (tmp_path / "implementation-plan.md").read_text()
     assert "# Custom plan for Add workflow-backed PR path" in plan_text

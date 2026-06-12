@@ -16,8 +16,8 @@ Companion visual plan: [Agent / parallel / pipeline API visual plan](../plans/20
 The current workflow authoring surface is honest runtime machinery, but it is not good product language:
 
 ```python
-await ctx.handoff(...)
-await ctx.external(...)
+await low-level handoff plumbing
+await low-level external-work plumbing
 await ctx.wait_for("signal:...")
 ```
 
@@ -110,7 +110,7 @@ The product sentence should be:
 
 Not:
 
-> “This workflow emits handoff commands and waits on handoff.completed signals.”
+> “This workflow emits handoff commands and waits on agent.completed signals.”
 
 ## Target authoring API
 
@@ -403,7 +403,7 @@ Grill questions:
 
 | Target primitive | Current substrate likely used | Missing piece |
 | --- | --- | --- |
-| `agent(...)` | `AgentStep` + agent runner + step events | Public helper, typed replay, docs/examples, no visible `ctx`. |
+| `agent(...)` | `agent(...)` + agent runner + step events | Public helper, typed replay, docs/examples, no visible `ctx`. |
 | `parallel(...)` | `ctx.gather`, outbox commands, worker service | Public helper that supports agent calls and inspectable fan-out/fan-in. |
 | `pipeline(...)` | repeated steps/gather plus metadata | Stage abstraction, per-item keying, topology/progress events. |
 | `approve(...)` | `ctx.approval.request(...)` | Public helper without visible `ctx`; typed return; better artifacts. |
@@ -559,7 +559,7 @@ One honest PR, not a timid breadcrumb trail. The API rehaul deserves one coheren
 5. First-pass `pipeline(...)` over parallel/stage metadata. It can be minimal, but it needs to exist in the same PR so the public model lands whole.
 6. Typed replay/rehydration for saved outputs, at least for dataclasses and plain JSON-compatible returns.
 7. Context/fingerprint checks so changed prompt/input/context does not silently reuse stale saved outputs.
-8. Docs/examples showing no `ctx.handoff` / `ctx.external`.
+8. Docs/examples showing no `low-level handoff plumbing` / `low-level external-work plumbing`.
 
 If that is big, fine. The PR can be reviewable by keeping the implementation boring and test-led. Splitting the public language across several PRs is how we end up with a half-rebrand and no shared model.
 
@@ -572,7 +572,7 @@ If that is big, fine. The PR can be reviewable by keeping the implementation bor
 - If `agent(...)` returns untyped dict blobs despite `returns=...`.
 - If the dashboard cannot show the fan-out/fan-in shape.
 - If approval loops are still hand-rolled in every workflow.
-- If examples still teach `ctx.handoff` or `ctx.external`.
+- If examples still teach `low-level handoff plumbing` or `low-level external-work plumbing`.
 - If issue/docs say “agent/parallel/pipeline” but runtime only ships aliases.
 
 ## Acceptance tests for the rehaul
@@ -591,8 +591,8 @@ A contributor can write the blog workflow skeleton using only:
 
 No normal example uses:
 
-- `ctx.handoff`
-- `ctx.external`
+- `low-level handoff plumbing`
+- `low-level external-work plumbing`
 - raw signal names
 - raw wait keys
 - `cast(...)` for workflow-owned values
@@ -628,20 +628,20 @@ Given `approve_until("approve_outline", outline)`, rejection with feedback cause
 
 ### Compatibility test
 
-Existing low-level workflows using `ctx.approval.request`, `ctx.gather`, `AgentStep`, or `ctx.handoff` keep working, but docs and examples mark them advanced/legacy where appropriate.
+Pre-release compatibility is intentionally removed: normal authoring uses `agent(...)`, `parallel(...)`, `pipeline(...)`, `approve(...)`, and `approve_until(...)`; lower-level runtime hooks stay private/advanced only where the engine itself needs them.
 
 ## Proposed docs changes once implemented
 
 - Update README quickstart to use `agent(...)` / `approve(...)`, not `ctx`.
-- Update architecture docs to call `AgentStep` substrate/internal rather than primary author API.
+- Update architecture docs to call `agent(...)` substrate/internal rather than primary author API.
 - Add an `examples/agent_parallel_pipeline_blog.py` smoke workflow.
 - Update dashboard runtime semantics doc to explain fan-out/fan-in and pipeline stage rendering.
 - Update issue #69 title/body to name the real target API.
 
 ## Decision log
 
-- **Rejected:** `ctx.handoff(...)` as author API. Too much runtime plumbing.
-- **Rejected:** `ctx.external(...)` as author API. Vague rename, same smell.
+- **Rejected:** `low-level handoff plumbing` as author API. Too much runtime plumbing.
+- **Rejected:** `low-level external-work plumbing` as author API. Vague rename, same smell.
 - **Rejected for v1:** YAML/IR/compiler authoring. Wrong product direction.
 - **Accepted direction:** Python workflow harness with `agent`, `parallel`, `pipeline`, approvals, typed returns, and runtime-derived inspectability.
 - **Open:** exact typed-model mechanism: dataclass annotations, `returns=...`, Pydantic-like base, or all of the above.

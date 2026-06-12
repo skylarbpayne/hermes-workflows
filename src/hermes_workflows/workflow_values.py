@@ -18,7 +18,7 @@ def sha256_text(value: str) -> str:
 class Workflow:
     """Durable reference to generated Python workflow code.
 
-    `AgentStep(..., returns=Workflow)` returns this normal value. Calling it from
+    `agent(...)(..., returns=Workflow)` returns this normal value. Calling it from
     a workflow starts a durable child workflow instance.
     """
 
@@ -31,8 +31,10 @@ class Workflow:
     approval_required: bool = False
     approval_key: str | None = None
 
-    def __call__(self, ctx: Any, inputs: Any, *, key: str | None = None) -> Any:
-        return ctx.start_child(self, inputs, key=key)
+    def __call__(self, inputs: Any, *, key: str | None = None, group: str | None = None) -> Any:
+        from .authoring import current_context
+
+        return current_context().start_child(self, inputs, key=key, group=group)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -186,13 +188,13 @@ def workflow_from_agent_output(
         source = output.get("source") or output.get("python_source") or output.get("code")
         symbol = output.get("symbol") or output.get("workflow") or output.get("workflow_symbol")
         if not isinstance(source, str):
-            raise ValueError("Workflow AgentStep output must include Python source")
+            raise ValueError("Workflow agent(...) output must include Python source")
         if symbol is None:
             symbol = _first_workflow_symbol(source)
         if not isinstance(symbol, str):
-            raise ValueError("Workflow AgentStep output symbol must be a string")
+            raise ValueError("Workflow agent(...) output symbol must be a string")
     else:
-        raise TypeError("Workflow AgentStep output must be Python source or a {source, symbol} dict")
+        raise TypeError("Workflow agent(...) output must be Python source or a {source, symbol} dict")
     return Workflow.from_source(
         source,
         symbol=symbol,

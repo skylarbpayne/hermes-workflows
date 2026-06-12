@@ -194,7 +194,7 @@ Use `resume=False` in embedding/plugin callbacks that should record the approval
 Agent steps call a runner through JSON. The included `agent_cli_adapter` wraps a provider CLI so the workflow runtime sees a strict, sanitized response.
 
 ```python
-from hermes_workflows import AgentStep, SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows import agent(...), SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
 
 runner = SubprocessAgentRunner([
     "hermes-workflows-agent-cli-adapter",
@@ -204,10 +204,10 @@ runner = SubprocessAgentRunner([
 
 @workflow
 async def agent_workflow(ctx, inputs):
-    generated = await AgentStep(
+    generated = await agent(...)(
         "workflow_architect",
         prompt="Write a child workflow for {{event_name}} participant follow-up.",
-        variables={"event_name": inputs["event_name"]},
+        input={"event_name": inputs["event_name"]},
         returns=Workflow,
     )(ctx)
 

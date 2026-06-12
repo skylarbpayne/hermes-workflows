@@ -204,7 +204,7 @@ flowchart TB
 
     subgraph Engine["Layer 3: runtime engine"]
         E1["WorkflowContext"]
-        E2["AgentStep substrate"]
+        E2["agent(...) substrate"]
         E3["gather / fan-out"]
         E4["approval client"]
         E5["event replay"]
@@ -462,7 +462,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    Bad1["Alias ctx.handoff as agent"] --> Lie["Looks nice, still wrong"]
+    Bad1["Alias low-level handoff plumbing as agent"] --> Lie["Looks nice, still wrong"]
     Bad2["parallel is serial internally"] --> Lie
     Bad3["returns=Dataclass gives dict on replay"] --> Lie
     Bad4["pipeline is just nested loops"] --> Lie

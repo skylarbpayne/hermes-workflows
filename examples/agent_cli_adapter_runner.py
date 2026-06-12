@@ -3,16 +3,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from hermes_workflows import AgentStep, SubprocessAgentRunner, WorkflowEngine, workflow
+from hermes_workflows import SubprocessAgentRunner, WorkflowEngine, agent, workflow
 
 
 @workflow
 async def cli_agent_adapter_example(ctx, inputs):
-    return await AgentStep(
+    return await agent(
         "summarize_item",
-        prompt="Summarize {{item}} as JSON.",
-        variables={"item": inputs["item"]},
-    )(ctx)
+        prompt=f"Summarize {inputs['item']} as JSON.",
+        input={"item": inputs["item"]},
+    )
 
 
 def main() -> int:

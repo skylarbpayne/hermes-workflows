@@ -297,14 +297,14 @@ class WorkflowEngine:
                         """,
                         (_now(), workflow_id, f"approval:{key}"),
                     )
-                elif signal_type == "handoff.completed":
+                elif signal_type == "agent.completed":
                     con.execute(
                         """
                         UPDATE workflow_commands_outbox
                         SET status = 'completed', lease_expires_at = NULL, updated_at = ?
-                        WHERE workflow_id = ? AND type = 'external_handoff' AND key = ? AND status != 'cancelled'
+                        WHERE workflow_id = ? AND type = 'external_agent' AND key = ? AND status != 'cancelled'
                         """,
-                        (_now(), workflow_id, f"handoff:{key}"),
+                        (_now(), workflow_id, f"agent:{key}"),
                     )
                 self._enqueue_workflow_run_row(con, workflow_id, reason=f"signal:{signal_type}", source_key=key)
         if inserted:
@@ -1310,7 +1310,7 @@ class WorkflowEngine:
                     continue
                 step = ensure(step_id, first_seq=seq)
                 mode = payload.get("completion_mode")
-                step["status"] = "waiting" if mode in {"approval", "worker"} else "requested"
+                step["status"] = "waiting" if mode in {"approval", "worker", "agent"} else "requested"
                 step["label"] = payload.get("step_name") or payload.get("label") or step.get("label") or step_id
                 if mode:
                     step["completion_mode"] = mode
@@ -1336,8 +1336,8 @@ class WorkflowEngine:
                 step["last_seq"] = seq
                 continue
 
-            if event_type == "HandoffRequested":
-                step_id = strip_prefix(raw_key, "handoff:")
+            if event_type == "AgentRequested":
+                step_id = strip_prefix(raw_key, "agent:")
                 if not step_id:
                     continue
                 step = ensure(step_id, first_seq=seq)
@@ -1345,8 +1345,8 @@ class WorkflowEngine:
                     {
                         "status": "completed" if step.get("status") == "completed" else "waiting",
                         "label": payload.get("prompt") or step.get("label") or step_id,
-                        "completion_mode": "worker",
-                        "step_type": "worker",
+                        "completion_mode": "agent",
+                        "step_type": "agent",
                         "requested_seq": seq,
                     }
                 )
@@ -1389,10 +1389,10 @@ class WorkflowEngine:
                     step_id = str(payload.get("key") or "")
                     mode = "approval"
                     step_type = "approval"
-                elif signal_type == "handoff.completed":
+                elif signal_type == "agent.completed":
                     step_id = str(payload.get("key") or "")
-                    mode = "worker"
-                    step_type = "worker"
+                    mode = "agent"
+                    step_type = "agent"
                 else:
                     continue
                 if not step_id:
@@ -1473,9 +1473,9 @@ class WorkflowEngine:
         if signal_type == "approval.decision":
             completion_mode = "approval"
             step_type = "approval"
-        elif signal_type == "handoff.completed":
-            completion_mode = "worker"
-            step_type = "worker"
+        elif signal_type == "agent.completed":
+            completion_mode = "agent"
+            step_type = "agent"
         else:
             return
         self._append_event(
@@ -2769,66 +2769,63 @@ class WorkflowContext:
             feedback_loop=feedback_loop,
         )
 
-    async def handoff(
+    async def _request_agent_work(
         self,
         prompt: str,
         *,
-        key: str | None = None,
+        key: str,
         artifact: Any = None,
         assignee: str | None = None,
         instructions: str | None = None,
         authority: Optional[List[str]] = None,
-        signal_type: str = "handoff.completed",
+        block: bool = True,
     ) -> Any:
-        """Record external/human/agent work and wait for its completion signal."""
+        """Private substrate for agent(...): record durable agent work and wait for completion."""
 
         self._raise_if_cancelled()
-        handoff_key = _safe_approval_key(key, prefix="") if key is not None else _safe_approval_key(prompt, prefix="handoff")
-        event_key = f"handoff:{handoff_key}"
-        completed = self._last_event("SignalReceived", f"signal:{signal_type}:{handoff_key}")
+        agent_key = _safe_approval_key(key, prefix="")
+        event_key = f"agent:{agent_key}"
+        signal_type = "agent.completed"
+        completed = self._last_event("SignalReceived", f"signal:{signal_type}:{agent_key}")
         if completed is not None:
             return completed["payload"]
 
         payload = {
             "prompt": prompt,
-            "key": handoff_key,
+            "key": agent_key,
             "artifact": artifact,
             "assignee": assignee,
             "instructions": instructions,
             "authority": authority or [],
             "signal_type": signal_type,
         }
-        if self._last_event("HandoffRequested", event_key) is None:
+        if self._last_event("AgentRequested", event_key) is None:
             with self.engine._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
                 self._raise_if_cancelled_in_connection(con)
                 self.engine._append_step_requested(
                     con,
                     self.workflow_id,
-                    handoff_key,
-                    completion_mode="worker",
-                    step_type="worker",
+                    agent_key,
+                    completion_mode="agent",
+                    step_type="agent",
                     label=prompt,
                     payload=payload,
                 )
                 inserted = self.engine._append_event(
                     con,
                     self.workflow_id,
-                    "HandoffRequested",
+                    "AgentRequested",
                     key=event_key,
                     payload=payload,
-                    idempotency_key=f"handoff-requested:{handoff_key}",
+                    idempotency_key=f"agent-requested:{agent_key}",
                     ignore_duplicate=True,
                 )
                 if inserted:
-                    self.engine._insert_command_row(con, self.workflow_id, "external_handoff", event_key, payload)
-
-        return await self.wait_for(signal_type, key=handoff_key)
-
-    async def external(self, *args: Any, **kwargs: Any) -> Any:
-        """Alias for ctx.handoff(...); reads better for non-agent external work."""
-
-        return await self.handoff(*args, **kwargs)
+                    self.engine._insert_command_row(con, self.workflow_id, "external_agent", event_key, payload)
+        if not block:
+            return PendingStep(agent_key)
+        return await self.wait_for(signal_type, key=agent_key)
 
     def _last_event(self, event_type: str, key: str) -> Optional[Any]:
         with self.engine._connect() as con:

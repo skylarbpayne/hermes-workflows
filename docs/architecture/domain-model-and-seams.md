@@ -73,7 +73,7 @@ A workflow function is a **decider**, not a long-lived coroutine. It may look li
 | Worker lease | Claim on an outbox command with timeout/attempt metadata | Runtime SQLite DB + worker |
 | `ApprovalDecisionInput` | Typed human decision with source provenance | Approval adapter/Hermes plugin/CLI |
 | `ApprovalReceipt` | Status summary after recording an approval | Runtime |
-| `AgentStep` | Durable request to an external agent runner | Workflow author + runtime |
+| `agent(...)` | Durable request to an external agent runner | Workflow author + runtime |
 | `SubprocessAgentRunner` | JSON-over-stdin/stdout boundary to trusted local command | Operator workspace |
 | `WorkflowRegistry` | Local aliases for workflow refs and DBs | Hermes/operator workspace |
 | Receipt/status/dashboard | Redacted review and audit surfaces | Runtime/adapters |
@@ -98,11 +98,11 @@ Normal `@step` bodies execute locally in the worker/resumer process that drains 
 
 ### Agent steps
 
-`AgentStep` does not call a model by itself. It records a durable request and requires a configured agent runner. The built-in `SubprocessAgentRunner` executes a trusted local command with one JSON request on stdin and expects one bounded JSON object on stdout:
+`agent(...)` does not call a model by itself. It records a durable request and requires a configured agent runner. The built-in `SubprocessAgentRunner` executes a trusted local command with one JSON request on stdin and expects one bounded JSON object on stdout:
 
 ```mermaid
 flowchart LR
-    AS[AgentStep request] --> SR[SubprocessAgentRunner]
+    AS[agent(...) request] --> SR[SubprocessAgentRunner]
     SR -->|JSON stdin| C[trusted local CLI]
     C -->|JSON stdout| SR
     SR -->|validated output + provenance| DB[(StepCompleted event)]

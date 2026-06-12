@@ -43,7 +43,7 @@ class AdapterError(Exception):
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Strict JSON CLI adapter for hermes-workflows AgentStep runners.")
+    parser = argparse.ArgumentParser(description="Strict JSON CLI adapter for hermes-workflows agent(...) runners.")
     parser.add_argument("--agent-command", required=True, help="Provider CLI executable/argv0.")
     parser.add_argument("--agent-arg", action="append", default=[], help="Provider CLI argv entry appended after --agent-command.")
     parser.add_argument("--response-mode", choices=["json-object"], default="json-object")
@@ -92,14 +92,14 @@ def load_runner_request(stdin_text: str) -> dict[str, Any]:
         raise AdapterError("invalid_runner_request_json", f"runner request stdin was not valid JSON: {exc.msg}") from exc
     if not isinstance(request, dict):
         raise AdapterError("invalid_runner_request", "runner request must be a JSON object")
-    if request.get("kind") != "agent_step.runner_request.v1":
-        raise AdapterError("invalid_runner_request", "runner request kind must be agent_step.runner_request.v1")
+    if request.get("kind") != "agent.runner_request.v1":
+        raise AdapterError("invalid_runner_request", "runner request kind must be agent.runner_request.v1")
     return request
 
 
 def build_provider_prompt(request: dict[str, Any]) -> str:
     return (
-        "You are being called by hermes-workflows AgentStep.\n"
+        "You are being called by hermes-workflows agent(...).\n"
         "Return exactly one JSON object and no surrounding prose.\n\n"
         "Required response schema:\n"
         "{\n"
@@ -111,7 +111,7 @@ def build_provider_prompt(request: dict[str, Any]) -> str:
         '  "source": "Python source defining one @workflow",\n'
         '  "symbol": "workflow_function_name"\n'
         "}\n\n"
-        "AgentStep request:\n"
+        "agent(...) request:\n"
         f"{json.dumps(request, indent=2, sort_keys=True)}\n"
     )
 
@@ -428,7 +428,7 @@ def redact_text(text: str, secrets: set[str] | None = None) -> str:
     for secret in sorted(secrets or set(), key=len, reverse=True):
         if secret:
             redacted = redacted.replace(secret, "[REDACTED]")
-    redacted = re.sub(r"(AgentStep request:\s*).*", r"\1[REDACTED]", redacted, flags=re.DOTALL)
+    redacted = re.sub(r"(agent(...) request:\s*).*", r"\1[REDACTED]", redacted, flags=re.DOTALL)
     redacted = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", redacted)
     redacted = re.sub(
         r"(?i)\b([A-Za-z0-9_.-]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|COOKIE)[A-Za-z0-9_.-]*)(\s*[:=]\s*)(\"?)[^\s,}\]\"']+",

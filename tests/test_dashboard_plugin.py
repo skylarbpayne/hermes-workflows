@@ -939,10 +939,10 @@ def test_dashboard_run_dag_collapses_coding_workflow_approvals_and_handoff_to_st
     (repo / "feature.txt").write_text("after\n")
     signal_result = engine.signal(
         workflow_id,
-        "handoff.completed",
+        "agent.completed",
         key="coding_ready",
         payload={"by": "agent:implementer", "summary": "updated feature.txt"},
-        source={"kind": "worker", "id": "worker-1"},
+        source={"kind": "agent", "id": "agent-1"},
     )
     engine.drain(workflow_id, initial=signal_result)
 
@@ -961,7 +961,7 @@ def test_dashboard_run_dag_collapses_coding_workflow_approvals_and_handoff_to_st
     assert "StepRequested" in nodes["approve_coding_plan"]["event_types"]
     assert "StepCompleted" in nodes["approve_coding_plan"]["event_types"]
     assert nodes["coding_ready"]["kind"] == "step"
-    assert nodes["coding_ready"]["completion_mode"] == "worker"
+    assert nodes["coding_ready"]["completion_mode"] == "agent"
     assert nodes["coding_ready"]["status"] == "completed"
     assert "StepRequested" in nodes["coding_ready"]["event_types"]
     assert "StepCompleted" in nodes["coding_ready"]["event_types"]

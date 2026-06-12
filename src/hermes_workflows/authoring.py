@@ -10,7 +10,6 @@ from typing import Any, Callable, Generic, TypeVar
 
 from .approvals import ApprovalDecision
 from .engine import PendingStep
-from .prompts import render_prompt
 
 T = TypeVar("T")
 _MISSING = object()
@@ -42,7 +41,7 @@ class AgentCall(Generic[T]):
     context: Any = None
     returns: Any = dict
     key_by: Any = None
-    variables: dict[str, Any] | None = None
+    key: str | None = None
     tools: Sequence[str] | None = None
     skills: Sequence[str] | None = None
     files: Sequence[str] | None = None
@@ -67,20 +66,33 @@ class AgentCall(Generic[T]):
     async def _run_with_context(self, ctx: Any, *, block: bool) -> Any:
         key = self.step_key(ctx)
         payload = self._payload(key)
-        result = await ctx.run_step(
-            "agent_step",
-            tuple(payload["args"]),
-            dict(payload["kwargs"]),
-            block=block,
-            key=key,
-            payload_builder=lambda: payload,
-        )
+        request = payload["args"][0]
+        if getattr(ctx.engine, "agent_runner", None) is None and self.mock_output is None:
+            result = await ctx._request_agent_work(
+                self.prompt,
+                key=key,
+                artifact=request,
+                assignee=self.name,
+                instructions="Complete this agent(...) request, then signal agent.completed with the JSON output payload.",
+                block=block,
+            )
+        else:
+            result = await ctx.run_step(
+                "agent",
+                tuple(payload["args"]),
+                dict(payload["kwargs"]),
+                block=block,
+                key=key,
+                payload_builder=lambda: payload,
+            )
         if isinstance(result, PendingStep):
             return result
         return _coerce_return(result, self.returns)
 
     def step_key(self, ctx: Any) -> str:
         safe_name = _safe_key(self.name)
+        if self.key is not None:
+            return _safe_key(self.key)
         if self.key_by is not None:
             return f"agent:{safe_name}:{_safe_key(self.key_by)}"
         counts = getattr(ctx, "_authoring_agent_call_counts", None)
@@ -99,7 +111,7 @@ class AgentCall(Generic[T]):
             context=self.context,
             returns=self.returns,
             key_by=(key_by if key_by is not _MISSING else _default_item_key(input_value)),
-            variables=self.variables,
+            key=self.key,
             tools=self.tools,
             skills=self.skills,
             files=self.files,
@@ -112,19 +124,16 @@ class AgentCall(Generic[T]):
         )
 
     def _payload(self, key: str) -> dict[str, Any]:
-        variables = dict(self.variables or {})
         safe_input = _jsonable(self.input)
         context_manifest = _context_manifest(self.context)
-        rendered_prompt = render_prompt(self.prompt, variables) if variables else self.prompt
+        rendered_prompt = self.prompt
         request = {
-            "kind": "agent_step.request.v1",
+            "kind": "agent.request.v1",
             "name": self.name,
             "prompt": self.prompt,
             "prompt_sha256": _sha256_text(self.prompt),
             "rendered_prompt": rendered_prompt,
             "rendered_prompt_sha256": _sha256_text(rendered_prompt),
-            "variables": _jsonable(variables),
-            "variables_sha256": _sha256_json(variables),
             "input": safe_input,
             "input_sha256": _sha256_json(safe_input),
             "context": context_manifest,
@@ -143,7 +152,7 @@ class AgentCall(Generic[T]):
         }
         request["fingerprint"] = _sha256_json(
             {
-                "rendered_prompt": request["rendered_prompt"],
+                "prompt": request["prompt"],
                 "input": request["input"],
                 "context_sha256": request["context_sha256"],
                 "returns": request["returns"],
@@ -155,7 +164,7 @@ class AgentCall(Generic[T]):
                 "isolation": request["isolation"],
             }
         )
-        return {"step_name": "agent_step", "args": [request], "kwargs": {}}
+        return {"step_name": "agent", "args": [request], "kwargs": {}}
 
 
 @dataclass(frozen=True)
@@ -236,7 +245,7 @@ def agent(
     context: Any = None,
     returns: Any = dict,
     key_by: Any = None,
-    variables: dict[str, Any] | None = None,
+    key: str | None = None,
     tools: Sequence[str] | None = None,
     skills: Sequence[str] | None = None,
     files: Sequence[str] | None = None,
@@ -254,7 +263,7 @@ def agent(
         context=context,
         returns=returns,
         key_by=key_by,
-        variables=variables,
+        key=key,
         tools=tools,
         skills=skills,
         files=files,

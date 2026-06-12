@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hermes_workflows import AgentRunnerError, AgentStep, SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows import AgentRunnerError, SubprocessAgentRunner, Workflow, WorkflowEngine, agent, workflow
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,17 +29,17 @@ def _subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 def _request(**overrides: Any) -> dict[str, Any]:
     request = {
-        "kind": "agent_step.runner_request.v1",
+        "kind": "agent.runner_request.v1",
         "name": "summarize_item",
-        "prompt": "Summarize {{item}} as JSON.",
+        "prompt": "Summarize alpha as JSON.",
         "prompt_sha256": "prompt-sha",
         "rendered_prompt": "Summarize alpha as JSON.",
         "rendered_prompt_sha256": "rendered-sha",
-        "variables": {"item": "alpha"},
-        "variables_sha256": "variables-sha",
+        "input": {"item": "alpha"},
+        "input_sha256": "input-sha",
         "returns": "json",
         "workflow_id": "wf_summary",
-        "step_key": "step:agent_step:0",
+        "step_key": "agent:summarize_item:0",
     }
     request.update(overrides)
     return request
@@ -105,7 +105,7 @@ def test_agent_cli_adapter_turns_agentstep_request_into_provider_prompt_and_reco
     provenance = response["provenance"]
     assert provenance["runner"] == "hermes_workflows.agent_cli_adapter"
     assert provenance["adapter_version"] == 1
-    assert provenance["request_kind"] == "agent_step.runner_request.v1"
+    assert provenance["request_kind"] == "agent.runner_request.v1"
     assert provenance["request_name"] == "summarize_item"
     assert provenance["request_sha256"] == _sha256_json(request)
     assert provenance["rendered_prompt_sha256"] == "rendered-sha"
@@ -318,13 +318,13 @@ def test_agent_cli_adapter_timeout_covers_prompt_write_to_nonreading_provider():
 
 @workflow
 async def adapter_generated_workflow_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_processor",
-        prompt="WORKFLOW_OUTPUT for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"WORKFLOW_OUTPUT for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 
 
 def test_agent_cli_adapter_generated_workflow_still_waits_for_approval(tmp_path):

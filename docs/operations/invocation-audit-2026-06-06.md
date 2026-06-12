@@ -9,7 +9,7 @@ Workspace: `/path/to/hermes-workflows`
 
 Blog-readiness for synthetic/operator invocation claims: green after the docs reconciliation in this change set.
 
-Do not claim real-provider AgentStep support was smoke-tested. The real-provider path remains explicitly opt-in behind `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` plus caller-supplied `HERMES_WORKFLOWS_AGENT_COMMAND`; this audit verified the deterministic fake-provider path only.
+Do not claim real-provider agent(...) support was smoke-tested. The real-provider path remains explicitly opt-in behind `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` plus caller-supplied `HERMES_WORKFLOWS_AGENT_COMMAND`; this audit verified the deterministic fake-provider path only.
 
 Generated workflow approval remains a review/audit gate, not a sandbox claim.
 
@@ -179,7 +179,7 @@ recent_events include SignalReceived(signal:approval.decision:approve_trip_plan)
 
 That is the intended plugin behavior: record the approval with provenance, do not run workflow code in the chat/plugin callback when `resume=false`.
 
-## AgentStep / dynamic generated workflow path
+## agent(...) / dynamic generated workflow path
 
 Targeted tests:
 
@@ -187,7 +187,7 @@ Targeted tests:
 python -m pytest -q \
   tests/test_agent_cli_adapter.py \
   tests/test_subprocess_agent_runner.py \
-  tests/test_agent_step_runner.py \
+  tests/test_agent_runner.py \
   tests/test_dynamic_workflow_return.py \
   tests/test_workflows_demo_2026_06_05.py
 ```
@@ -250,5 +250,5 @@ Patched:
 - No blog was drafted or published.
 - Repo was not made public.
 - No credentials were created, imported, or mutated.
-- No real-provider AgentStep smoke was run; only deterministic fake-provider tests/demos were verified.
+- No real-provider agent(...) smoke was run; only deterministic fake-provider tests/demos were verified.
 - This audit changed docs/skill files locally; they should be reviewed/committed/merged before treating the docs reconciliation as landed in the repo.

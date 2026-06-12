@@ -1,4 +1,4 @@
-# Dashboard runtime semantics, AgentStep naming, and approval artifacts
+# Dashboard runtime semantics, agent(...) naming, and approval artifacts
 
 Status: accepted / implementation guide
 Date: 2026-06-07
@@ -6,7 +6,7 @@ Scope: Hermes Workflows dashboard/API clarity without breaking existing workflow
 
 ## Decision summary
 
-1. **Public docs and new examples should say `AgentStep`.** `AgentStep` is the durable boundary for asking a configured agent runner to produce JSON or a typed `Workflow` value. Keep `AgentPrompt` as a backwards-compatible render-only helper for existing code/tests/history; do not remove it without a separately tested migration.
+1. **Public docs and new examples should say `agent(...)`.** `agent(...)` is the durable boundary for asking a configured agent runner to produce JSON or a typed `Workflow` value. Use `render_prompt` for explicit prompt-file rendering; do not expose a separate durable prompt object API.
 2. **The dashboard shows a read-only active workflow state source.** It is not a registry, branch, deployment, remote execution environment, or user-selectable database debugger. Browser APIs continue to reject raw SQLite paths and return configured aliases plus existence status only.
 3. **Dashboard approval actions are record-only.** Approve/reject from the dashboard records server-derived human provenance with `resume=false`. Workflow execution resumes only when a trusted local resumer/operator continues the run.
 4. **Artifacts get a typed render descriptor.** Approval/run artifact payloads remain persisted in workflow history, but dashboard responses include a redacted preview plus `artifact_render` so text/JSON/image/audio/video/file references can be handled consistently later.
@@ -22,12 +22,12 @@ Hermes Workflows is a Python runtime. Workflow code is imported and executed by 
 
 The workflow DB is durable state, not an execution sandbox. The dashboard presents the resolved configured state-source alias read-only; it does not let the browser pick arbitrary SQLite paths or move execution to another machine or deployment.
 
-## AgentStep execution and failure modes
+## agent(...) execution and failure modes
 
-`AgentStep(...)` builds an `agent_step.request.v1` durable step request. On first execution:
+`agent(...)(...)` builds an `agent.request.v1` durable step request. On first execution:
 
 1. The request is persisted as a normal durable step request.
-2. If `WorkflowEngine(agent_runner=...)` is configured and `mock_output` is not supplied, the runner receives `agent_step.runner_request.v1` with the rendered prompt, variables, workflow id, and step key.
+2. If `WorkflowEngine(agent_runner=...)` is configured and `mock_output` is not supplied, the runner receives `agent.runner_request.v1` with the rendered prompt, input, workflow id, and step key.
 3. The runner must return JSON-serializable output, optionally `{ "output": ..., "provenance": ... }`.
 4. The live response and provenance are persisted in `StepCompleted.metadata` and replay uses history instead of calling the runner again.
 
@@ -39,7 +39,7 @@ Expected fail-closed behavior:
 - `returns=Workflow` from a live runner: generated source is snapshotted as a `Workflow` value with `approval_required=True`; import/execution of the generated child workflow waits for a human approval decision.
 - Approval rejection or missing approval: generated workflow execution remains blocked.
 
-`AgentPrompt(...)` is narrower: it snapshots and renders a prompt file as a durable `agent_prompt.rendered.v1` packet. It does not call an agent runner. Keep it available for old render-only workflows, but avoid introducing it in new public examples unless the example is specifically about prompt-file rendering.
+`render_prompt(...)` is narrower: it snapshots and renders a prompt file as a durable `agent_prompt.rendered.v1` packet. It does not call an agent runner. Keep it available for old render-only workflows, but avoid introducing it in new public examples unless the example is specifically about prompt-file rendering.
 
 ## Dashboard approval semantics
 
@@ -90,4 +90,4 @@ Persistence remains the workflow history DB. This slice does **not** introduce e
 
 - Should local dashboard `POST /runs` remain synchronous or return an immediate durable run receipt before long-running execution?
 - What is the canonical artifact store if media should be previewed inline later: workflow DB blobs, profile-local files under a served artifact root, or an operator-provided object store?
-- Should `AgentPrompt` emit a runtime deprecation warning, or is docs-only standardization enough until a migration plan exists?
+- Should `render_prompt` emit a runtime deprecation warning, or is docs-only standardization enough until a migration plan exists?

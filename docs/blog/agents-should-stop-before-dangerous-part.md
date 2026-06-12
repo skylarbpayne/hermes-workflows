@@ -183,7 +183,7 @@ The runner can call a deterministic script, Hermes, Claude Code, Codex, OpenAI, 
 ## Minimal shape
 
 ```python
-from hermes_workflows import AgentStep, SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows import agent(...), SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
 
 runner = SubprocessAgentRunner([
     "hermes-workflows-agent-cli-adapter",
@@ -192,10 +192,10 @@ runner = SubprocessAgentRunner([
 
 @workflow
 async def production_shaped_agent_workflow(ctx, inputs):
-    generated = await AgentStep(
+    generated = await agent(...)(
         "workflow_architect",
         prompt="Write a child workflow for {{operation_name}}.",
-        variables={"operation_name": inputs["operation_name"]},
+        input={"operation_name": inputs["operation_name"]},
         returns=Workflow,
     )(ctx)
 

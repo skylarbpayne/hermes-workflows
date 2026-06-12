@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from hermes_workflows import AgentRunnerError, AgentStep, SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows import AgentRunnerError, SubprocessAgentRunner, Workflow, WorkflowEngine, agent, workflow
 
 
 GENERATED_SOURCE = '''
@@ -26,22 +26,22 @@ async def process_item(ctx, item):
 
 @workflow
 async def subprocess_json_pipeline(ctx, inputs):
-    return await AgentStep(
+    return await agent(
         "double_value",
-        prompt="Double {{value}}",
-        variables={"value": inputs["value"]},
-    )(ctx)
+        prompt=f"Double {inputs['value']}",
+        input={"value": inputs["value"]},
+    )
 
 
 @workflow
 async def subprocess_generated_workflow_pipeline(ctx, inputs):
-    processor = await AgentStep(
+    processor = await agent(
         "build_processor",
-        prompt="Write a Python workflow for {{kind}} items.",
-        variables={"kind": inputs["kind"]},
+        prompt=f"Write a Python workflow for {inputs['kind']} items.",
+        input={"kind": inputs["kind"]},
         returns=Workflow,
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 
 
 def _write_runner(tmp_path, source: str):
@@ -50,7 +50,7 @@ def _write_runner(tmp_path, source: str):
     return runner
 
 
-def test_subprocess_runner_executes_agent_step_and_records_provenance(tmp_path):
+def test_subprocess_runner_executes_agent_and_records_provenance(tmp_path):
     runner_script = _write_runner(
         tmp_path,
         '''
@@ -58,10 +58,10 @@ def test_subprocess_runner_executes_agent_step_and_records_provenance(tmp_path):
         import sys
 
         request = json.load(sys.stdin)
-        assert request["kind"] == "agent_step.runner_request.v1"
+        assert request["kind"] == "agent.runner_request.v1"
         assert request["rendered_prompt"] == "Double 21"
         json.dump({
-            "output": {"answer": request["variables"]["value"] * 2},
+            "output": {"answer": request["input"]["value"] * 2},
             "provenance": {"runner": "fixture", "request_name": request["name"]},
         }, sys.stdout)
         ''',
@@ -81,7 +81,7 @@ def test_subprocess_runner_executes_agent_step_and_records_provenance(tmp_path):
         "runner": "fixture",
         "request_name": "double_value",
     }
-    assert completed[0]["payload"]["metadata"]["request"]["kind"] == "agent_step.runner_request.v1"
+    assert completed[0]["payload"]["metadata"]["request"]["kind"] == "agent.runner_request.v1"
     assert completed[0]["payload"]["metadata"]["response"] == {
         "output": {"answer": 42},
         "provenance": {"runner": "fixture", "request_name": "double_value"},
@@ -102,7 +102,7 @@ def test_subprocess_runner_nonzero_exit_reports_diagnostics(tmp_path):
     runner = SubprocessAgentRunner([sys.executable, str(runner_script)])
 
     with pytest.raises(AgentRunnerError) as excinfo:
-        runner({"kind": "agent_step.runner_request.v1"})
+        runner({"kind": "agent.runner_request.v1"})
 
     assert "exited with code 7" in str(excinfo.value)
     assert excinfo.value.details["exit_code"] == 7
@@ -116,7 +116,7 @@ def test_subprocess_runner_invalid_json_stdout_fails_closed(tmp_path):
     runner = SubprocessAgentRunner([sys.executable, str(runner_script)])
 
     with pytest.raises(AgentRunnerError) as excinfo:
-        runner({"kind": "agent_step.runner_request.v1"})
+        runner({"kind": "agent.runner_request.v1"})
 
     assert "invalid JSON" in str(excinfo.value)
     assert "not-json" in excinfo.value.details["stdout_tail"]
@@ -134,7 +134,7 @@ def test_subprocess_runner_missing_output_fails_closed(tmp_path):
     runner = SubprocessAgentRunner([sys.executable, str(runner_script)])
 
     with pytest.raises(AgentRunnerError) as excinfo:
-        runner({"kind": "agent_step.runner_request.v1"})
+        runner({"kind": "agent.runner_request.v1"})
 
     assert "must include an 'output' field" in str(excinfo.value)
 
@@ -154,7 +154,7 @@ def test_subprocess_runner_timeout_fails_closed_without_env_dump(tmp_path):
     )
 
     with pytest.raises(AgentRunnerError) as excinfo:
-        runner({"kind": "agent_step.runner_request.v1"})
+        runner({"kind": "agent.runner_request.v1"})
 
     assert "timed out" in str(excinfo.value)
     assert excinfo.value.details["timeout_seconds"] == 0.1
@@ -173,7 +173,7 @@ def test_subprocess_runner_oversized_stdout_fails_closed_before_buffering_all_ou
     runner = SubprocessAgentRunner([sys.executable, str(runner_script)], max_stdout_bytes=32)
 
     with pytest.raises(AgentRunnerError) as excinfo:
-        runner({"kind": "agent_step.runner_request.v1"})
+        runner({"kind": "agent.runner_request.v1"})
 
     assert "stdout exceeded 32 bytes" in str(excinfo.value)
     assert excinfo.value.details["stdout_bytes"] == 33
