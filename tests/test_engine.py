@@ -103,3 +103,43 @@ def test_internal_signal_and_wait_records_remain_events_not_public_steps(tmp_pat
 
     step_ids = {step["id"] for step in engine.workflow_status("wf_private_plumbing")["steps"]}
     assert step_ids == {"approve_plan", "run_worker_step"}
+
+
+@workflow
+async def duplicate_public_step_key_workflow(ctx, inputs):
+    decision = await ctx.approve(
+        "Approve overloaded key?",
+        key="shared_step",
+        approver="human:skylar",
+    )
+    if not decision.approved:
+        return {"ready": False}
+    await ctx.handoff(
+        "Worker step reuses approval key",
+        key="shared_step",
+        assignee="agent:worker",
+        instructions="This should fail before public topology merges two lifecycles.",
+    )
+    return {"ready": True}
+
+
+def test_conflicting_public_step_keys_fail_before_topology_merge(tmp_path):
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite")
+    first = engine.run_until_idle(duplicate_public_step_key_workflow, {}, workflow_id="wf_duplicate_step_key")
+    assert first.status == "waiting"
+
+    result = engine.signal(
+        "wf_duplicate_step_key",
+        "approval.decision",
+        key="shared_step",
+        payload={"action": "approve", "by": "skylar"},
+        source=human_source("approve-duplicate-key"),
+        idempotency_key="approve-duplicate-key",
+    )
+
+    assert result.status == "failed"
+    assert "public step key conflict" in str(result.error)
+    steps = {step["id"]: step for step in engine.workflow_status("wf_duplicate_step_key")["steps"]}
+    assert set(steps) == {"shared_step"}
+    assert steps["shared_step"]["completion_mode"] == "approval"
+    assert not any(step_id.startswith(("approval:", "signal:", "handoff:", "wait:")) for step_id in steps)
