@@ -626,7 +626,7 @@ Given three items and two stages, the runtime records stage/item progress in a w
 
 Given `approve_until("approve_outline", outline)`, rejection with feedback causes a new attempt/revision path and does not terminate the workflow unless configured to do so.
 
-### Compatibility test
+### Cutover test
 
 Pre-release compatibility is intentionally removed: normal authoring uses `agent(...)`, `parallel(...)`, `pipeline(...)`, `approve(...)`, and `approve_until(...)`; lower-level runtime hooks stay private/advanced only where the engine itself needs them.
 
@@ -658,7 +658,7 @@ Implemented in the one-PR branch `api-agent-parallel-pipeline`:
 - Top-level `parallel(...)` over the existing durable step/outbox substrate; it enqueues every missing call before waiting.
 - Top-level `pipeline(...)` for staged transformation over item lists.
 - `approve(...)` and `approve_until(...)` helpers over existing approval signals.
-- Workflow-context binding so new author code can omit visible `ctx`, while legacy `workflow(ctx, inputs)` still works.
+- Workflow-context binding so normal author code can omit visible `ctx`; `agent(...)`, `parallel(...)`, `pipeline(...)`, `approve(...)`, and `approve_until(...)` are the taught surface.
 - Replay safety via request fingerprints covering rendered prompt, structured input, context hashes, return schema, and runner-relevant options.
 
 Verification on this branch: `271 passed, 2 skipped`.
