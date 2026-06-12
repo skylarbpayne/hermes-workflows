@@ -88,13 +88,19 @@ def workflow_inputs(repo: Path, tmp_path: Path, *, implementation_plan=_UNSET):
     }
 
 
+def _drain_signal(engine: WorkflowEngine, workflow_id: str, signal_type: str, **kwargs):
+    result = engine.signal(workflow_id, signal_type, **kwargs)
+    return engine.drain(workflow_id, initial=result)
+
+
 def approve_plan_workflow(engine: WorkflowEngine, repo: Path, tmp_path: Path):
     engine.run_until_idle(
         repo_change_plan_workflow,
         workflow_inputs(repo, tmp_path, implementation_plan=None),
         workflow_id="wf_plan",
     )
-    result = engine.signal(
+    result = _drain_signal(
+        engine,
         "wf_plan",
         "approval.decision",
         key="approve_implementation_plan",
@@ -185,7 +191,8 @@ def test_repo_change_plan_workflow_renders_plan_from_agentprompt_template(tmp_pa
     assert "- `pytest -q`" in plan_text
     assert "- `git diff --check`" in plan_text
 
-    result = engine.signal(
+    result = _drain_signal(
+        engine,
         "wf_plan",
         "approval.decision",
         key="approve_implementation_plan",
@@ -205,13 +212,15 @@ def test_repo_change_plan_workflow_records_human_plan_approval(tmp_path):
     repo.mkdir()
     init_repo(repo)
     db = tmp_path / "workflow.sqlite"
-    WorkflowEngine(db).run_until_idle(
+    approval_engine = WorkflowEngine(db)
+    approval_engine.run_until_idle(
         repo_change_plan_workflow,
         workflow_inputs(repo, tmp_path, implementation_plan=None),
         workflow_id="wf_plan",
     )
 
-    result = WorkflowEngine(db).signal(
+    result = _drain_signal(
+        approval_engine,
         "wf_plan",
         "approval.decision",
         key="approve_implementation_plan",
@@ -362,7 +371,8 @@ def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_appro
     assert f"Plan prompt: `{implementation_plan['plan_prompt_path']}`" in pending_report
     assert f"Plan prompt SHA-256: `{implementation_plan['plan_prompt_sha256']}`" in pending_report
 
-    approval = engine.signal(
+    approval = _drain_signal(
+        engine,
         "wf_pr",
         "approval.decision",
         key="approve_pr_landing",

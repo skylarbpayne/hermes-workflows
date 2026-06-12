@@ -47,7 +47,7 @@ def run_workflow_function(
     workflow_id: str | None = None,
     workflow_ref: str | None = None,
     project_root: str | Path | None = None,
-    drain: bool = True,
+    drain: bool = False,
 ) -> RunResult:
     ref = workflow_ref or getattr(workflow_fn, "__workflow_name__", getattr(workflow_fn, "__name__", "workflow"))
     resolved_db = Path(db).expanduser() if db is not None else default_db_path(project_root)
@@ -75,7 +75,7 @@ def workflow_run_cli(workflow_fn: Callable[..., Any], argv: list[str] | None = N
     parser.add_argument("--project-root", type=Path, help="Root used for default DB discovery")
     parser.add_argument("--id", dest="workflow_id", help="Workflow instance id. Defaults to a stable id derived from the workflow ref")
     parser.add_argument("--input-json", default="{}", help="JSON object/value passed to the workflow. Defaults to {}")
-    parser.add_argument("--no-drain", action="store_true", help="Only run the decider; leave emitted step commands for workers")
+    parser.add_argument("--no-drain", action="store_true", help="Deprecated no-op; runs always enqueue workflow work for workers")
     args = parser.parse_args(argv)
     resolved_ref = workflow_ref
     module = sys.modules.get(getattr(workflow_fn, "__module__", ""))
@@ -92,7 +92,7 @@ def workflow_run_cli(workflow_fn: Callable[..., Any], argv: list[str] | None = N
         workflow_id=args.workflow_id,
         workflow_ref=resolved_ref,
         project_root=project_root,
-        drain=not args.no_drain,
+        drain=False,
     )
     print(JsonCodec.dumps(run_result_payload(result)))
     return 0

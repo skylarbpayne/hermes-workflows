@@ -195,8 +195,8 @@ def test_workflow_approval_decide_defaults_to_resume_false(tmp_path):
     assert result["receipt"]["status"] == "decision_recorded"
     assert result["next_step"] == "Run or queue a trusted workflow resumer for workflow_ref tests.test_hermes_plugin_approvals:plugin_approval_workflow."
     status = WorkflowEngine(db).workflow_status("wf_plugin")
-    assert status["status"] == "waiting"
-    assert status["result"] is None
+    assert status["status"] == "running"
+    assert status["waiting_on"] == "signal:approval.decision:approve_plugin_test"
 
 
 def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path):
@@ -223,8 +223,10 @@ def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path)
     )
 
     assert result["receipt"]["resume_requested"] is True
-    assert result["receipt"]["status"] == "completed"
-    assert result["receipt"]["result_summary"]["followup_ran"] is True
+    assert result["receipt"]["status"] == "running"
+    completed = WorkflowEngine(db).drain("wf_plugin")
+    assert completed.status == "completed"
+    assert completed.result["followup_ran"] is True
 
 
 @dataclass
@@ -263,7 +265,9 @@ def test_gateway_hook_only_handles_exact_decision_token(tmp_path, monkeypatch):
     assert handled["receipt"]["action"] == "approve"
     assert handled["receipt"]["source"]["channel"] == "discord:chat-42"
     assert handled["receipt"]["source"]["message_id"] == "msg-456"
-    assert WorkflowEngine(db).workflow_status("wf_plugin")["status"] == "waiting"
+    hook_status = WorkflowEngine(db).workflow_status("wf_plugin")
+    assert hook_status["status"] == "running"
+    assert hook_status["waiting_on"] == "signal:approval.decision:approve_plugin_test"
 
 
 def test_gateway_hook_rejects_path_tokens_without_creating_attacker_db(tmp_path):

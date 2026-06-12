@@ -130,7 +130,8 @@ class WorkflowEngine:
                     """,
                     (workflow_ref, _now(), workflow_id),
                 )
-        return self._run_decider(workflow_id, workflow_fn)
+            self._enqueue_workflow_run_row(con, workflow_id, reason="start")
+        return self._result_from_instance(workflow_id)
 
     def run_until_idle(
         self,
@@ -179,7 +180,6 @@ class WorkflowEngine:
         if instance["status"] in TERMINAL_WORKFLOW_STATUSES:
             return self._result_from_instance(workflow_id)
 
-        workflow_fn = self._workflow_fn_for_instance(instance)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
@@ -211,12 +211,13 @@ class WorkflowEngine:
             con.execute(
                 """
                 UPDATE workflow_instances
-                SET status = 'running', updated_at = ?
+                SET status = 'running', waiting_on = NULL, updated_at = ?
                 WHERE id = ? AND status != 'cancelled'
                 """,
                 (_now(), workflow_id),
             )
-        return self._run_decider(workflow_id, workflow_fn)
+            self._enqueue_workflow_run_row(con, workflow_id, reason="step_completed", source_key=step_key)
+        return self._result_from_instance(workflow_id)
 
     def signal(
         self,
@@ -237,7 +238,6 @@ class WorkflowEngine:
         if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type != "approval.decision":
             return self._result_from_instance(workflow_id)
 
-        workflow_fn = None if instance["status"] in TERMINAL_WORKFLOW_STATUSES else self._workflow_fn_for_instance(instance)
         inserted = False
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -304,12 +304,12 @@ class WorkflowEngine:
                         """,
                         (_now(), workflow_id, f"handoff:{key}"),
                     )
+                self._enqueue_workflow_run_row(con, workflow_id, reason=f"signal:{signal_type}", source_key=key)
         if inserted:
-            assert workflow_fn is not None
-            result = self._run_decider(workflow_id, workflow_fn)
+            result = self._result_from_instance(workflow_id)
         else:
             result = self._result_from_instance(workflow_id)
-        return self.drain(workflow_id, initial=result)
+        return result
 
     def resume(self, workflow_fn: Callable[..., Any], workflow_id: str) -> RunResult:
         """Resume a workflow decider without recording a new external event."""
@@ -455,6 +455,20 @@ class WorkflowEngine:
                     WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
                     """,
                     (_now(), decision.workflow_id, f"approval:{decision.key}"),
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'running', updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (_now(), decision.workflow_id),
+                )
+                self._enqueue_workflow_run_row(
+                    con,
+                    decision.workflow_id,
+                    reason="approval_decision",
+                    source_key=decision.key,
                 )
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (decision.workflow_id,)).fetchone()
 
@@ -668,7 +682,7 @@ class WorkflowEngine:
         self._ensure_writable("claim workflow commands")
 
         now = _now()
-        type_clause = "AND c.type = ?" if command_type is not None else "AND c.type IN ('run_step', 'start_child_workflow')"
+        type_clause = "AND c.type = ?" if command_type is not None else "AND c.type IN ('run_workflow', 'run_step', 'start_child_workflow')"
         params: list[Any] = [workflow_id]
         if command_type is not None:
             params.append(command_type)
@@ -749,6 +763,47 @@ class WorkflowEngine:
                 return result
         return result
 
+    def runnable_workflows(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return workflow instances with runnable worker-service commands.
+
+        This intentionally spans all workflow instances in one DB. The per-workflow
+        `worker` command still drains a known workflow id; resident workers use this
+        to lease pending or expired run_workflow/run_step/start_child_workflow commands without
+        knowing workflow ids in advance.
+        """
+
+        now = _now()
+        query = """
+            SELECT
+              wi.id AS workflow_id,
+              wi.workflow_name AS workflow_name,
+              wi.workflow_ref AS workflow_ref,
+              wi.status AS workflow_status,
+              wi.waiting_on AS waiting_on,
+              c.id AS command_id,
+              c.type AS command_type,
+              c.key AS command_key,
+              c.status AS command_status,
+              c.lease_expires_at AS lease_expires_at
+            FROM workflow_commands_outbox c
+            JOIN workflow_instances wi ON wi.id = c.workflow_id
+            WHERE c.type IN ('run_workflow', 'run_step', 'start_child_workflow')
+              AND wi.status NOT IN ('completed', 'failed', 'cancelled')
+              AND (
+                c.status = 'pending'
+                OR (c.status = 'running' AND COALESCE(c.lease_expires_at, 0) <= ?)
+              )
+            ORDER BY c.id ASC
+        """
+        params: list[Any] = [now]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        with self._connect() as con:
+            rows = con.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
     def events(self, workflow_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         self._instance(workflow_id)
         query = """
@@ -808,8 +863,10 @@ class WorkflowEngine:
             if result.status in {"failed", "cancelled"}:
                 return result
         if not pending and result.status == "running" and self._has_terminal_child_workflow_events(workflow_id):
-            parent = self._instance(workflow_id)
-            return self._run_decider(workflow_id, self._workflow_fn_for_instance(parent))
+            with self._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._enqueue_workflow_run_row(con, workflow_id, reason="child_reconciled")
+            return self._result_from_instance(workflow_id)
         return result
 
     def _has_terminal_child_workflow_events(self, workflow_id: str) -> bool:
@@ -893,11 +950,12 @@ class WorkflowEngine:
                 con.execute(
                     """
                     UPDATE workflow_instances
-                    SET status = 'running', waiting_on = NULL, updated_at = ?
+                    SET status = 'running', updated_at = ?
                     WHERE id = ? AND status != 'cancelled'
                     """,
                     (_now(), workflow_id),
                 )
+                self._enqueue_workflow_run_row(con, workflow_id, reason="child_reconciled", source_key=child_key)
             elif child_result.status in {"failed", "cancelled"}:
                 error_type = "ChildWorkflowCancelled" if child_result.status == "cancelled" else "ChildWorkflowFailed"
                 error = {"type": error_type, "message": child_result.error or f"child {child_result.status}: {child_id}"}
@@ -932,7 +990,7 @@ class WorkflowEngine:
                 return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=parent_wait_key)
 
         parent = self._instance(workflow_id)
-        return self._run_decider(workflow_id, self._workflow_fn_for_instance(parent))
+        return self._result_from_row(parent)
 
     def list_workflows(self, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
         query = """
@@ -1438,8 +1496,13 @@ class WorkflowEngine:
             labels.append("matching_signal_exists")
         if summary.get("status") in {"completed", "failed", "cancelled"}:
             labels.append("terminal_workflow_has_pending_command")
-        if summary.get("status") == "waiting" and _command_matches_current_wait(command, str(summary.get("waiting_on") or ""), expected_wait):
-            labels.append("active_wait")
+        if command.get("type") == "run_workflow" and summary.get("status") not in {"completed", "failed", "cancelled"}:
+            labels.append("runnable_work")
+        elif summary.get("status") == "waiting" and _command_matches_current_wait(command, str(summary.get("waiting_on") or ""), expected_wait):
+            if command.get("type") == "notify_approval":
+                labels.append("active_wait")
+            else:
+                labels.append("runnable_work")
         if not labels:
             labels.append("orphaned_or_inconsistent")
         return labels
@@ -1504,7 +1567,7 @@ class WorkflowEngine:
                         "command_type": command["type"],
                         "label": label,
                         "message": _diagnostic_message(label),
-                        "severity": "info" if label == "active_wait" else "warning",
+                        "severity": "info" if label in {"active_wait", "runnable_work"} else "warning",
                     }
                 )
         return diagnostics
@@ -1693,11 +1756,104 @@ class WorkflowEngine:
     def _execute_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         payload = command["payload"] if isinstance(command, dict) else JsonCodec.loads(command["payload_json"])
         command_type = command["type"] if isinstance(command, dict) else command["type"]
+        if command_type == "run_workflow":
+            return self._execute_run_workflow_command(workflow_id, command)
         if command_type == "run_step":
             return self._execute_run_step_command(workflow_id, command)
         if command_type == "start_child_workflow":
             return self._execute_start_child_workflow_command(workflow_id, command, payload)
         raise ValueError(f"unknown workflow command type: {command_type}")
+
+    def _execute_run_workflow_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT c.id, wi.*
+                FROM workflow_commands_outbox c
+                JOIN workflow_instances wi ON wi.id = c.workflow_id
+                WHERE c.id = ?
+                  AND c.status = 'running'
+                  AND c.claimed_by = ?
+                  AND c.attempts = ?
+                  AND c.type = 'run_workflow'
+                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
+                """,
+                (command["id"], command["claimed_by"], command["attempts"]),
+            ).fetchone()
+        if row is None:
+            return self._result_from_instance(workflow_id)
+
+        workflow_fn = self._workflow_fn_for_instance(self._instance(workflow_id))
+        result = self._run_decider(workflow_id, workflow_fn)
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = con.execute(
+                """
+                SELECT c.payload_json, wi.status AS workflow_status
+                FROM workflow_commands_outbox c
+                JOIN workflow_instances wi ON wi.id = c.workflow_id
+                WHERE c.id = ?
+                  AND c.status = 'running'
+                  AND c.claimed_by = ?
+                  AND c.attempts = ?
+                """,
+                (command["id"], command["claimed_by"], command["attempts"]),
+            ).fetchone()
+            if current is None:
+                return self._result_from_instance(workflow_id)
+            payload = JsonCodec.loads(current["payload_json"])
+            rerun_requested = isinstance(payload, dict) and payload.get("rerun_requested") is True
+            workflow_terminal = current["workflow_status"] in TERMINAL_WORKFLOW_STATUSES
+            if rerun_requested and not workflow_terminal and result.status != "failed":
+                next_payload = {
+                    "reason": payload.get("rerun_reason") or "wakeup_during_run",
+                    "rerun_from_running": True,
+                }
+                if payload.get("rerun_source_key") is not None:
+                    next_payload["source_key"] = payload.get("rerun_source_key")
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'pending', payload_json = ?, claimed_by = NULL, lease_expires_at = NULL,
+                        last_error_json = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND attempts = ?
+                    """,
+                    (
+                        JsonCodec.dumps(next_payload),
+                        now,
+                        command["id"],
+                        command["claimed_by"],
+                        command["attempts"],
+                    ),
+                ).rowcount
+            else:
+                status = "failed" if result.status == "failed" else "completed"
+                last_error = {"type": "WorkflowRunFailed", "message": result.error} if result.status == "failed" else None
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = ?, last_error_json = ?, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND attempts = ?
+                    """,
+                    (
+                        status,
+                        JsonCodec.dumps(last_error) if last_error is not None else None,
+                        now,
+                        command["id"],
+                        command["claimed_by"],
+                        command["attempts"],
+                    ),
+                ).rowcount
+        if changed == 0:
+            return self._result_from_instance(workflow_id)
+        return result
 
     def _execute_start_child_workflow_command(
         self,
@@ -1748,6 +1904,7 @@ class WorkflowEngine:
                     """,
                     (_now(), workflow_id),
                 )
+                self._enqueue_workflow_run_row(con, workflow_id, reason="child_completed", source_key=key)
             elif child_result.status == "failed":
                 error = {"type": "ChildWorkflowFailed", "message": child_result.error or f"child failed: {child_id}"}
                 self._append_event(
@@ -1787,7 +1944,7 @@ class WorkflowEngine:
                 return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=parent_wait_key)
 
         parent = self._instance(workflow_id)
-        return self._run_decider(workflow_id, self._workflow_fn_for_instance(parent))
+        return self._result_from_row(parent)
 
     def _execute_run_step_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         from .decorators import get_step_body
@@ -2061,6 +2218,73 @@ class WorkflowEngine:
             (workflow_id, command_type, key, JsonCodec.dumps(payload), _now(), _now()),
         )
         return True
+
+    def _enqueue_workflow_run_row(
+        self,
+        con: sqlite3.Connection,
+        workflow_id: str,
+        *,
+        reason: str,
+        source_key: str | None = None,
+    ) -> bool:
+        row = con.execute("SELECT status FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"unknown workflow_id: {workflow_id}")
+        if row["status"] in TERMINAL_WORKFLOW_STATUSES:
+            return False
+
+        payload: Dict[str, Any] = {"reason": reason}
+        if source_key is not None:
+            payload["source_key"] = source_key
+        payload_json = JsonCodec.dumps(payload)
+        now = _now()
+        existing = con.execute(
+            """
+            SELECT id, status, payload_json
+            FROM workflow_commands_outbox
+            WHERE workflow_id = ? AND type = 'run_workflow' AND key = 'workflow:run'
+            """,
+            (workflow_id,),
+        ).fetchone()
+        if existing is None:
+            con.execute(
+                """
+                INSERT INTO workflow_commands_outbox(workflow_id, type, key, payload_json, status, created_at, updated_at)
+                VALUES (?, 'run_workflow', 'workflow:run', ?, 'pending', ?, ?)
+                """,
+                (workflow_id, payload_json, now, now),
+            )
+            return True
+        if existing["status"] == "pending":
+            return False
+        if existing["status"] == "running":
+            running_payload = JsonCodec.loads(existing["payload_json"])
+            if not isinstance(running_payload, dict):
+                running_payload = {}
+            running_payload["rerun_requested"] = True
+            running_payload["rerun_requested_at"] = now
+            running_payload["rerun_reason"] = reason
+            if source_key is not None:
+                running_payload["rerun_source_key"] = source_key
+            changed = con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET payload_json = ?, updated_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (JsonCodec.dumps(running_payload), now, existing["id"]),
+            ).rowcount
+            return changed > 0
+        changed = con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET status = 'pending', payload_json = ?, claimed_by = NULL, lease_expires_at = NULL,
+                last_error_json = NULL, updated_at = ?
+            WHERE id = ? AND status NOT IN ('pending', 'running')
+            """,
+            (payload_json, now, existing["id"]),
+        ).rowcount
+        return changed > 0
 
 
     def _ensure_instance_columns(self, con: sqlite3.Connection) -> None:
@@ -2759,6 +2983,10 @@ class StepExecutionContext:
 def _command_matches_current_wait(command: Dict[str, Any], waiting_on: str, expected_wait: str) -> bool:
     if waiting_on == expected_wait:
         return True
+    if command.get("type") == "run_step" and waiting_on.startswith("gather:"):
+        return True
+    if command.get("type") == "start_child_workflow" and waiting_on.startswith("child-gather:"):
+        return True
     if command.get("type") != "notify_approval":
         return False
     key = str(command.get("key") or "")
@@ -2820,6 +3048,7 @@ def _child_workflow_diagnostic_message(label: str) -> str:
 def _diagnostic_message(label: str) -> str:
     messages = {
         "active_wait": "Workflow is actively waiting on this approval signal.",
+        "runnable_work": "Workflow has runnable work queued; a worker must claim this command for autonomous continuation.",
         "matching_signal_exists": "A matching approval signal already exists; this notification is historical/stale.",
         "terminal_workflow_has_pending_command": "Workflow is terminal but this command is still pending or running.",
         "orphaned_or_inconsistent": "Command is pending or running but does not match the workflow's current wait state.",

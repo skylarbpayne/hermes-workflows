@@ -136,9 +136,17 @@ def test_submit_approval_decision_resume_true_returns_receipt_and_completes_work
     assert receipt.action == "approve"
     assert receipt.by == "skylar"
     assert receipt.source == human_source()
-    assert receipt.status == "completed"
-    assert receipt.waiting_on is None
-    assert receipt.result_summary == {"decision": {"action": "approve", "by": "skylar", "note": "[REDACTED]", "source": human_source()}}
+    assert receipt.status == "running"
+    assert receipt.waiting_on == "signal:approval.decision:approve_adapter_test"
+    assert receipt.result_summary is None
+
+    completed = engine.drain("wf_adapter")
+    assert completed.status == "completed"
+    decision = completed.result["decision"]
+    assert decision.action == "approve"
+    assert decision.by == "skylar"
+    assert decision.note == "[REDACTED]"
+    assert decision.source == human_source()
 
 
 def test_submit_approval_decision_resume_false_records_without_running_next_step(tmp_path):
@@ -150,12 +158,12 @@ def test_submit_approval_decision_resume_false_records_without_running_next_step
 
     assert receipt.status == "decision_recorded"
     status = engine.workflow_status("wf_adapter", recent_events=20)
-    assert status["status"] == "waiting"
+    assert status["status"] == "running"
     assert status["waiting_on"] == "signal:approval.decision:approve_adapter_test"
     assert [event for event in status["events"] if event["type"] == "SignalReceived"]
     assert not [command for command in status["pending_commands"] if command["type"] == "run_step"]
 
-    resumed = engine.resume(adapter_approval_then_step_workflow, "wf_adapter")
+    resumed = engine.drain("wf_adapter")
     assert resumed.status == "completed"
     assert resumed.result["followup"] == {"followup": "done"}
 
@@ -204,10 +212,12 @@ def test_submit_approval_decision_can_resume_by_stored_workflow_ref(tmp_path):
     removed = _WORKFLOW_REGISTRY.pop("adapter_approval_workflow", None)
     try:
         receipt = WorkflowEngine(db).submit_approval_decision(decision_input(), resume=True)
+        completed = WorkflowEngine(db).drain("wf_adapter")
     finally:
         if removed is not None:
             _WORKFLOW_REGISTRY["adapter_approval_workflow"] = removed
 
-    assert receipt.status == "completed"
-    assert receipt.result_summary is not None
-    assert receipt.result_summary["decision"]["source"] == human_source()
+    assert receipt.status == "running"
+    assert completed.status == "completed"
+    assert completed.result is not None
+    assert completed.result["decision"]["source"] == human_source()

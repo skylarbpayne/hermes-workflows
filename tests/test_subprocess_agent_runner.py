@@ -243,6 +243,7 @@ def test_subprocess_runner_generated_workflow_waits_for_approval_before_import(t
         payload={"action": "approve", "by": "skylar", "message": "approved in test"},
         source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-1"},
     )
+    approved = engine.drain("wf_generated_subprocess", initial=approved)
 
     assert approved.status == "completed"
     assert approved.result == {"processed": {"id": "a", "label": "ALPHA"}}

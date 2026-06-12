@@ -94,22 +94,54 @@ def run_cli(tmp_path, *args, env_extra=None):
     )
 
 
+def run_worker(tmp_path, workflow_ref, db, workflow_id, *, max_commands=None, once=False):
+    args = [
+        "worker",
+        workflow_ref,
+        "--db",
+        str(db),
+        "--id",
+        workflow_id,
+        "--worker-id",
+        f"test-worker-{workflow_id}",
+    ]
+    if once:
+        args.append("--once")
+    if max_commands is not None:
+        args.extend(["--max-commands", str(max_commands)])
+    return json.loads(run_cli(tmp_path, *args).stdout)
+
+
+def start_to_waiting(tmp_path, workflow_ref, db, workflow_id, input_json, *, max_commands=3):
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            workflow_ref,
+            "--db",
+            str(db),
+            "--id",
+            workflow_id,
+            "--input-json",
+            input_json,
+        ).stdout
+    )
+    assert started["status"] == "running"
+    assert started["waiting_on"] is None
+    return run_worker(tmp_path, workflow_ref, db, workflow_id, max_commands=max_commands)
+
+
 def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
     (tmp_path / "child_wf.py").write_text(CHILD_WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_payload = json.loads(
-        run_cli(
-            tmp_path,
-            "run",
-            "child_wf:parent_workflow",
-            "--db",
-            str(db),
-            "--id",
-            "wf_cli_child",
-            "--input-json",
-            '{"item":{"id":"cli-child"}}',
-        ).stdout
+    run_payload = start_to_waiting(
+        tmp_path,
+        "child_wf:parent_workflow",
+        db,
+        "wf_cli_child",
+        '{"item":{"id":"cli-child"}}',
+        max_commands=2,
     )
     assert run_payload["status"] == "waiting"
     assert run_payload["waiting_on"].startswith("child:")
@@ -146,7 +178,9 @@ def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
             '{"ok":true}',
         ).stdout
     )
-    assert child_signal_payload["status"] == "completed"
+    assert child_signal_payload["status"] == "running"
+    child_completed = run_worker(tmp_path, "child_wf:parent_workflow", db, child_id, max_commands=1)
+    assert child_completed["status"] == "completed"
     pre_reconcile_status = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli_child").stdout)
     assert pre_reconcile_status["child_workflows"] == [
         {
@@ -170,7 +204,9 @@ def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
             "wf_cli_child",
         ).stdout
     )
-    assert reconcile_payload == {
+    assert reconcile_payload["status"] == "running"
+    parent_completed = run_worker(tmp_path, "child_wf:parent_workflow", db, "wf_cli_child", max_commands=1)
+    assert parent_completed == {
         "workflow_id": "wf_cli_child",
         "status": "completed",
         "waiting_on": None,
@@ -191,25 +227,20 @@ def test_cli_reconciles_waiting_child_workflow_across_processes(tmp_path):
             child_key,
         ).stdout
     )
-    assert reconcile_one_payload == reconcile_payload
+    assert reconcile_one_payload == parent_completed
 
 
 def test_cli_signal_can_resume_generated_child_loaded_from_parent_history(tmp_path):
     (tmp_path / "dynamic_child_wf.py").write_text(DYNAMIC_CHILD_WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_payload = json.loads(
-        run_cli(
-            tmp_path,
-            "run",
-            "dynamic_child_wf:generated_parent_workflow",
-            "--db",
-            str(db),
-            "--id",
-            "wf_cli_generated_child",
-            "--input-json",
-            '{"item":{"id":"generated-cli-child"}}',
-        ).stdout
+    run_payload = start_to_waiting(
+        tmp_path,
+        "dynamic_child_wf:generated_parent_workflow",
+        db,
+        "wf_cli_generated_child",
+        '{"item":{"id":"generated-cli-child"}}',
+        max_commands=5,
     )
     assert run_payload["status"] == "waiting"
 
@@ -233,7 +264,15 @@ def test_cli_signal_can_resume_generated_child_loaded_from_parent_history(tmp_pa
             '{"ok":true}',
         ).stdout
     )
-    assert child_signal_payload["status"] == "completed"
+    assert child_signal_payload["status"] == "running"
+    child_completed = run_worker(
+        tmp_path,
+        "dynamic_child_wf:generated_parent_workflow",
+        db,
+        child_requested["payload"]["child_workflow_id"],
+        max_commands=1,
+    )
+    assert child_completed["status"] == "completed"
 
     reconcile_payload = json.loads(
         run_cli(
@@ -248,26 +287,23 @@ def test_cli_signal_can_resume_generated_child_loaded_from_parent_history(tmp_pa
             child_requested["key"],
         ).stdout
     )
-    assert reconcile_payload["status"] == "completed"
-    assert reconcile_payload["result"] == {"payload": {"ok": True}}
+    assert reconcile_payload["status"] == "running"
+    parent_completed = run_worker(tmp_path, "dynamic_child_wf:generated_parent_workflow", db, "wf_cli_generated_child", max_commands=1)
+    assert parent_completed["status"] == "completed"
+    assert parent_completed["result"] == {"payload": {"ok": True}}
 
 
 def test_cli_can_run_and_signal_workflow_across_processes(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_result = run_cli(
+    run_payload = start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_cli",
-        "--input-json",
         '{"destination":"NYC"}',
     )
-    run_payload = json.loads(run_result.stdout)
     assert run_payload == {
         "workflow_id": "wf_cli",
         "status": "waiting",
@@ -296,7 +332,9 @@ def test_cli_can_run_and_signal_workflow_across_processes(tmp_path):
         "cli-approval-1",
     )
     signal_payload = json.loads(signal_result.stdout)
-    assert signal_payload == {
+    assert signal_payload["status"] == "running"
+    completed_payload = run_worker(tmp_path, "demo_wf:demo_workflow", db, "wf_cli", max_commands=1)
+    assert completed_payload == {
         "workflow_id": "wf_cli",
         "status": "completed",
         "waiting_on": None,
@@ -309,15 +347,11 @@ def test_cli_status_and_list_expose_inspectable_workflow_state(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_cli",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -350,26 +384,18 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_waiting",
-        "--input-json",
         '{"destination":"NYC"}',
     )
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_done",
-        "--input-json",
         '{"destination":"LA"}',
     )
     run_cli(
@@ -389,6 +415,7 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
         "--source-json",
         '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://thread/1/message/3"}',
     )
+    run_worker(tmp_path, "demo_wf:demo_workflow", db, "wf_done", max_commands=1)
 
     list_result = run_cli(tmp_path, "list", "--db", str(db), "--status", "waiting")
     list_payload = json.loads(list_result.stdout)
@@ -423,7 +450,7 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "allowed": ["approve", "reject"],
             "authority": [],
             "timeout": None,
-            "requested_seq": 6,
+            "requested_seq": 8,
             "decision": None,
             "source": None,
         }
@@ -442,7 +469,7 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
             "allowed": ["approve", "reject"],
             "authority": [],
             "timeout": None,
-            "requested_seq": 6,
+            "requested_seq": 8,
             "decision": {"action": "approve", "by": "skylar"},
             "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/3"},
         }
@@ -452,15 +479,11 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
 def test_cli_events_rejects_missing_workflow_and_invalid_limit(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_waiting",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -475,15 +498,11 @@ def test_cli_outbox_marks_active_approval_waits_with_read_only_diagnostics(tmp_p
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_waiting",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -514,15 +533,11 @@ def test_cli_outbox_flags_stale_completed_workflow_approval_rows_without_mutatin
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
 
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_done",
-        "--input-json",
         '{"destination":"LA"}',
     )
     run_cli(
@@ -542,6 +557,7 @@ def test_cli_outbox_flags_stale_completed_workflow_approval_rows_without_mutatin
         "--source-json",
         '{"kind":"human","id":"skylar","channel":"discord","message_url":"discord://thread/1/message/4"}',
     )
+    run_worker(tmp_path, "demo_wf:demo_workflow", db, "wf_done", max_commands=1)
 
     with sqlite3.connect(db) as con:
         con.execute(
@@ -577,15 +593,11 @@ def test_cli_dashboard_renders_workflows_and_approvals_without_mutating_db(tmp_p
     db = tmp_path / "workflow.sqlite"
     out = tmp_path / "dashboard.html"
 
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_waiting",
-        "--input-json",
         '{"destination":"NYC"}',
     )
     with sqlite3.connect(db) as con:
@@ -623,15 +635,11 @@ def test_cli_dashboard_rejects_missing_db_without_creating_it(tmp_path):
 def test_cli_approve_shortcut_sends_human_provenance_signal(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_cli_approve",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -657,8 +665,10 @@ def test_cli_approve_shortcut_sends_human_provenance_signal(tmp_path):
         ).stdout
     )
 
-    assert payload["status"] == "completed"
-    assert payload["result"]["approved_by"] == "skylar"
+    assert payload["status"] == "running"
+    completed_payload = run_worker(tmp_path, "demo_wf:demo_workflow", db, "wf_cli_approve", max_commands=1)
+    assert completed_payload["status"] == "completed"
+    assert completed_payload["result"]["approved_by"] == "skylar"
     status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_cli_approve").stdout)
     approval = status_payload["approvals"][0]
     assert approval["decision"]["action"] == "approve"
@@ -689,18 +699,13 @@ def test_cli_doctor_reports_importable_packaged_example(tmp_path):
 
 def test_packaged_trip_example_runs_without_repo_examples_path(tmp_path):
     db = tmp_path / "workflow.sqlite"
-    run_payload = json.loads(
-        run_cli(
-            tmp_path,
-            "run",
-            "hermes_workflows.examples.trip:trip_planning_workflow",
-            "--db",
-            str(db),
-            "--id",
-            "wf_trip_quickstart",
-            "--input-json",
-            '{"destination":"NYC","approver":"human:operator"}',
-        ).stdout
+    run_payload = start_to_waiting(
+        tmp_path,
+        "hermes_workflows.examples.trip:trip_planning_workflow",
+        db,
+        "wf_trip_quickstart",
+        '{"destination":"NYC","approver":"human:operator"}',
+        max_commands=10,
     )
     assert run_payload["status"] == "waiting"
     assert run_payload["waiting_on"] == "signal:approval.decision:approve_trip_plan"
@@ -724,23 +729,27 @@ def test_packaged_trip_example_runs_without_repo_examples_path(tmp_path):
             "manual-approval-1",
         ).stdout
     )
-    assert approved["status"] == "completed"
-    assert approved["result"]["approved"] is True
-    assert approved["result"]["approved_by"] == "operator"
+    assert approved["status"] == "running"
+    completed = run_worker(
+        tmp_path,
+        "hermes_workflows.examples.trip:trip_planning_workflow",
+        db,
+        "wf_trip_quickstart",
+        max_commands=1,
+    )
+    assert completed["status"] == "completed"
+    assert completed["result"]["approved"] is True
+    assert completed["result"]["approved_by"] == "operator"
 
 
 def test_cli_serve_dashboard_is_read_only_without_approval_actions(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_web_read_only",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -810,15 +819,11 @@ def test_cli_serve_dashboard_read_only_does_not_import_workflow_module(tmp_path)
     )
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_import_guard",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -855,15 +860,11 @@ def test_cli_serve_dashboard_read_only_does_not_import_workflow_module(tmp_path)
 def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
-    run_cli(
+    start_to_waiting(
         tmp_path,
-        "run",
         "demo_wf:demo_workflow",
-        "--db",
-        str(db),
-        "--id",
+        db,
         "wf_web_approval",
-        "--input-json",
         '{"destination":"NYC"}',
     )
 
@@ -920,6 +921,8 @@ def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
             proc.terminate()
             proc.wait(timeout=5)
 
+    completed_payload = run_worker(tmp_path, "demo_wf:demo_workflow", db, "wf_web_approval", max_commands=1)
+    assert completed_payload["status"] == "completed"
     status_payload = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_web_approval").stdout)
     assert status_payload["status"] == "completed"
     assert status_payload["result"]["approved_by"] == "skylar"
@@ -980,9 +983,18 @@ def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(
         ).stdout
     )
 
-    assert payload["status"] == "completed"
-    assert payload["result"] == {"message": "from-registry"}
+    assert payload["status"] == "running"
+    assert payload["waiting_on"] is None
     assert (tmp_path / ".hermes" / "workflows.sqlite").exists()
+    completed_payload = run_worker(
+        tmp_path,
+        "alias_wf:alias_workflow",
+        tmp_path / ".hermes" / "workflows.sqlite",
+        payload["workflow_id"],
+        max_commands=1,
+    )
+    assert completed_payload["status"] == "completed"
+    assert completed_payload["result"] == {"message": "from-registry"}
     uv_call = json.loads(marker.read_text())
     uv_args = uv_call["args"]
     assert uv_call["cwd"] == str(tmp_path)
@@ -1025,9 +1037,18 @@ def test_workflow_run_helper_supports_direct_uv_script_style_and_default_db(tmp_
     )
 
     payload = json.loads(completed.stdout)
-    assert payload["status"] == "completed"
-    assert payload["result"] == {"ok": True}
+    assert payload["status"] == "running"
+    assert payload["waiting_on"] is None
     assert (tmp_path / ".hermes" / "workflows.sqlite").exists()
+    completed_payload = run_worker(
+        tmp_path,
+        str(script),
+        tmp_path / ".hermes" / "workflows.sqlite",
+        "wf_direct_helper",
+        max_commands=1,
+    )
+    assert completed_payload["status"] == "completed"
+    assert completed_payload["result"] == {"ok": True}
 
 
 def test_run_no_drain_replays_memoized_step_outputs_from_same_entrypoint_and_db(tmp_path):
@@ -1058,14 +1079,18 @@ def test_run_no_drain_replays_memoized_step_outputs_from_same_entrypoint_and_db(
     )
     assert first == {
         "workflow_id": "wf_memo",
-        "status": "waiting",
-        "waiting_on": "step:compute:0",
+        "status": "running",
+        "waiting_on": None,
         "result": None,
         "error": None,
     }
+    waiting = run_worker(tmp_path, str(tmp_path / "memo_wf.py"), db, "wf_memo", max_commands=1)
+    assert waiting["status"] == "waiting"
+    assert waiting["waiting_on"] == "step:compute:0"
 
     # Simulate an out-of-process worker publishing durable output without
-    # relying on an in-memory Python stack from the first run.
+    # relying on an in-memory Python stack from the first run. The completion
+    # transition wakes the workflow by reusing the singleton run_workflow row.
     with sqlite3.connect(db) as con:
         event_count_before = con.execute("SELECT COUNT(*) FROM workflow_events").fetchone()[0]
         next_seq = con.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_events WHERE workflow_id = 'wf_memo'").fetchone()[0]
@@ -1078,26 +1103,16 @@ def test_run_no_drain_replays_memoized_step_outputs_from_same_entrypoint_and_db(
         )
         con.execute("UPDATE workflow_commands_outbox SET status = 'completed' WHERE workflow_id = 'wf_memo' AND key = 'step:compute:0'")
         con.execute("UPDATE workflow_instances SET status = 'running', waiting_on = NULL WHERE id = 'wf_memo'")
+        con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET status = 'pending', payload_json = ?, claimed_by = NULL, lease_expires_at = NULL, updated_at = updated_at + 1
+            WHERE workflow_id = 'wf_memo' AND key = 'workflow:run'
+            """,
+            ('{"reason":"step_completed","source_key":"step:compute:0"}',),
+        )
 
-    resumed = json.loads(
-        run_cli(
-            tmp_path,
-            "run",
-            str(tmp_path / "memo_wf.py"),
-            "--project-root",
-            str(tmp_path),
-            "--id",
-            "wf_memo",
-            "--input-json",
-            '{"value":"from-worker"}',
-            "--no-drain",
-            "--watch",
-            "--poll-interval",
-            "0",
-            "--max-resumes",
-            "1",
-        ).stdout
-    )
+    resumed = run_worker(tmp_path, str(tmp_path / "memo_wf.py"), db, "wf_memo", max_commands=1)
 
     assert resumed["status"] == "completed"
     assert resumed["result"] == {"final": {"computed": "from-worker"}}
@@ -1252,8 +1267,9 @@ def test_run_with_external_config_defaults_db_to_config_project_root(tmp_path):
         ).stdout
     )
 
-    assert payload["status"] == "completed"
-    assert payload["result"] == {"project": "right-db"}
+    assert payload["status"] == "running"
+    assert payload["waiting_on"] is None
+    assert payload["result"] is None
     assert (project / ".hermes" / "workflows.sqlite").exists()
     assert not (caller / ".hermes" / "workflows.sqlite").exists()
 
@@ -1287,8 +1303,9 @@ def test_direct_workflow_run_defaults_db_to_workflow_file_project(tmp_path):
     )
 
     payload = json.loads(completed.stdout)
-    assert payload["status"] == "completed"
-    assert payload["result"] == {"value": "project-db"}
+    assert payload["status"] == "running"
+    assert payload["waiting_on"] is None
+    assert payload["result"] is None
     assert (project / ".hermes" / "workflows.sqlite").exists()
     assert not (caller / ".hermes" / "workflows.sqlite").exists()
 
@@ -1346,8 +1363,9 @@ def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
         ).stdout
     )
 
-    assert payload["status"] == "completed"
-    assert payload["result"] == {"project": "uv-cwd"}
+    assert payload["status"] == "running"
+    assert payload["waiting_on"] is None
+    assert payload["result"] is None
     uv_call = json.loads(marker.read_text())
     assert uv_call["cwd"] == str(project)
     assert (project / ".hermes" / "workflows.sqlite").exists()
@@ -1378,8 +1396,9 @@ def test_module_ref_run_defaults_db_to_imported_module_project(tmp_path):
         ).stdout
     )
 
-    assert payload["status"] == "completed"
-    assert payload["result"] == {"ok": True}
+    assert payload["status"] == "running"
+    assert payload["waiting_on"] is None
+    assert payload["result"] is None
     assert (project / ".hermes" / "workflows.sqlite").exists()
     assert not (caller / ".hermes" / "workflows.sqlite").exists()
 

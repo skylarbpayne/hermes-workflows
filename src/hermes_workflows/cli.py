@@ -17,6 +17,7 @@ from .engine import JsonCodec, RunResult, WorkflowEngine
 from .invocation import InvocationService, TrustedResumer
 from .registry import WorkflowRegistry, looks_like_path
 from .runner_api import default_db_path, default_workflow_id, infer_project_root, run_workflow_function
+from .worker_service import WorkflowWorkerService
 from .workflow_loading import canonical_workflow_ref, discover_workflow_refs, load_workflow_ref, resolve_discovered_workflow
 
 
@@ -204,7 +205,7 @@ def resolve_run_invocation(args: argparse.Namespace) -> tuple[Callable[..., Any]
 
 def run_engine_cli(args: argparse.Namespace) -> int:
     workflow, workflow_ref, db_path, workflow_id, input_payload = resolve_run_invocation(args)
-    drain = not args.no_drain
+    drain = False
     result = run_workflow_function(
         workflow,
         input_payload=input_payload,
@@ -228,11 +229,35 @@ def run_engine_cli(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_worker_service_cli(args: argparse.Namespace) -> int:
+    registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
+    try:
+        service = WorkflowWorkerService.from_registry(
+            registry_obj,
+            db=args.db,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.once:
+        result = service.tick(max_commands=1)
+    else:
+        result = service.serve(
+            poll_interval=args.poll_interval,
+            max_commands=args.max_commands,
+            idle_exit_after=args.idle_exit_after,
+        )
+    print_json(result.to_payload())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     visible_commands = (
-        "{registry,invoke,resume-trusted,resume-pending,start,run,worker,signal,"
+        "{registry,invoke,resume-trusted,resume-pending,start,run,worker,worker-service,signal,"
         "reconcile-child,reconcile-children,cancel,status,list,events,outbox,"
         "dashboard,serve-dashboard,doctor,approve,reject}"
     )
@@ -285,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--id", dest="workflow_id", help="workflow instance id; defaults to a stable id derived from the workflow ref")
     run.add_argument("--input-json", default="{}")
     run.add_argument("--project-root", type=Path, help="Root used for registry discovery and the default DB")
-    run.add_argument("--no-drain", action="store_true", help="Only run the decider; leave emitted step commands for workers")
+    run.add_argument("--no-drain", action="store_true", help="Deprecated no-op; run always enqueues workflow work for workers")
     run.add_argument("--watch", action="store_true", help="Keep re-invoking the same workflow entrypoint/DB until terminal or --max-resumes")
     run.add_argument("--poll-interval", type=float, default=1.0)
     run.add_argument("--max-resumes", type=positive_int)
@@ -313,7 +338,24 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--once", action="store_true", help="Execute at most one command")
     worker.add_argument("--max-commands", type=int)
 
-    signal = sub.add_parser("signal", help="Send a signal to a workflow and drain runnable steps")
+    worker_service = sub.add_parser(
+        "worker-service",
+        help="Run a resident worker that leases commands across configured workflow DB sources",
+    )
+    worker_service.add_argument("--config", type=Path)
+    worker_service.add_argument("--db", help="configured DB alias or explicit local DB path; omitted drains all configured DB sources")
+    worker_service.add_argument("--worker-id", default="workflow-worker-service")
+    worker_service.add_argument("--lease-seconds", type=int, default=30)
+    worker_service.add_argument("--poll-interval", type=float, default=1.0)
+    worker_service.add_argument("--once", action="store_true", help="Execute at most one command globally, then exit")
+    worker_service.add_argument("--max-commands", type=positive_int, help="Exit after executing this many commands")
+    worker_service.add_argument(
+        "--idle-exit-after",
+        type=float,
+        help="Exit after this many idle seconds; omit for a resident always-on process",
+    )
+
+    signal = sub.add_parser("signal", help="Record a signal and enqueue workflow continuation")
     signal.add_argument("workflow_ref", help="module:function; imported so the decider is registered")
     signal.add_argument("--db", required=True, type=Path)
     signal.add_argument("--id", required=True, dest="workflow_id")
@@ -473,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_via_uv(raw_argv, args)
     if args.command == "_run-engine":
         return run_engine_cli(args)
+    if args.command == "worker-service":
+        return run_worker_service_cli(args)
 
     read_only_commands = {"status", "list", "events", "outbox", "dashboard", "serve-dashboard"}
     engine = WorkflowEngine(args.db, read_only=args.command in read_only_commands)

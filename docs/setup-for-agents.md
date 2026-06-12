@@ -119,6 +119,16 @@ hermes-workflows resume-pending \
 
 `resume-pending` fails closed unless the registry entry has `trusted_resume: true`. Receipts are redacted JSON that can be pasted into Kanban comments or attached to dashboard artifacts.
 
+For autonomous step execution, run the resident worker service from the same registry instead of manually targeting one workflow id:
+
+```bash
+hermes-workflows worker-service \
+  --config .hermes/workflows.registry.json \
+  --worker-id workflows-local-worker
+```
+
+`worker-service` leases pending or lease-expired `run_workflow`, `run_step`, and child-workflow commands across configured DB sources, loads each workflow instance's stored `workflow_ref`, executes the command, and keeps looping until the run reaches the next durable wait or terminal state. The stored `workflow_ref` must match a workflow entry in the registry for that DB; DB-only sources are rejected so a poisoned SQLite row cannot make the resident worker import arbitrary local Python. Omit `--idle-exit-after` for an always-on supervisor/launchd process; use `--once` or `--max-commands` for tests and smoke runs. The older `worker --db --id <workflow_ref>` command remains a narrow manual drain for one known workflow.
+
 ## The mental model
 
 A workflow function is a decider. It replays from the top on every run, resolves completed steps from SQLite history, and exits cleanly whenever it needs a step, signal, or approval. Workers do not resume a suspended Python stack; they publish durable outputs/signals. The runner or supervisor re-runs the same entrypoint against the same DB/run id, and memoized values let control flow advance.
@@ -126,8 +136,10 @@ A workflow function is a decider. It replays from the top on every run, resolves
 ```text
 operator runs `hermes-workflows run <name-or-path>` or `uv run workflow.py`
   -> workflow emits missing commands and exits when waiting
-worker/adapter publishes output, signal, or approval
-  -> `hermes-workflows run --watch` or another trusted runner re-invokes the entrypoint
+resident `hermes-workflows worker-service --config ...` leases runnable step commands
+  -> step outputs are recorded and the decider is replayed to the next wait/terminal state
+adapters publish signals or approval decisions
+  -> `resume-trusted`/`resume-pending` or another trusted runner re-invokes the entrypoint
   -> completed calls replay from SQLite, then the decider reaches the next wait or terminal result
 ```
 

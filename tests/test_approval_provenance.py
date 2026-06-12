@@ -95,7 +95,8 @@ def test_human_approval_accepts_human_source_and_returns_provenance(tmp_path):
     first = engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
     assert first.status == "waiting"
 
-    result = WorkflowEngine(tmp_path / "workflow.sqlite").signal(
+    signaler = WorkflowEngine(tmp_path / "workflow.sqlite")
+    recorded = signaler.signal(
         "wf_approval",
         "approval.decision",
         key="approve_test_plan",
@@ -104,6 +105,8 @@ def test_human_approval_accepts_human_source_and_returns_provenance(tmp_path):
         idempotency_key="human-approval",
     )
 
+    assert recorded.status == "running"
+    result = signaler.drain("wf_approval")
     assert result.status == "completed"
     decision = result.result["decision"]
     assert decision["action"] == "approve"
@@ -169,6 +172,8 @@ def test_human_approval_rejects_wrong_human_source(tmp_path):
 def test_approval_decision_cannot_arrive_before_approval_request(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     first = engine.start(approval_after_step_workflow, {"plan": "needs prep"}, workflow_id="wf_approval")
+    assert first.status == "running"
+    first = engine.worker_once("wf_approval", worker_id="worker-a")
     assert first.status == "waiting"
     assert first.waiting_on == "step:prepare_approval_artifact:0"
 
@@ -182,7 +187,9 @@ def test_approval_decision_cannot_arrive_before_approval_request(tmp_path):
             idempotency_key="early-human-approval",
         )
 
-    after_step = engine.complete_step("wf_approval", "step:prepare_approval_artifact:0", {"plan": "needs prep"})
+    after_step_recorded = engine.complete_step("wf_approval", "step:prepare_approval_artifact:0", {"plan": "needs prep"})
+    assert after_step_recorded.status == "running"
+    after_step = engine.drain("wf_approval")
     assert after_step.status == "waiting"
     assert after_step.waiting_on == "signal:approval.decision:approve_test_plan"
     status = engine.workflow_status("wf_approval", recent_events=10)
@@ -192,7 +199,7 @@ def test_approval_decision_cannot_arrive_before_approval_request(tmp_path):
 def test_completed_workflow_rejects_conflicting_late_approval_signal(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
-    approved = engine.signal(
+    recorded = engine.signal(
         "wf_approval",
         "approval.decision",
         key="approve_test_plan",
@@ -200,6 +207,8 @@ def test_completed_workflow_rejects_conflicting_late_approval_signal(tmp_path):
         source=human_source("456"),
         idempotency_key="human-approval",
     )
+    assert recorded.status == "running"
+    approved = engine.drain("wf_approval")
     assert approved.status == "completed"
     before = engine.workflow_status("wf_approval", recent_events=20)
     before_event_count = before["event_count"]
@@ -225,7 +234,7 @@ def test_second_approval_decision_for_waiting_workflow_is_rejected(tmp_path):
     assert first.status == "waiting"
     assert first.waiting_on == "signal:approval.decision:approve_test_plan"
 
-    after_approval = engine.signal(
+    recorded = engine.signal(
         "wf_approval",
         "approval.decision",
         key="approve_test_plan",
@@ -233,6 +242,8 @@ def test_second_approval_decision_for_waiting_workflow_is_rejected(tmp_path):
         source=human_source("456"),
         idempotency_key="human-approval",
     )
+    assert recorded.status == "running"
+    after_approval = engine.drain("wf_approval")
     assert after_approval.status == "waiting"
     assert after_approval.waiting_on == "signal:followup.ready:continue"
 

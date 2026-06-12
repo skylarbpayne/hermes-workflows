@@ -179,7 +179,7 @@ def test_trusted_resumer_completes_plugin_recorded_resume_false_decision(tmp_pat
         resume=False,
     )
     assert recorded.status == "decision_recorded"
-    assert WorkflowEngine(db).workflow_status("wf_bridge_resume")["status"] == "waiting"
+    assert WorkflowEngine(db).workflow_status("wf_bridge_resume")["status"] == "running"
 
     receipt = TrustedResumer(registry).resume_trusted(
         "bridge",
@@ -243,7 +243,7 @@ def test_resume_pending_requires_trusted_allowlist_and_only_resumes_recorded_dec
         TrustedResumer(registry).resume_pending("trusted_bridge", db="untrusted")
     with pytest.raises(ValueError, match="does not match trusted registry DB alias"):
         TrustedResumer(registry).resume_pending("trusted_bridge", db=str(untrusted_db))
-    assert WorkflowEngine(untrusted_db).workflow_status("wf_untrusted")["status"] == "waiting"
+    assert WorkflowEngine(untrusted_db).workflow_status("wf_untrusted")["status"] == "running"
 
 
 def test_resume_pending_skips_same_db_workflow_ref_mismatch(tmp_path):
@@ -279,7 +279,7 @@ def test_resume_pending_skips_same_db_workflow_ref_mismatch(tmp_path):
     )
 
     assert TrustedResumer(registry).resume_pending("trusted_bridge", limit=5) == []
-    assert WorkflowEngine(db).workflow_status("wf_other")["status"] == "waiting"
+    assert WorkflowEngine(db).workflow_status("wf_other")["status"] == "running"
 
 
 def test_resume_pending_skips_same_db_same_ref_untrusted_registry_alias(tmp_path):
@@ -316,7 +316,7 @@ def test_resume_pending_skips_same_db_same_ref_untrusted_registry_alias(tmp_path
     assert TrustedResumer(registry).resume_pending("trusted_bridge", limit=5) == []
     with pytest.raises(ValueError, match="registry provenance"):
         TrustedResumer(registry).resume_trusted("trusted_bridge", workflow_id="wf_untrusted_same_ref")
-    assert WorkflowEngine(db).workflow_status("wf_untrusted_same_ref")["status"] == "waiting"
+    assert WorkflowEngine(db).workflow_status("wf_untrusted_same_ref")["status"] == "running"
 
 
 def test_resume_trusted_rejects_db_override_to_untrusted_same_ref_workflow(tmp_path):
@@ -355,7 +355,7 @@ def test_resume_trusted_rejects_db_override_to_untrusted_same_ref_workflow(tmp_p
         TrustedResumer(registry).resume_trusted("trusted_bridge", workflow_id="wf_untrusted_override", db="untrusted")
     with pytest.raises(ValueError, match="trusted registry DB alias"):
         TrustedResumer(registry).resume_trusted("trusted_bridge", workflow_id="wf_untrusted_override", db=str(untrusted_db))
-    assert WorkflowEngine(untrusted_db).workflow_status("wf_untrusted_override")["status"] == "waiting"
+    assert WorkflowEngine(untrusted_db).workflow_status("wf_untrusted_override")["status"] == "running"
 
 
 def test_resume_trusted_rejects_registry_ref_mismatch_and_prior_approval_only(tmp_path):
@@ -481,7 +481,7 @@ def test_invoke_cli_and_resume_trusted_cli_bridge_plugin_recorded_decision(tmp_p
     assert invoke_payload["status"] == "waiting"
     assert invoke_receipt.exists()
 
-    # Simulate plugin/gateway resume=false: decision is recorded, but the workflow remains waiting.
+    # Simulate plugin/gateway resume=false: decision is recorded and continuation is queued.
     WorkflowEngine(db).submit_approval_decision(
         ApprovalDecisionInput(
             workflow_id="wf_cli_bridge",
@@ -492,7 +492,7 @@ def test_invoke_cli_and_resume_trusted_cli_bridge_plugin_recorded_decision(tmp_p
         ),
         resume=False,
     )
-    assert WorkflowEngine(db).workflow_status("wf_cli_bridge")["status"] == "waiting"
+    assert WorkflowEngine(db).workflow_status("wf_cli_bridge")["status"] == "running"
 
     resume_payload = json.loads(
         run_cli(
@@ -577,7 +577,7 @@ def test_resume_trusted_cli_rejects_db_override_to_untrusted_same_ref_workflow(t
     assert by_path.returncode != 0
     assert "trusted registry DB alias" in by_alias.stderr
     assert "trusted registry DB alias" in by_path.stderr
-    assert WorkflowEngine(untrusted_db).workflow_status("wf_cli_untrusted_override")["status"] == "waiting"
+    assert WorkflowEngine(untrusted_db).workflow_status("wf_cli_untrusted_override")["status"] == "running"
 
 
 def test_invoke_cli_import_failure_does_not_create_db(tmp_path):

@@ -531,7 +531,7 @@ def test_email_triage_demo_default_output_dir_is_dated_and_omits_raw_db_path(tmp
     assert str(db) not in persisted_and_written
 
 
-def test_plugin_style_record_only_approval_keeps_workflow_waiting_and_records_provenance(tmp_path: Path):
+def test_plugin_style_record_only_approval_keeps_workflow_queued_and_records_provenance(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     output_dir = tmp_path / "dist" / "email-triage-demo-2026-06-06"
     engine = WorkflowEngine(db)
@@ -564,7 +564,7 @@ def test_plugin_style_record_only_approval_keeps_workflow_waiting_and_records_pr
 
     status = WorkflowEngine(db, read_only=True).workflow_status("wf_email_triage_record_only")
     approval = _approval(status)
-    assert status["status"] == "waiting"
+    assert status["status"] == "running"
     assert approval["status"] == "approve"
     assert approval["source"] == {"kind": "human", "id": "operator", "channel": "discord", "message_id": "approval-msg-1"}
 
@@ -659,6 +659,8 @@ def test_direct_approval_signal_sanitizes_metadata_before_resume_and_artifact_wr
         idempotency_key="discord://thread/email-triage-demo/direct-signal-private-metadata",
     )
 
+    assert result.status == "running"
+    result = engine.drain("wf-email-triage-direct-signal-private-approval", initial=result)
     assert result.status == "completed"
     triage_packet = json.loads(Path(result.result["created_or_updated_paths"]["triage_packet"]).read_text(encoding="utf-8"))
     with sqlite3.connect(db) as con:

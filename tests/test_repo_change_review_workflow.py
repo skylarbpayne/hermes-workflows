@@ -26,6 +26,12 @@ def init_repo(path: Path) -> None:
     )
 
 
+def _drain_signal(db: Path, workflow_id: str, signal_type: str, **kwargs):
+    engine = WorkflowEngine(db)
+    result = engine.signal(workflow_id, signal_type, **kwargs)
+    return engine.drain(workflow_id, initial=result)
+
+
 def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_approval(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -49,7 +55,8 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
     assert first.status == "waiting"
     assert first.waiting_on == "signal:approval.decision:approve_change_plan"
 
-    after_plan = WorkflowEngine(db).signal(
+    after_plan = _drain_signal(
+        db,
         "wf_change",
         "approval.decision",
         key="approve_change_plan",
@@ -63,7 +70,8 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
     (repo / "README.md").write_text("# Demo\n\nChanged.\n")
     (repo / "NEW.md").write_text("new file\n")
 
-    after_ready = WorkflowEngine(db).signal(
+    after_ready = _drain_signal(
+        db,
         "wf_change",
         "implementation.ready",
         key="change_ready",
@@ -73,7 +81,8 @@ def test_repo_change_review_pauses_for_plan_then_implementation_then_landing_app
     assert after_ready.status == "waiting"
     assert after_ready.waiting_on == "signal:approval.decision:approve_change_landing"
 
-    landing = WorkflowEngine(db).signal(
+    landing = _drain_signal(
+        db,
         "wf_change",
         "approval.decision",
         key="approve_change_landing",
@@ -120,7 +129,8 @@ def test_repo_change_review_rejects_landing_when_approver_is_implementer(tmp_pat
         },
         workflow_id="wf_change",
     )
-    WorkflowEngine(db).signal(
+    _drain_signal(
+        db,
         "wf_change",
         "approval.decision",
         key="approve_change_plan",
@@ -129,7 +139,8 @@ def test_repo_change_review_rejects_landing_when_approver_is_implementer(tmp_pat
         idempotency_key="plan-approval",
     )
     (repo / "README.md").write_text("# Demo\n\nChanged.\n")
-    WorkflowEngine(db).signal(
+    _drain_signal(
+        db,
         "wf_change",
         "implementation.ready",
         key="change_ready",
@@ -137,7 +148,8 @@ def test_repo_change_review_rejects_landing_when_approver_is_implementer(tmp_pat
         idempotency_key="implementation-ready",
     )
 
-    landing = WorkflowEngine(db).signal(
+    landing = _drain_signal(
+        db,
         "wf_change",
         "approval.decision",
         key="approve_change_landing",
