@@ -1658,8 +1658,25 @@ class WorkflowEngine:
             return self._result_from_instance(workflow_id)
 
         ctx = WorkflowContext(self, workflow_id)
+        inputs = JsonCodec.loads(instance["input_json"])
         try:
-            result = _run_maybe_async(workflow_fn(ctx, JsonCodec.loads(instance["input_json"])))
+            from .authoring import bind_workflow_context, reset_workflow_context
+
+            token = bind_workflow_context(ctx)
+            try:
+                signature = inspect.signature(workflow_fn)
+                positional = [
+                    parameter
+                    for parameter in signature.parameters.values()
+                    if parameter.kind
+                    in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                ]
+                if len(positional) <= 1:
+                    result = _run_maybe_async(workflow_fn(inputs))
+                else:
+                    result = _run_maybe_async(workflow_fn(ctx, inputs))
+            finally:
+                reset_workflow_context(token)
         except WorkflowCancelled:
             return self._result_from_instance(workflow_id)
         except WorkflowWaiting as waiting:
@@ -2438,17 +2455,34 @@ class WorkflowContext:
         *,
         block: bool = True,
         payload_builder: Optional[Callable[[], Dict[str, Any]]] = None,
+        key: str | None = None,
     ) -> Any:
         self._raise_if_cancelled()
-        call_index = self._step_call_counts.get(step_name, 0)
-        self._step_call_counts[step_name] = call_index + 1
-        key = f"step:{step_name}:{call_index}"
+        if key is None:
+            call_index = self._step_call_counts.get(step_name, 0)
+            self._step_call_counts[step_name] = call_index + 1
+            key = f"step:{step_name}:{call_index}"
 
+        payload: Dict[str, Any] | None = None
         completed = self._last_event("StepCompleted", key)
         if completed is not None:
+            if payload_builder is not None:
+                payload = payload_builder()
+                if payload.get("step_name") != step_name:
+                    raise ValueError("payload_builder step_name must match durable step name")
+                requested = self._last_event("StepRequested", key)
+                if requested is not None:
+                    _validate_step_request_fingerprint(key, requested, payload)
             return completed["output"]
 
-        if self._last_event("StepRequested", key) is None:
+        requested = self._last_event("StepRequested", key)
+        if requested is not None and payload_builder is not None:
+            payload = payload_builder()
+            if payload.get("step_name") != step_name:
+                raise ValueError("payload_builder step_name must match durable step name")
+            _validate_step_request_fingerprint(key, requested, payload)
+
+        if requested is None:
             if payload_builder is None:
                 payload = {"step_name": step_name, "args": list(args), "kwargs": kwargs}
             else:
@@ -2523,6 +2557,30 @@ class WorkflowContext:
             raise WorkflowWaiting(gather_key)
 
         return results
+
+
+    async def wait_for_pending_group(
+        self,
+        wait_key: str,
+        pending: List[str],
+        *,
+        kind: str = "parallel",
+        limit: int | None = None,
+    ) -> None:
+        if pending:
+            with self.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._raise_if_cancelled_in_connection(con)
+                self.engine._append_event(
+                    con,
+                    self.workflow_id,
+                    "ParallelWaiting" if kind == "parallel" else "GroupWaiting",
+                    key=wait_key,
+                    payload={"pending": pending, "limit": limit, "kind": kind},
+                    idempotency_key=f"{kind}-waiting:{wait_key}",
+                    ignore_duplicate=True,
+                )
+            raise WorkflowWaiting(wait_key)
 
     async def start_child(
         self,
@@ -3127,6 +3185,28 @@ def _child_workflow_diagnostic_message(label: str) -> str:
         "child_workflow_terminal_unreconciled": "Child workflow is terminal; parent has not reconciled it yet.",
     }
     return messages.get(label, "Child workflow has an unknown diagnostic state.")
+
+
+def _step_request_fingerprint(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    args = payload.get("args")
+    if not isinstance(args, list) or not args:
+        return None
+    request = args[0]
+    if not isinstance(request, dict):
+        return None
+    fingerprint = request.get("fingerprint")
+    return str(fingerprint) if fingerprint is not None else None
+
+
+def _validate_step_request_fingerprint(step_key: str, stored_payload: Any, current_payload: Any) -> None:
+    stored = _step_request_fingerprint(stored_payload)
+    current = _step_request_fingerprint(current_payload)
+    if stored is None or current is None:
+        return
+    if stored != current:
+        raise ValueError(f"step {step_key} fingerprint changed; refusing to replay saved output")
 
 
 def _diagnostic_message(label: str) -> str:

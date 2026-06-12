@@ -214,20 +214,39 @@ async def agent_step(ctx: Any, request: dict[str, Any]) -> Any:
 
 
 def _build_runner_request(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
-    rendered_prompt = render_prompt(request["prompt"], request["variables"])
-    return {
+    variables = request.get("variables", {})
+    rendered_prompt = request.get("rendered_prompt") or render_prompt(request["prompt"], variables)
+    runner_request = {
         "kind": "agent_step.runner_request.v1",
         "name": request["name"],
         "prompt": request["prompt"],
         "prompt_sha256": request["prompt_sha256"],
         "rendered_prompt": rendered_prompt,
-        "rendered_prompt_sha256": _sha256_text(rendered_prompt),
-        "variables": request["variables"],
-        "variables_sha256": request["variables_sha256"],
+        "rendered_prompt_sha256": request.get("rendered_prompt_sha256") or _sha256_text(rendered_prompt),
+        "variables": variables,
+        "variables_sha256": request.get("variables_sha256") or _sha256_json(variables),
         "returns": request["returns"],
         "workflow_id": ctx.workflow_id,
         "step_key": ctx.step_key,
     }
+    for key in (
+        "input",
+        "input_sha256",
+        "context",
+        "context_sha256",
+        "fingerprint",
+        "tools",
+        "skills",
+        "files",
+        "model",
+        "variant",
+        "isolation",
+        "timeout",
+        "budget",
+    ):
+        if key in request:
+            runner_request[key] = request[key]
+    return runner_request
 
 
 def render_prompt(template: str, variables: dict[str, Any]) -> str:
