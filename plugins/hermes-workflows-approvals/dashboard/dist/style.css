@@ -6,6 +6,9 @@
 .hwf-shell {
   --hwf-surface: color-mix(in srgb, var(--color-card), black 8%);
   --hwf-border: var(--color-border);
+  --hwf-code-keyword: color-mix(in srgb, var(--color-foreground), var(--color-primary) 26%);
+  --hwf-code-string: color-mix(in srgb, var(--color-foreground), #8fd6a3 34%);
+  --hwf-code-comment: color-mix(in srgb, var(--color-muted-foreground), var(--color-foreground) 14%);
 }
 
 .hwf-header,
@@ -438,16 +441,16 @@
 }
 
 .hwf-code-keyword {
-  color: #c084fc;
-  font-weight: 700;
+  color: var(--hwf-code-keyword);
+  font-weight: 600;
 }
 
 .hwf-code-string {
-  color: #86efac;
+  color: var(--hwf-code-string);
 }
 
 .hwf-code-comment {
-  color: var(--color-muted-foreground);
+  color: var(--hwf-code-comment);
   font-style: italic;
 }
 

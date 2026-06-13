@@ -196,6 +196,19 @@ def test_dashboard_frontend_exposes_workflow_code_and_run_dag_affordances():
     assert ".hwf-dag-node-selected" in style_css
 
 
+def test_dashboard_code_highlighting_uses_subtle_token_colors_instead_of_loud_highlights():
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+    keyword_rule = style_css[style_css.index(".hwf-code-keyword {") : style_css.index(".hwf-code-string {")]
+
+    assert "--hwf-code-keyword" in style_css
+    assert "--hwf-code-string" in style_css
+    assert "--hwf-code-comment" in style_css
+    assert "color: var(--hwf-code-keyword)" in keyword_rule
+    assert "font-weight: 700" not in keyword_rule
+    assert "color: #c084fc" not in style_css
+    assert "color: #86efac" not in style_css
+
+
 def test_dashboard_frontend_exposes_visual_run_dag_graph():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
     style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
