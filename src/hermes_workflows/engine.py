@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
-from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView
+from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
 from .workflow_values import Workflow
 
 
@@ -221,6 +221,24 @@ class WorkflowEngine:
             self._enqueue_workflow_run_row(con, workflow_id, reason="step_completed", source_key=step_key)
         return self._result_from_instance(workflow_id)
 
+    def _approval_request_kind(self, workflow_id: str, key: str) -> str | None:
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT payload_json
+                FROM workflow_events
+                WHERE workflow_id = ? AND type = 'ApprovalRequested' AND key = ?
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (workflow_id, f"approval:{key}"),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = JsonCodec.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            return None
+        return str(payload.get("kind")) if payload.get("kind") is not None else None
+
     def signal(
         self,
         workflow_id: str,
@@ -233,11 +251,14 @@ class WorkflowEngine:
     ) -> RunResult:
         self._ensure_writable("record workflow signals")
         instance = self._instance(workflow_id)
-        if signal_type == "approval.decision":
-            payload = _sanitize_approval_decision_payload(payload)
-            source = _sanitize_approval_source(source)
+        if signal_type in {"approval.decision", "operator.response"}:
+            if signal_type == "approval.decision":
+                payload = _normalize_approval_decision_payload(payload)
+                source = _normalize_operator_source(source)
+            else:
+                source = _normalize_operator_source(source)
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
-        if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type != "approval.decision":
+        if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type not in {"approval.decision", "operator.response"}:
             return self._result_from_instance(workflow_id)
 
         inserted = False
@@ -247,19 +268,20 @@ class WorkflowEngine:
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
             if row["status"] in TERMINAL_WORKFLOW_STATUSES:
-                if signal_type == "approval.decision":
-                    self._validate_approval_decision_signal(
+                if signal_type in {"approval.decision", "operator.response"}:
+                    self._validate_operator_response_signal(
                         workflow_id,
                         key,
                         payload,
                         source,
                         dedupe,
+                        signal_type=signal_type,
                         con=con,
                         require_existing=row["status"] == "completed",
                     )
                 return self._result_from_row(row)
-            if signal_type == "approval.decision":
-                self._validate_approval_decision_signal(workflow_id, key, payload, source, dedupe, con=con)
+            if signal_type in {"approval.decision", "operator.response"}:
+                self._validate_operator_response_signal(workflow_id, key, payload, source, dedupe, signal_type=signal_type, con=con)
 
             inserted = self._append_event(
                 con,
@@ -288,7 +310,7 @@ class WorkflowEngine:
                     """,
                     (_now(), workflow_id),
                 )
-                if signal_type == "approval.decision":
+                if signal_type in {"approval.decision", "operator.response"}:
                     con.execute(
                         """
                         UPDATE workflow_commands_outbox
@@ -351,6 +373,48 @@ class WorkflowEngine:
                 workflow_approvals = [approval for approval in workflow_approvals if approval.status == status]
             approvals.extend(workflow_approvals)
         return approvals
+
+    def list_operator_steps(self, *, status: str | None = "waiting") -> list[dict[str, Any]]:
+        """Return human/operator steps across workflows.
+
+        Approval remains as a compatibility/policy preset. Typed human input
+        and future human checkpoints should appear here, not as approval cards.
+        """
+
+        with self._connect() as con:
+            if status == "waiting":
+                rows = con.execute(
+                    """
+                    SELECT id, workflow_name, workflow_ref, status, waiting_on
+                    FROM workflow_instances
+                    WHERE status NOT IN ('completed', 'failed', 'cancelled')
+                    ORDER BY updated_at DESC, created_at DESC, id ASC
+                    """
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT id, workflow_name, workflow_ref, status, waiting_on
+                    FROM workflow_instances
+                    ORDER BY updated_at DESC, created_at DESC, id ASC
+                    """
+                ).fetchall()
+        operator_steps: list[dict[str, Any]] = []
+        for row in rows:
+            for step in self._operator_step_summaries(self.events(row["id"])):
+                if status is not None and step.get("status") != status:
+                    continue
+                operator_steps.append(
+                    {
+                        "db_path": str(self.db_path),
+                        "workflow_id": row["id"],
+                        "workflow_name": row["workflow_name"],
+                        "workflow_ref": row["workflow_ref"],
+                        "waiting_on": row["waiting_on"],
+                        **step,
+                    }
+                )
+        return operator_steps
 
     def get_approval(self, workflow_id: str, key: str) -> ApprovalView:
         row = self._instance(workflow_id)
@@ -486,6 +550,111 @@ class WorkflowEngine:
             workflow_ref=row["workflow_ref"],
         )
 
+    def submit_operator_response(
+        self,
+        *,
+        workflow_id: str,
+        key: str,
+        payload: Dict[str, Any],
+        source: Dict[str, Any],
+        idempotency_key: str | None = None,
+        resume: bool = True,
+    ) -> OperatorResponseReceipt:
+        """Record a general human/operator response.
+
+        This is the neutral substrate for ask(...). Approval decisions are a
+        preset wrapper over the same operator-step lifecycle, not the base
+        concept.
+        """
+
+        normalized_source = _normalize_operator_source(source)
+        if resume:
+            result = self.signal(
+                workflow_id,
+                "operator.response",
+                key=key,
+                payload=payload,
+                source=normalized_source,
+                idempotency_key=idempotency_key,
+            )
+            with self._connect() as con:
+                row = con.execute("SELECT workflow_ref FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                workflow_ref = row["workflow_ref"] if row is not None else None
+            return OperatorResponseReceipt(
+                workflow_id=workflow_id,
+                key=key,
+                action=str(payload.get("action") or "answered"),
+                by=str(payload.get("by") or normalized_source.get("id") or "operator"),
+                source=normalized_source,
+                status=result.status,
+                waiting_on=result.waiting_on,
+                result_summary=result.result if isinstance(result.result, dict) else None,
+                workflow_ref=workflow_ref,
+            )
+
+        dedupe = idempotency_key or f"operator:{workflow_id}:{key}:{JsonCodec.dumps(payload)}"
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown workflow_id: {workflow_id}")
+            self._validate_operator_response_signal(workflow_id, key, payload, normalized_source, dedupe, signal_type="operator.response", con=con)
+            inserted = self._append_event(
+                con,
+                workflow_id,
+                "SignalReceived",
+                key=f"signal:operator.response:{key}",
+                payload={"signal_type": "operator.response", "key": key, "payload": payload, "source": normalized_source},
+                idempotency_key=dedupe,
+                ignore_duplicate=True,
+            )
+            if inserted:
+                self._append_signal_step_completed(
+                    con,
+                    workflow_id,
+                    signal_type="operator.response",
+                    key=key,
+                    output=payload,
+                    source=normalized_source,
+                    idempotency_key=dedupe,
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                    WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
+                    """,
+                    (_now(), workflow_id, f"approval:{key}"),
+                )
+                con.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET status = 'running', updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
+                    """,
+                    (_now(), workflow_id),
+                )
+                self._enqueue_workflow_run_row(
+                    con,
+                    workflow_id,
+                    reason="operator_response",
+                    source_key=key,
+                )
+            row = con.execute("SELECT workflow_ref, waiting_on FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+            workflow_ref = row["workflow_ref"] if row is not None else None
+            waiting_on = row["waiting_on"] if row is not None else None
+        return OperatorResponseReceipt(
+            workflow_id=workflow_id,
+            key=key,
+            action=str(payload.get("action") or "answered"),
+            by=str(payload.get("by") or normalized_source.get("id") or "operator"),
+            source=normalized_source,
+            status="response_recorded",
+            waiting_on=waiting_on,
+            result_summary=None,
+            workflow_ref=workflow_ref,
+        )
+
     def _approval_views_for_workflow(self, row: sqlite3.Row) -> list[ApprovalView]:
         events = self.events(row["id"])
         summaries = self._approval_summaries(events)
@@ -510,8 +679,9 @@ class WorkflowEngine:
                     status=str(summary.get("status") or "waiting"),
                     prompt=summary.get("prompt"),
                     artifact=summary.get("artifact"),
+                    schema=summary.get("schema"),
                     approver=summary.get("approver"),
-                    allowed=list(summary.get("allowed") or ["approve", "reject"]),
+                    allowed=list(summary.get("allowed") or []),
                     authority=summary.get("authority"),
                     timeout=summary.get("timeout"),
                     waiting_on=row["waiting_on"],
@@ -523,7 +693,7 @@ class WorkflowEngine:
             )
         return views
 
-    def _validate_approval_decision_signal(
+    def _validate_operator_response_signal(
         self,
         workflow_id: str,
         key: str,
@@ -531,21 +701,23 @@ class WorkflowEngine:
         source: Any,
         idempotency_key: str,
         *,
+        signal_type: str,
         con: sqlite3.Connection | None = None,
         require_existing: bool = False,
     ) -> None:
         if not isinstance(payload, dict):
-            raise ValueError(f"approval {key} decision payload must be an object")
+            raise ValueError(f"operator step {key} response payload must be an object")
 
         event_key = f"approval:{key}"
         if con is None:
             with self._connect() as read_con:
-                self._validate_approval_decision_signal(
+                self._validate_operator_response_signal(
                     workflow_id,
                     key,
                     payload,
                     source,
                     idempotency_key,
+                    signal_type=signal_type,
                     con=read_con,
                     require_existing=require_existing,
                 )
@@ -567,37 +739,50 @@ class WorkflowEngine:
             WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
             ORDER BY seq DESC LIMIT 1
             """,
-            (workflow_id, f"signal:approval.decision:{key}"),
+            (workflow_id, f"signal:{signal_type}:{key}"),
         ).fetchone()
 
         if existing_decision is not None:
             if existing_decision["idempotency_key"] == idempotency_key:
                 existing_payload = JsonCodec.loads(existing_decision["payload_json"])
-                expected_payload = {"signal_type": "approval.decision", "key": key, "payload": payload, "source": source}
+                expected_payload = {"signal_type": signal_type, "key": key, "payload": payload, "source": source}
                 if existing_payload == expected_payload:
                     return
-                raise ValueError(f"approval {key} idempotency key was reused with a different decision")
-            raise ValueError(f"approval {key} already has a recorded decision")
+                raise ValueError(f"operator step {key} idempotency key was reused with a different decision/response")
+            raise ValueError(f"operator step {key} already has a recorded decision/response")
 
         if require_existing:
-            raise ValueError(f"approval {key} has no recorded decision to replay")
+            raise ValueError(f"operator step {key} has no recorded response to replay")
 
         if row is None:
-            raise ValueError(f"approval {key} has no matching ApprovalRequested event")
+            raise ValueError(f"operator step {key} has no matching ApprovalRequested event/request")
 
         request_payload = JsonCodec.loads(row["payload_json"])
         if not isinstance(request_payload, dict):
-            raise ValueError(f"approval {key} has invalid ApprovalRequested payload")
+            raise ValueError(f"operator step {key} has invalid ApprovalRequested/request payload")
 
+        is_human_input = request_payload.get("kind") in {"human_input.request.v1", "operator.request.v1"}
         allowed = request_payload.get("allowed") or ["approve", "reject"]
-        if payload.get("action") not in allowed:
-            raise ValueError(f"approval {key} action is not allowed: {payload.get('action')}")
+        if not is_human_input and payload.get("action") not in allowed:
+            raise ValueError(f"operator step {key} action is not allowed: {payload.get('action')}")
 
-        _validate_approval_source(
+        _validate_operator_source(
             key,
             str(request_payload.get("approver") or "human"),
             payload,
             source,
+            require_decision_by=not is_human_input,
+        )
+
+    def _validate_approval_decision_signal(self, workflow_id: str, key: str, payload: Any, source: Any, idempotency_key: str, **kwargs: Any) -> None:
+        self._validate_operator_response_signal(
+            workflow_id,
+            key,
+            payload,
+            source,
+            idempotency_key,
+            signal_type="approval.decision",
+            **kwargs,
         )
 
     def cancel_workflow(
@@ -1140,6 +1325,7 @@ class WorkflowEngine:
         events = self.events(workflow_id)
         pending_commands = self._active_commands(workflow_id)
         child_workflows = self._child_workflow_summaries(row, events)
+        steps = self._step_summaries(events)
         status = {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
@@ -1157,7 +1343,8 @@ class WorkflowEngine:
             "diagnostics": self._command_diagnostics(pending_commands),
             "child_workflows": child_workflows,
             "approvals": self._approval_summaries(events),
-            "steps": self._step_summaries(events),
+            "operator_steps": self._operator_step_summaries(events, steps=steps),
+            "steps": steps,
         }
         if command_history is not None:
             history, truncated = self._command_history(
@@ -1233,7 +1420,7 @@ class WorkflowEngine:
             if event["type"] != "SignalReceived":
                 continue
             payload = event["payload"] or {}
-            if payload.get("signal_type") != "approval.decision":
+            if payload.get("signal_type") not in {"approval.decision", "operator.response"}:
                 continue
             decisions[payload.get("key")] = payload
 
@@ -1246,11 +1433,20 @@ class WorkflowEngine:
             decision_event = decisions.get(key)
             decision = decision_event.get("payload") if decision_event else None
             source = decision_event.get("source") if decision_event else None
+            kind = payload.get("kind")
+            if kind in {"human_input.request.v1", "operator.request.v1"}:
+                continue
             status = (decision or {}).get("action", "waiting")
             validation_error = None
             if decision_event is not None:
                 try:
-                    _validate_approval_source(str(key), str(payload.get("approver") or "human"), decision or {}, source)
+                    _validate_approval_source(
+                        str(key),
+                        str(payload.get("approver") or "human"),
+                        decision or {},
+                        source,
+                        require_decision_by=payload.get("kind") != "human_input.request.v1",
+                    )
                 except ValueError as exc:
                     status = "invalid_decision"
                     validation_error = str(exc)
@@ -1260,6 +1456,7 @@ class WorkflowEngine:
                 "approver": payload.get("approver"),
                 "prompt": payload.get("prompt"),
                 "artifact": payload.get("artifact"),
+                "schema": payload.get("schema"),
                 "allowed": payload.get("allowed") or ["approve", "reject"],
                 "authority": payload.get("authority"),
                 "timeout": payload.get("timeout"),
@@ -1271,6 +1468,27 @@ class WorkflowEngine:
                 summary["validation_error"] = validation_error
             approvals.append(summary)
         return approvals
+
+    def _operator_step_summaries(self, events: List[Dict[str, Any]], *, steps: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        step_summaries = steps if steps is not None else self._step_summaries(events)
+        operator_steps: list[dict[str, Any]] = []
+        for step in step_summaries:
+            step_type = step.get("step_type")
+            completion_mode = step.get("completion_mode")
+            if step_type != "operator" and completion_mode != "operator":
+                continue
+            item = dict(step)
+            item["kind"] = "operator"
+            item.setdefault("prompt", item.get("label"))
+            if "request" in item:
+                request = item.get("request") or {}
+                if isinstance(request, dict):
+                    item.setdefault("artifact", request.get("artifact"))
+                    item.setdefault("schema", request.get("schema"))
+                    item.setdefault("approver", request.get("approver"))
+                    item.setdefault("timeout", request.get("timeout"))
+            operator_steps.append(item)
+        return operator_steps
 
     def _step_summaries(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Return operator-facing step state derived from durable events.
@@ -1310,12 +1528,14 @@ class WorkflowEngine:
                     continue
                 step = ensure(step_id, first_seq=seq)
                 mode = payload.get("completion_mode")
-                step["status"] = "waiting" if mode in {"approval", "worker", "agent"} else "requested"
+                step["status"] = "waiting" if mode in {"approval", "operator", "worker", "agent"} else "requested"
                 step["label"] = payload.get("step_name") or payload.get("label") or step.get("label") or step_id
                 if mode:
                     step["completion_mode"] = mode
                 if payload.get("step_type"):
                     step["step_type"] = payload.get("step_type")
+                if payload.get("request") is not None and mode == "operator":
+                    step["request"] = payload.get("request")
                 step["last_seq"] = seq
                 continue
 
@@ -1324,12 +1544,13 @@ class WorkflowEngine:
                 if not step_id:
                     continue
                 step = ensure(step_id, first_seq=seq)
+                is_human_input = payload.get("kind") in {"human_input.request.v1", "operator.request.v1"}
                 step.update(
                     {
                         "status": "completed" if step.get("status") == "completed" else "waiting",
                         "label": payload.get("prompt") or step.get("label") or step_id,
-                        "completion_mode": "approval",
-                        "step_type": "approval",
+                        "completion_mode": "operator" if is_human_input else "approval",
+                        "step_type": "operator" if is_human_input else "approval",
                         "requested_seq": seq,
                     }
                 )
@@ -1389,6 +1610,10 @@ class WorkflowEngine:
                     step_id = str(payload.get("key") or "")
                     mode = "approval"
                     step_type = "approval"
+                elif signal_type == "operator.response":
+                    step_id = str(payload.get("key") or "")
+                    mode = "operator"
+                    step_type = "operator"
                 elif signal_type == "agent.completed":
                     step_id = str(payload.get("key") or "")
                     mode = "agent"
@@ -1473,6 +1698,9 @@ class WorkflowEngine:
         if signal_type == "approval.decision":
             completion_mode = "approval"
             step_type = "approval"
+        elif signal_type == "operator.response":
+            completion_mode = "operator"
+            step_type = "operator"
         elif signal_type == "agent.completed":
             completion_mode = "agent"
             step_type = "agent"
@@ -2827,6 +3055,29 @@ class WorkflowContext:
             return PendingStep(agent_key)
         return await self.wait_for(signal_type, key=agent_key)
 
+    async def _request_human_input(
+        self,
+        prompt: str,
+        *,
+        key: str,
+        artifact: Any = None,
+        schema: str = "json",
+        approver: str = "human",
+        timeout: Optional[str] = None,
+        block: bool = True,
+    ) -> Any:
+        """Private substrate for ask(...): request typed human/operator input."""
+
+        return await self.approval.request_input(
+            prompt,
+            key=key,
+            artifact=artifact,
+            schema=schema,
+            approver=approver,
+            timeout=timeout,
+            block=block,
+        )
+
     def _last_event(self, event_type: str, key: str) -> Optional[Any]:
         with self.engine._connect() as con:
             row = con.execute(
@@ -2881,12 +3132,14 @@ class ApprovalClient:
 
     def _emit_request_if_missing(self, con: sqlite3.Connection, *, key: str, payload: Dict[str, Any]) -> None:
         event_key = f"approval:{key}"
+        request_kind = payload.get("kind")
+        is_human_input = request_kind in {"human_input.request.v1", "operator.request.v1"}
         self.ctx.engine._append_step_requested(
             con,
             self.ctx.workflow_id,
             key,
-            completion_mode="approval",
-            step_type="approval",
+            completion_mode="operator" if is_human_input else "approval",
+            step_type="operator" if is_human_input else "approval",
             label=str(payload.get("prompt") or key),
             payload=payload,
         )
@@ -2905,6 +3158,9 @@ class ApprovalClient:
     def _decision_event(self, key: str) -> Optional[Any]:
         return self.ctx._last_event("SignalReceived", f"signal:approval.decision:{key}")
 
+    def _operator_response_event(self, key: str) -> Optional[Any]:
+        return self.ctx._last_event("SignalReceived", f"signal:operator.response:{key}")
+
     def _validate_decision(self, *, key: str, approver: str, allowed: List[str], decision_event: Dict[str, Any]) -> ApprovalDecision:
         decision = decision_event["payload"]
         if decision.get("action") not in allowed:
@@ -2918,6 +3174,7 @@ class ApprovalClient:
             reason=decision.get("reason"),
             message=decision.get("message"),
             comment=decision.get("comment"),
+            direct_feedback=decision.get("feedback"),
         )
 
     async def request(
@@ -2956,6 +3213,55 @@ class ApprovalClient:
             return await self.ctx.wait_for("approval.decision", key=key)
 
         return self._validate_decision(key=key, approver=approver, allowed=allowed_values, decision_event=decision_event)
+
+    async def request_input(
+        self,
+        prompt: str,
+        *,
+        key: str,
+        artifact: Any = None,
+        schema: str = "json",
+        approver: str = "human",
+        timeout: Optional[str] = None,
+        block: bool = True,
+    ) -> Any:
+        """Request typed human/operator input using the approval decision substrate."""
+
+        self.ctx._raise_if_cancelled()
+        key = self._key_for_request(prompt, key)
+        event_key = f"approval:{key}"
+        payload = {
+            "kind": "operator.request.v1",
+            "prompt": prompt,
+            "key": key,
+            "artifact": artifact,
+            "schema": schema,
+            "approver": approver,
+            "allowed": None,
+            "authority": [],
+            "timeout": timeout,
+        }
+        if self.ctx._last_event("ApprovalRequested", event_key) is None:
+            with self.ctx.engine._connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self.ctx._raise_if_cancelled_in_connection(con)
+                self._emit_request_if_missing(con, key=key, payload=payload)
+
+        decision_event = self._operator_response_event(key)
+        if decision_event is None:
+            if not block:
+                return PendingStep(key)
+            return await self.ctx.wait_for("operator.response", key=key)
+
+        raw_payload = decision_event["payload"]
+        _validate_operator_source(
+            key,
+            approver,
+            raw_payload if isinstance(raw_payload, dict) else {},
+            decision_event.get("source"),
+            require_decision_by=False,
+        )
+        return raw_payload
 
     async def request_many(
         self,
@@ -3042,74 +3348,77 @@ class ApprovalClient:
         return decisions
 
 
-_APPROVAL_SOURCE_ALLOWLIST = ("kind", "id", "channel", "message_url", "message_id", "event_id")
-_APPROVAL_PRIVATE_MARKERS = ("@", "secret", "token", "password", "credential", "raw_", "raw ", "api_key")
+_OPERATOR_SOURCE_ALLOWLIST = ("kind", "id", "channel", "message_url", "message_id", "event_id")
 
 
-def _approval_value_looks_private(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    lowered = value.lower()
-    return any(marker in lowered for marker in _APPROVAL_PRIVATE_MARKERS)
-
-
-def _sanitize_approval_decision_payload(payload: Any) -> Any:
+def _normalize_approval_decision_payload(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
-    sanitized: Dict[str, Any] = {}
+    normalized: Dict[str, Any] = {}
     for key in ("action", "by"):
         value = payload.get(key)
         if isinstance(value, str) and value:
-            sanitized[key] = value
-    for key in ("note", "reason", "message", "comment"):
+            normalized[key] = value
+    for key in ("feedback", "note", "reason", "message", "comment"):
         value = payload.get(key)
         if value is not None:
-            sanitized[key] = _sanitize_approval_text(str(value))
-    return sanitized
+            normalized[key] = str(value)
+    return normalized
 
 
-def _sanitize_approval_source(source: Any) -> Dict[str, Any]:
+def _normalize_operator_source(source: Any) -> Dict[str, Any]:
     if not isinstance(source, dict):
         return {}
-    sanitized: Dict[str, Any] = {}
-    for key in _APPROVAL_SOURCE_ALLOWLIST:
+    normalized: Dict[str, Any] = {}
+    for key in _OPERATOR_SOURCE_ALLOWLIST:
         value = source.get(key)
         if not isinstance(value, str) or not value:
             continue
-        if not _approval_value_looks_private(value):
-            sanitized[key] = value
-        elif key in {"message_url", "message_id", "event_id"} and "event_id" not in sanitized:
-            sanitized["event_id"] = f"redacted:{_hash_text(value)[:12]}"
-    return sanitized
+        normalized[key] = value
+    return normalized
+
+
+def _sanitize_approval_decision_payload(payload: Any) -> Any:
+    return _normalize_approval_decision_payload(payload)
+
+
+def _sanitize_approval_source(source: Any) -> Dict[str, Any]:
+    return _normalize_operator_source(source)
 
 
 def _sanitize_approval_text(value: str) -> str:
-    return "[REDACTED]" if value else value
+    return value
 
 
-def _validate_approval_source(
+def _validate_operator_source(
     key: str,
     approver: str,
     decision: Dict[str, Any],
     source: Any,
+    *,
+    require_decision_by: bool = True,
 ) -> Optional[Dict[str, Any]]:
     if not approver.startswith("human"):
         return source if isinstance(source, dict) else None
 
     if not isinstance(source, dict) or source.get("kind") != "human":
-        raise ValueError(f"approval {key} requires human approval source")
+        raise ValueError(f"operator step {key} requires human approval source")
 
     expected_id = approver.split(":", 1)[1] if ":" in approver else None
     dashboard_provenance = source.get("channel") == "hermes-dashboard"
     if expected_id and not dashboard_provenance and source.get("id") != expected_id:
-        raise ValueError(f"approval {key} requires approval from {approver}")
-    if expected_id and not dashboard_provenance and decision.get("by") != expected_id:
-        raise ValueError(f"approval {key} decision.by must match {approver}")
+        raise ValueError(f"operator step {key} requires approval from {approver}")
+    if require_decision_by and expected_id and not dashboard_provenance and decision.get("by") != expected_id:
+        raise ValueError(f"operator step {key} decision.by must match {approver}")
 
     if not source.get("channel") or not any(source.get(field) for field in ("message_url", "message_id", "event_id")):
-        raise ValueError(f"approval {key} requires external approval provenance")
+        raise ValueError(f"operator step {key} requires external approval provenance")
 
     return source
+
+
+def _validate_approval_source(key: str, approver: str, decision: Dict[str, Any], source: Any, *, require_decision_by: bool = True) -> Optional[Dict[str, Any]]:
+    return _validate_operator_source(key, approver, decision, source, require_decision_by=require_decision_by)
 
 
 @dataclass(frozen=True)
@@ -3142,6 +3451,9 @@ def _expected_wait_for_command(command: Dict[str, Any]) -> str:
     key = str(command.get("key") or "")
     if command.get("type") == "notify_approval" and key.startswith("approval:"):
         approval_key = key.split(":", 1)[1]
+        payload = command.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("kind") in {"human_input.request.v1", "operator.request.v1"}:
+            return f"signal:operator.response:{approval_key}"
         return f"signal:approval.decision:{approval_key}"
     return key
 

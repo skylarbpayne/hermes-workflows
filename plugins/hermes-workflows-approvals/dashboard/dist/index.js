@@ -250,6 +250,64 @@
         e(ApprovalActions, { db: props.db, approval: approval, onDecided: props.onRefresh })));
   }
 
+  function OperatorStepActions(props) {
+    const step = props.step;
+    const useState = hooks.useState;
+    const state = useState({ busy: false, error: null, done: null, payloadText: "{}" });
+    const ui = state[0];
+    const setUi = state[1];
+    if (!step || step.status !== "waiting") return e("span", { className: "hwf-muted" }, step && step.status === "completed" ? "answered" : "no actions");
+    function submit() {
+      let payload;
+      try { payload = JSON.parse(ui.payloadText || "{}"); } catch (err) { setUi(Object.assign({}, ui, { error: "Invalid JSON payload" })); return; }
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) { setUi(Object.assign({}, ui, { error: "Payload must be a JSON object" })); return; }
+      setUi(Object.assign({}, ui, { busy: true, error: null, done: null }));
+      SDK.fetchJSON(API + "/operator-steps/response", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db: props.db, workflow_id: step.workflow_id, key: step.key, payload: payload, resume: true })
+      }).then(function (data) {
+        setUi(Object.assign({}, ui, { busy: false, error: null, done: data.receipt && data.receipt.status || "recorded" }));
+        if (props.onResponded) props.onResponded();
+      }).catch(function (err) {
+        setUi(Object.assign({}, ui, { busy: false, error: err.message || String(err), done: null }));
+      });
+    }
+    return e("div", { className: "hwf-approval-actions" },
+      e(Input, { value: ui.payloadText, placeholder: "JSON response payload", onInput: function (event) { setUi(Object.assign({}, ui, { payloadText: event.target.value })); } }),
+      e(Button, { disabled: ui.busy, onClick: submit }, "Submit response"),
+      ui.done && e("span", { className: "hwf-ok" }, ui.done),
+      ui.error && e("span", { className: "hwf-bad" }, ui.error));
+  }
+
+  function OperatorStepCard(props) {
+    const step = props.step;
+    const risk = step.risk || { level: "low" };
+    return e(Card, { className: "hwf-approval-card" },
+      e(CardHeader, null,
+        e("div", null,
+          e(CardTitle, null, step.headline || step.prompt || step.key),
+          e("div", { className: "hwf-meta" },
+            e(Pill, { label: step.status || "waiting", className: statusClass(step.status) }),
+            e(Pill, { label: step.kind || "operator" }),
+            e(Pill, { label: "risk: " + (risk.level || "low"), className: riskClass(risk.level) }),
+            step.workflow_name && e(Pill, { label: step.workflow_name }),
+            step.schema && e(Pill, { label: "schema: " + step.schema })))),
+      e(CardContent, null,
+        e("p", { className: "hwf-consequence" }, step.consequence || "Records typed human/operator input with provenance"),
+        e("div", { className: "hwf-two-col" },
+          e("div", null,
+            e("div", { className: "hwf-section-title" }, "What this step needs"),
+            e("p", null, step.prompt || step.key),
+            e("p", { className: "hwf-muted" }, "Workflow: " + (step.workflow_id || "—"))),
+          e("div", null,
+            e("div", { className: "hwf-section-title" }, "Artifact preview"),
+            e(ArtifactRenderSummary, { render: step.artifact_render }),
+            e(ArtifactInlinePreview, { render: step.artifact_render, value: step.artifact_preview || step.artifact }),
+            e("pre", null, pretty(step.artifact_preview || step.artifact)))),
+        e(OperatorStepActions, { db: props.db, step: step, onResponded: props.onRefresh })));
+  }
+
   function ApprovalDetail(props) {
     const refreshState = hooks.useState(0);
     const refreshKey = refreshState[0];
@@ -699,9 +757,13 @@
               e("code", { className: "hwf-run-id", title: runStatus.workflow_id }, shortId(runStatus.workflow_id))),
             e("div", { className: "hwf-section-title" }, "Run DAG"),
             e(RunDag, { db: props.db, workflowId: selected.workflow_id, refreshKey: props.refreshKey }),
-            e("div", { className: "hwf-section-title" }, "Approvals in this run"),
+            e("div", { className: "hwf-section-title" }, "Operator steps in this run"),
+            (runStatus.operator_steps || []).length ? (runStatus.operator_steps || []).map(function (step) {
+                return e(RunApprovalSummary, { key: step.key, approval: { prompt: step.prompt || step.label, key: step.key, status: step.status } });
+              }) : e("p", { className: "hwf-muted" }, "No operator input steps recorded for this run."),
+            e("div", { className: "hwf-section-title" }, "Approval policy gates in this run"),
             (runStatus.approvals || []).length ? (runStatus.approvals || []).map(function (approval) {
-              return e(RunApprovalSummary, { key: approval.key, approval: approval });
+return e(RunApprovalSummary, { key: approval.key, approval: approval });
             }) : e("p", { className: "hwf-muted" }, "No approval gates recorded for this run."),
             e("div", { className: "hwf-section-title" }, "Artifacts / outputs in this run"),
             runArtifacts.length ? runArtifacts.map(function (artifact) { return e(ArtifactCard, { key: artifact.id, artifact: artifact }); }) : e("p", { className: "hwf-muted" }, "No artifacts captured yet."),
@@ -723,17 +785,19 @@
   function OverviewPanel(props) {
     const counts = props.counts || {};
     const approvals = props.approvals || [];
+    const operatorSteps = props.operatorSteps || [];
     return e("div", { className: "hwf-panel" },
       e("div", { className: "hwf-stats" },
         e(StatCard, { label: "Runnable workflows", value: props.definitions.length, help: "Catalog" }),
         e(StatCard, { label: "Runs", value: props.runs.length, help: "Recent history" }),
         e(StatCard, { label: "Waiting", value: counts.waiting || 0, help: "Blocked runs" }),
-        e(StatCard, { label: "Needs my approval", value: approvals.length, help: "Active approvals" }),
+        e(StatCard, { label: "Needs operator input", value: operatorSteps.length, help: "Human/operator steps" }),
+        e(StatCard, { label: "Approval gates", value: approvals.length, help: "Approve/reject policy gates" }),
         e(StatCard, { label: "Artifacts", value: props.artifacts.length, help: "Outputs" })),
       e("div", { className: "hwf-two-col" },
         e("div", null,
-          e("div", { className: "hwf-panel-header" }, e("h2", null, "Needs my approval")),
-          approvals.length ? approvals.slice(0, 3).map(function (approval) { return e(ApprovalCard, { key: approval.workflow_id + approval.key, db: props.db, approval: approval, onView: props.onViewApproval, onRefresh: props.onRefresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active approvals."))),
+          e("div", { className: "hwf-panel-header" }, e("h2", null, "Needs operator input")),
+          operatorSteps.length ? operatorSteps.slice(0, 3).map(function (step) { return e(OperatorStepCard, { key: step.workflow_id + step.key, db: props.db, step: step, onRefresh: props.onRefresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active operator input."))),
         e("div", null,
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Recent runs")),
         props.runs.slice(0, 5).map(function (run) { return e(RunRow, { key: run.workflow_id, run: run, onInspect: props.onInspectRun }); }))));
@@ -788,6 +852,7 @@
     const definitionsData = useJSON(activeDb ? API + "/definitions" + qs({ db: activeDb }) : API + "/definitions", refreshKey + ":defs:" + activeDb);
     const runsData = useJSON(activeDb ? API + "/runs" + qs({ db: activeDb, limit: 100 }) : API + "/runs", refreshKey + ":runs:" + activeDb);
     const approvalsData = useJSON(activeDb ? API + "/approvals" + qs({ db: activeDb, status: "waiting" }) : API + "/approvals", refreshKey + ":approvals:" + activeDb);
+    const operatorStepsData = useJSON(activeDb ? API + "/operator-steps" + qs({ db: activeDb, status: "waiting" }) : API + "/operator-steps", refreshKey + ":operator-steps:" + activeDb);
 
     function refresh() { setRefreshKey(refreshKey + 1); }
     function inspectRun(run) {
@@ -800,38 +865,45 @@
     const definitions = definitionsData.data && definitionsData.data.definitions || overviewData.definitions || [];
     const runs = runsData.data && runsData.data.runs || overviewData.workflows || [];
     const approvals = approvalsData.data && approvalsData.data.approvals || overviewData.active_approvals || [];
+    const operatorSteps = operatorStepsData.data && operatorStepsData.data.operator_steps || overviewData.active_operator_steps || [];
     const artifacts = overviewData.artifacts || [];
     const counts = overviewData.counts_by_status || (runsData.data && runsData.data.counts && runsData.data.counts.by_status) || {};
-    const hasConsoleData = Boolean(overview.data || definitionsData.data || runsData.data || approvalsData.data);
-    const initialConsoleLoading = (overview.loading || definitionsData.loading || runsData.loading || approvalsData.loading) && !hasConsoleData;
-    const refreshingConsole = (overview.loading || definitionsData.loading || runsData.loading || approvalsData.loading) && hasConsoleData;
+    const hasConsoleData = Boolean(overview.data || definitionsData.data || runsData.data || approvalsData.data || operatorStepsData.data);
+    const initialConsoleLoading = (overview.loading || definitionsData.loading || runsData.loading || approvalsData.loading || operatorStepsData.loading) && !hasConsoleData;
+    const refreshingConsole = (overview.loading || definitionsData.loading || runsData.loading || approvalsData.loading || operatorStepsData.loading) && hasConsoleData;
 
     return e("div", { className: "hwf-page hwf-shell" },
       e("div", { className: "hwf-header" },
         e("div", null,
           e("p", { className: "hwf-eyebrow" }, "Operator console"),
           e("h1", null, "Hermes Workflows"),
-          e("p", { className: "hwf-muted" }, "Run workflows, track status/history, review artifacts, and make high-context approvals that record provenance and resume trusted workflow code.")),
+          e("p", { className: "hwf-muted" }, "Run workflows, track status/history, review artifacts, and respond to human/operator steps or approval gates with provenance.")),
         e("div", { className: "hwf-controls" },
           e("div", { className: "hwf-active-source", title: "Workflow state source" },
             e("span", { className: "hwf-active-source-label" }, "Source"),
             e("strong", null, activeSourceLabel)),
           e(Button, { onClick: refresh }, "Refresh"))),
-      e(Tabs, { tabs: ["Overview", "Workflows", "Runs", "Approvals", "Artifacts"], active: activeTab, setActive: setActiveTab }),
+      e(Tabs, { tabs: ["Overview", "Workflows", "Runs", "Operator Steps", "Approvals", "Artifacts"], active: activeTab, setActive: setActiveTab }),
       e("div", { className: "hwf-runtime-note" },
         e("strong", null, "Runtime: "),
-        "workflow code runs in the local WorkflowEngine process for the active workflow state source. Dashboard approval buttons record human provenance and immediately resume trusted local workflow code."),
+        "workflow code runs in the local WorkflowEngine process for the active workflow state source. Human/operator steps record typed outputs; approval is only the approve/reject policy gate."),
+      operatorSteps.length > 0 && e("div", { className: "hwf-attention", role: "alert" },
+        e("strong", null, operatorSteps.length + " operator step" + (operatorSteps.length === 1 ? "" : "s") + " waiting. "),
+        "Open Operator Steps or a card below to submit typed human input."),
       approvals.length > 0 && e("div", { className: "hwf-attention", role: "alert" },
         e("strong", null, approvals.length + " approval" + (approvals.length === 1 ? "" : "s") + " waiting. "),
         "Open Approvals or a card below to review consequence, evidence, and record-and-resume decision semantics."),
       initialConsoleLoading && e("p", { className: "hwf-muted" }, "Loading workflow data…"),
       refreshingConsole && e("p", { className: "hwf-muted hwf-refreshing" }, "Refreshing workflow console…"),
-      (overview.error || definitionsData.error || runsData.error || approvalsData.error) && e("p", { className: "hwf-bad" }, overview.error || definitionsData.error || runsData.error || approvalsData.error),
-      activeTab === "Overview" && e(OverviewPanel, { db: activeDb, definitions: definitions, runs: runs, approvals: approvals, artifacts: artifacts, counts: counts, onViewApproval: setSelectedApproval, onInspectRun: inspectRun, onRefresh: refresh }),
+      (overview.error || definitionsData.error || runsData.error || approvalsData.error || operatorStepsData.error) && e("p", { className: "hwf-bad" }, overview.error || definitionsData.error || runsData.error || approvalsData.error || operatorStepsData.error),
+      activeTab === "Overview" && e(OverviewPanel, { db: activeDb, definitions: definitions, runs: runs, operatorSteps: operatorSteps, approvals: approvals, artifacts: artifacts, counts: counts, onViewApproval: setSelectedApproval, onInspectRun: inspectRun, onRefresh: refresh }),
       activeTab === "Workflows" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Workflows you can run"), e("p", { className: "hwf-muted" }, "See workflows I can run, then run one with JSON inputs.")),
         definitions.length ? definitions.map(function (definition) { return e(DefinitionCard, { key: definition.id, db: activeDb, definition: definition, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No runnable workflows configured yet."))),
       activeTab === "Runs" && e(RunsPanel, { db: activeDb, refreshKey: refreshKey, runs: runs, loading: runsData.loading, error: runsData.error, inspectRun: inspectedRun }),
+      activeTab === "Operator Steps" && e("div", { className: "hwf-panel" },
+        e("div", { className: "hwf-panel-header" }, e("h2", null, "Active operator steps"), e("p", { className: "hwf-muted" }, "Typed human/operator input. Approval is just the approve/reject policy-gate subset.")),
+        operatorSteps.length ? operatorSteps.map(function (step) { return e(OperatorStepCard, { key: step.workflow_id + step.key, db: activeDb, step: step, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active operator steps."))),
       activeTab === "Approvals" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Active approvals"), e("p", { className: "hwf-muted" }, "See a list of active approvals needed.")),
         approvals.length ? approvals.map(function (approval) { return e(ApprovalCard, { key: approval.workflow_id + approval.key, db: activeDb, approval: approval, onView: setSelectedApproval, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active approvals."))),

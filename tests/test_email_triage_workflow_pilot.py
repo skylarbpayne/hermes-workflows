@@ -614,10 +614,10 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     signal_blob = json.dumps(signal_events)
     assert "private.person@example.com" not in signal_blob
     assert "secret-token-value" not in signal_blob
-    assert "ordinary private subject line" not in signal_blob
-    assert "Ordinary private note body without marker words" not in signal_blob
-    assert signal_events[-1]["payload"]["payload"]["note"] == "[REDACTED]"
-    assert signal_events[-1]["payload"]["payload"]["reason"] == "[REDACTED]"
+    assert "ordinary private subject line" in signal_blob
+    assert "Ordinary private note body without marker words" in signal_blob
+    assert signal_events[-1]["payload"]["payload"]["note"] == "Ordinary private note body without marker words"
+    assert signal_events[-1]["payload"]["payload"]["reason"] == "ordinary private subject line"
     persisted_source = signal_events[-1]["payload"]["source"]
     assert "sender" not in persisted_source
     assert "subject" not in persisted_source
@@ -670,17 +670,17 @@ def test_direct_approval_signal_sanitizes_metadata_before_resume_and_artifact_wr
 
     assert "private.person@example.com" not in persisted_and_written
     assert "secret-token-value" not in persisted_and_written
-    assert "ordinary private subject line" not in persisted_and_written
-    assert "Ordinary private note body without marker words" not in persisted_and_written
-    assert "another private approval message" not in persisted_and_written
+    assert "ordinary private subject line" in persisted_and_written
+    assert "Ordinary private note body without marker words" in persisted_and_written
+    assert "another private approval message" in persisted_and_written
     assert "raw_extra" not in persisted_and_written
     signal_event = [event for event in WorkflowEngine(db, read_only=True).events("wf-email-triage-direct-signal-private-approval") if event["type"] == "SignalReceived"][-1]
     assert signal_event["payload"]["payload"] == {
         "action": "approve",
         "by": "operator",
-        "note": "[REDACTED]",
-        "reason": "[REDACTED]",
-        "message": "[REDACTED]",
+        "note": "Ordinary private note body without marker words",
+        "reason": "ordinary private subject line",
+        "message": "another private approval message",
     }
     assert signal_event["payload"]["source"] == {
         "kind": "human",

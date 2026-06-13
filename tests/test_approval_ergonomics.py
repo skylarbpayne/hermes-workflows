@@ -211,7 +211,7 @@ def test_feedback_loop_uses_new_attempt_keys_after_revision_feedback(tmp_path):
     assert approved.status == "completed"
     assert approved.result["status"] == "approved"
     assert approved.result["decisions"] == [
-        {"action": "edit", "feedback": "[REDACTED]"},
+        {"action": "edit", "feedback": "tighten scope"},
         {"action": "approve", "feedback": None},
     ]
 

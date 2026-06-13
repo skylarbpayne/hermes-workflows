@@ -1178,14 +1178,16 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         assert label in index_js
     for phrase in (
         "Run workflow",
-        "Needs my approval",
+        "Needs operator input",
+        "Operator Steps",
+        "Submit response",
         "What you are approving",
         "Record and resume",
         "View approval",
         "Run history",
         "Source",
         "Workflow state source",
-        "Dashboard approval buttons record human provenance and immediately resume trusted local workflow code",
+        "Human/operator steps record typed outputs; approval is only the approve/reject policy gate",
         "artifact: ",
         "ArtifactInlinePreview",
         "hwf-markdown-preview",

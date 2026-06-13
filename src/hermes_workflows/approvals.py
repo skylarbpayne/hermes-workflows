@@ -16,6 +16,7 @@ class ApprovalView:
     status: str
     prompt: str | None
     artifact: Any
+    schema: str | None
     approver: str | None
     allowed: list[str]
     authority: Any
@@ -43,6 +44,7 @@ class ApprovalDecision(Mapping[str, Any]):
     reason: str | None = None
     message: str | None = None
     comment: str | None = None
+    direct_feedback: str | None = None
 
     @property
     def approved(self) -> bool:
@@ -58,7 +60,7 @@ class ApprovalDecision(Mapping[str, Any]):
 
     @property
     def feedback(self) -> str | None:
-        return self.reason or self.note or self.message or self.comment
+        return self.direct_feedback or self.reason or self.note or self.message or self.comment
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"action": self.action, "by": self.by}
@@ -66,6 +68,8 @@ class ApprovalDecision(Mapping[str, Any]):
             value = getattr(self, key)
             if value is not None:
                 data[key] = value
+        if self.direct_feedback is not None:
+            data["feedback"] = self.direct_feedback
         if self.source is not None:
             data["source"] = self.source
         return data
@@ -110,3 +114,12 @@ class ApprovalReceipt:
     waiting_on: str | None
     result_summary: dict[str, Any] | None
     workflow_ref: str | None = None
+
+
+# Neutral names for the general human/operator checkpoint substrate. Approval
+# remains a policy preset over this surface for now; these aliases let runtime,
+# dashboard, and adapter code migrate without inventing another parallel model.
+OperatorStepView = ApprovalView
+OperatorDecision = ApprovalDecision
+OperatorResponseInput = ApprovalDecisionInput
+OperatorResponseReceipt = ApprovalReceipt

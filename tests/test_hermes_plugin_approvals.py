@@ -95,9 +95,16 @@ def test_plugin_registers_approval_tools_and_gateway_hook():
     ctx = FakePluginContext()
     register(ctx)
 
-    assert set(ctx.tools) == {"workflow_approvals_list", "workflow_approval_decide"}
+    assert set(ctx.tools) == {
+        "workflow_approvals_list",
+        "workflow_operator_steps_list",
+        "workflow_approval_decide",
+        "workflow_operator_respond",
+    }
     assert ctx.tools["workflow_approvals_list"]["toolset"] == "hermes_workflows_approvals"
+    assert ctx.tools["workflow_operator_steps_list"]["toolset"] == "hermes_workflows_approvals"
     assert ctx.tools["workflow_approval_decide"]["toolset"] == "hermes_workflows_approvals"
+    assert ctx.tools["workflow_operator_respond"]["toolset"] == "hermes_workflows_approvals"
     assert "pre_gateway_dispatch" in ctx.hooks
 
 
