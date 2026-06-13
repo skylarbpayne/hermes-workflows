@@ -145,7 +145,7 @@ def test_submit_approval_decision_resume_true_returns_receipt_and_completes_work
     decision = completed.result["decision"]
     assert decision.action == "approve"
     assert decision.by == "skylar"
-    assert decision.note == "[REDACTED]"
+    assert decision.note == "looks safe"
     assert decision.source == human_source()
 
 

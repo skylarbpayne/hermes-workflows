@@ -228,11 +228,12 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
 
 def _runtime_semantics() -> dict[str, Any]:
     return {
-        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; approval decisions also resume trusted local workflow code immediately after recording human provenance.",
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; operator responses and approval decisions resume trusted local workflow code when requested.",
         "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
         "agent_requests": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. agent(...) calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
-        "approval_decisions": "Approval steps are completed by trusted approval surfaces setting approval output with human provenance, then resuming trusted local workflow code.",
-        "artifacts": "Approval and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
+        "operator_responses": "Human/operator steps are completed by trusted operator surfaces setting typed step output with human provenance. Approval is one policy preset over this operator-step substrate.",
+        "approval_decisions": "Approval steps are the approve/reject policy preset for risky transitions, not the base human-input concept.",
+        "artifacts": "Operator-step, approval, and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
 
 
@@ -537,6 +538,8 @@ def _signal_step_id(payload: dict[str, Any]) -> str | None:
     key = str(payload.get("key") or "")
     if signal_type == "approval.decision":
         return _approval_step_id(key)
+    if signal_type == "operator.response":
+        return _approval_step_id(key)
     if signal_type == "agent.completed":
         return _agent_request_step_id(key)
     return None
@@ -627,13 +630,16 @@ def _dag_completion_mode(event_type: str, payload: dict[str, Any]) -> str | None
     if event_type.startswith("Step") and payload.get("completion_mode"):
         return str(payload.get("completion_mode"))
     if event_type == "ApprovalRequested":
-        return "approval"
+        kind = str(payload.get("kind") or "")
+        return "operator" if kind in {"human_input.request.v1", "operator.request.v1"} else "approval"
     if event_type == "AgentRequested":
         return "agent"
     if event_type == "SignalReceived":
         signal_type = str(payload.get("signal_type") or "")
         if signal_type == "approval.decision":
             return "approval"
+        if signal_type == "operator.response":
+            return "operator"
         if signal_type == "agent.completed":
             return "agent"
     if event_type.startswith("Step"):
@@ -643,7 +649,7 @@ def _dag_completion_mode(event_type: str, payload: dict[str, Any]) -> str | None
 
 def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, Any]) -> str:
     if event_type == "ApprovalRequested":
-        return str(payload.get("key") or event.get("key") or "Approval step")
+        return str(payload.get("prompt") or payload.get("key") or event.get("key") or "Operator step")
     if event_type == "AgentRequested":
         return str(payload.get("key") or event.get("key") or "Agent step")
     if event_type == "SignalReceived":
@@ -807,6 +813,45 @@ def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
     return {"level": "low", "reason": "Approval records human provenance and resumes the trusted local workflow; no obvious external/destructive keyword was detected."}
 
 
+def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
+    raw_request = step.get("request")
+    request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
+    artifact = step.get("artifact") if step.get("artifact") is not None else request.get("artifact")
+    text = json.dumps({"artifact": artifact, "request": step.get("request")}, default=str).lower()
+    if any(word in text for word in ("payment", "purchase", "delete", "publish", "send_email", "external_send", "credential")):
+        return {"level": "high", "reason": "This operator step may authorize an external, destructive, financial, or credential-affecting action."}
+    if any(word in text for word in ("email", "calendar", "schedule", "deploy", "post", "message")):
+        return {"level": "medium", "reason": "This operator step may affect people, publishing, scheduling, or deployment state."}
+    return {"level": "low", "reason": "This operator step records human input/provenance for the trusted local workflow."}
+
+
+def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
+    request = step.get("request") if isinstance(step.get("request"), dict) else {}
+    artifact = _operator_approval_artifact(step.get("artifact") if step.get("artifact") is not None else request.get("artifact"))
+    prompt = step.get("prompt") or step.get("label") or step.get("key") or "Operator input needed"
+    return {
+        "db_alias": db_alias,
+        "workflow_id": step.get("workflow_id"),
+        "workflow_name": step.get("workflow_name"),
+        "workflow_ref": step.get("workflow_ref"),
+        "key": step.get("key"),
+        "status": step.get("status"),
+        "kind": step.get("kind") or step.get("step_type") or "operator",
+        "headline": prompt,
+        "prompt": prompt,
+        "approver": step.get("approver") or request.get("approver"),
+        "schema": step.get("schema") or request.get("schema"),
+        "artifact_preview": _redact_artifact_local_refs(artifact),
+        "artifact_render": _artifact_descriptor(artifact),
+        "output": step.get("output"),
+        "source": step.get("source"),
+        "waiting_on": step.get("waiting_on"),
+        "requested_seq": step.get("requested_seq"),
+        "risk": _risk_for_operator_step(step),
+        "consequence": "Records typed human/operator input with provenance, then the workflow worker or trusted runtime can continue.",
+    }
+
+
 def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
     prompt = approval.get("prompt") or approval.get("key") or "Approval needed"
     artifact = _operator_approval_artifact(approval.get("artifact"))
@@ -848,6 +893,23 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "approval_artifact",
                     "title": approval.get("prompt") or approval.get("key") or "Approval artifact",
                     "source": {"event": "ApprovalRequested", "key": approval.get("key"), "seq": approval.get("requested_seq")},
+                    "preview": _redact_artifact_local_refs(artifact),
+                    "artifact_render": _artifact_descriptor(artifact),
+                }
+            )
+    for operator_step in status.get("operator_steps") or []:
+        if operator_step.get("kind") != "operator":
+            continue
+        request = operator_step.get("request") if isinstance(operator_step.get("request"), dict) else {}
+        artifact = _operator_approval_artifact(operator_step.get("artifact") if operator_step.get("artifact") is not None else request.get("artifact"))
+        if artifact is not None:
+            artifacts.append(
+                {
+                    "id": f"{workflow_id}:operator:{operator_step.get('key')}",
+                    "workflow_id": workflow_id,
+                    "kind": "operator_step_artifact",
+                    "title": operator_step.get("prompt") or operator_step.get("label") or operator_step.get("key") or "Operator step artifact",
+                    "source": {"event": "StepRequested", "key": operator_step.get("key"), "seq": operator_step.get("requested_seq")},
                     "preview": _redact_artifact_local_refs(artifact),
                     "artifact_render": _artifact_descriptor(artifact),
                 }
@@ -1044,6 +1106,17 @@ async def run_dag(workflow_id: str, db: str | None = None, recent_events: int = 
     return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"])}
 
 
+@router.get("/operator-steps")
+async def active_operator_steps(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
+    db_alias, db_path = _resolve_dashboard_db(db)
+    engine = WorkflowEngine(db_path, read_only=True)
+    operator_steps = [
+        _operator_step_card(_strip_internal_fields(step), db_alias=db_alias)
+        for step in engine.list_operator_steps(status=status)[: _int(limit, default=100, maximum=500)]
+    ]
+    return {"db_alias": db_alias, "count": len(operator_steps), "operator_steps": operator_steps, "runtime_semantics": _runtime_semantics()}
+
+
 @router.get("/approvals")
 async def active_approvals(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
@@ -1125,6 +1198,7 @@ async def overview(
         artifacts.extend(_artifacts_from_status(item))
     definitions = [_definition_payload(definition, engine) for definition in _catalog_for_engine(engine)]
     approvals = [_approval_card(approval_view_to_dict(approval), db_alias=db_alias) for approval in engine.list_approvals(status="waiting")[:50]]
+    operator_steps = [_operator_step_card(_strip_internal_fields(step), db_alias=db_alias) for step in engine.list_operator_steps(status="waiting")[:50]]
     return {
         "db_alias": db_alias,
         "workflow_count": len(workflows),
@@ -1132,6 +1206,8 @@ async def overview(
         "workflows": workflows,
         "definitions_count": len(definitions),
         "definitions": definitions,
+        "active_operator_step_count": len(operator_steps),
+        "active_operator_steps": operator_steps,
         "active_approval_count": len(approvals),
         "active_approvals": approvals,
         "artifact_count": len(artifacts),
@@ -1159,6 +1235,64 @@ async def workflow_status(
         command_limit=_int(command_limit, default=20, maximum=200),
         command_payload_chars=_int(command_payload_chars, default=1000, maximum=20000),
     )
+
+
+@router.post("/operator-steps/response")
+async def respond_operator_step(body: dict[str, Any]) -> dict[str, Any]:
+    approver_id = _dashboard_approver_id()
+    if not approver_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Dashboard operator responses require server-configured dashboard_approver_id.",
+        )
+    db_alias, db_path = _resolve_dashboard_db(body.get("db"))
+    workflow_id = str(body.get("workflow_id") or "").strip()
+    key = str(body.get("key") or "").strip()
+    if not workflow_id or not key:
+        raise HTTPException(status_code=400, detail="workflow_id and key are required")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    if not payload:
+        raise HTTPException(status_code=400, detail="operator response payload is required")
+    decision_actor = _dashboard_decision_actor(approver_id)
+    message_id = f"dashboard:{uuid.uuid4()}"
+
+    def record_and_resume() -> tuple[Any, dict[str, Any]]:
+        _ensure_workflow_project_on_path(db_path)
+        receipt = WorkflowEngine(db_path).submit_operator_response(
+            workflow_id=workflow_id,
+            key=key,
+            payload=payload,
+            source={
+                "kind": "human",
+                "id": decision_actor,
+                "channel": "hermes-dashboard",
+                "message_id": message_id,
+            },
+            idempotency_key=message_id,
+            resume=True,
+        )
+        post_resume = _status_packet(
+            WorkflowEngine(db_path, read_only=True),
+            workflow_id,
+            recent_events=20,
+            commands="recent",
+            command_limit=20,
+            command_payload_chars=2000,
+        )
+        return receipt, post_resume
+
+    try:
+        receipt, post_resume = await asyncio.to_thread(record_and_resume)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"operator response/resume failed: {type(exc).__name__}: {exc}") from exc
+    receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
+    return {
+        "success": True,
+        "db_alias": db_alias,
+        "receipt": receipt_payload,
+        "post_resume": post_resume,
+        "next_step": _next_step_for_receipt(receipt_payload),
+    }
 
 
 @router.post("/approvals/decision")

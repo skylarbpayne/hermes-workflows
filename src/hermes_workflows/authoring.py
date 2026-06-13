@@ -222,6 +222,54 @@ class ApprovalStage:
         )
 
 
+@dataclass(frozen=True)
+class AskCall(Generic[T]):
+    prompt: str
+    key: str | None = None
+    artifact: Any = None
+    output: Any = dict
+    approver: str = "human"
+    timeout: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.prompt, str) or not self.prompt.strip():
+            raise TypeError("ask(...) requires a non-empty prompt")
+
+    def __await__(self):
+        return self._run(block=True).__await__()
+
+    async def _run(self, *, block: bool) -> Any:
+        ctx = current_context()
+        return await self._run_with_context(ctx, block=block)
+
+    async def _run_with_context(self, ctx: Any, *, block: bool) -> Any:
+        key = self.step_key(ctx)
+        result = await ctx._request_human_input(
+            self.prompt,
+            key=key,
+            artifact=self.artifact,
+            schema=_return_schema_id(self.output),
+            approver=self.approver,
+            timeout=self.timeout,
+            block=block,
+        )
+        if isinstance(result, PendingStep):
+            return result
+        return _coerce_return(result, self.output)
+
+    def step_key(self, ctx: Any) -> str:
+        if self.key is not None:
+            return _safe_key(self.key)
+        base = _safe_key(self.prompt)
+        counts = getattr(ctx, "_authoring_ask_call_counts", None)
+        if counts is None:
+            counts = {}
+            setattr(ctx, "_authoring_ask_call_counts", counts)
+        index = counts.get(base, 0)
+        counts[base] = index + 1
+        return base if index == 0 else f"{base}_{index}"
+
+
 def bind_workflow_context(ctx: Any):
     return _CURRENT_CONTEXT.set(ctx)
 
@@ -274,6 +322,18 @@ def agent(
         budget=budget,
         mock_output=mock_output,
     )
+
+
+def ask(
+    prompt: str,
+    *,
+    key: str | None = None,
+    artifact: Any = None,
+    output: Any = dict,
+    approver: str = "human",
+    timeout: str | None = None,
+) -> AskCall[Any]:
+    return AskCall(prompt, key=key, artifact=artifact, output=output, approver=approver, timeout=timeout)
 
 
 async def parallel(calls: Iterable[Any], *, limit: int | None = None) -> list[Any]:
@@ -361,6 +421,8 @@ def approve_until(
 
 async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:
     if isinstance(call, AgentCall):
+        return await call._run_with_context(ctx, block=block)
+    if isinstance(call, AskCall):
         return await call._run_with_context(ctx, block=block)
     if isinstance(call, ApprovalValueCall):
         if block:

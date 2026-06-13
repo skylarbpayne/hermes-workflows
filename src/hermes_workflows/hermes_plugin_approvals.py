@@ -226,6 +226,19 @@ def approval_view_to_dict(approval: Any) -> dict[str, Any]:
     return payload
 
 
+def operator_step_to_dict(step: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(step)
+    if "artifact" in payload:
+        payload["artifact"] = _redact(payload.get("artifact"))
+    request = payload.get("request")
+    if isinstance(request, dict) and "artifact" in request:
+        request = dict(request)
+        request["artifact"] = _redact(request.get("artifact"))
+        payload["request"] = request
+    payload.pop("db_path", None)
+    return payload
+
+
 def _handle_workflow_approvals_list(args: dict[str, Any], **_: Any) -> str:
     try:
         db_path = resolve_db(args.get("db"))
@@ -237,6 +250,18 @@ def _handle_workflow_approvals_list(args: dict[str, Any], **_: Any) -> str:
         return _json_result({"success": True, "db": db_path, "count": len(payload), "approvals": payload})
     except Exception as exc:
         return _tool_error(f"workflow_approvals_list failed: {type(exc).__name__}: {exc}")
+
+
+def _handle_workflow_operator_steps_list(args: dict[str, Any], **_: Any) -> str:
+    try:
+        db_path = resolve_db(args.get("db"))
+        status = args.get("status", "waiting")
+        limit = _coerce_limit(args.get("limit"))
+        engine = WorkflowEngine(db_path, read_only=True)
+        steps = [operator_step_to_dict(step) for step in engine.list_operator_steps(status=status)[:limit]]
+        return _json_result({"success": True, "db": db_path, "count": len(steps), "operator_steps": steps})
+    except Exception as exc:
+        return _tool_error(f"workflow_operator_steps_list failed: {type(exc).__name__}: {exc}")
 
 
 def _source_from_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -313,6 +338,39 @@ def _handle_workflow_approval_decide(args: dict[str, Any], **_: Any) -> str:
         return _tool_error(f"workflow_approval_decide failed: {type(exc).__name__}: {exc}")
 
 
+def _handle_workflow_operator_respond(args: dict[str, Any], **_: Any) -> str:
+    try:
+        db_path = resolve_db(args.get("db"))
+        resume = _coerce_bool(args.get("resume"), default=False)
+        payload = args.get("payload")
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("payload must be a non-empty object")
+        receipt = WorkflowEngine(db_path).submit_operator_response(
+            workflow_id=str(args.get("workflow_id") or "").strip(),
+            key=str(args.get("key") or "").strip(),
+            payload=payload,
+            source=_source_from_args(args),
+            idempotency_key=args.get("idempotency_key")
+            or args.get("message_url")
+            or args.get("message_id")
+            or args.get("event_id"),
+            resume=resume,
+        )
+        receipt_payload = _receipt_to_payload(receipt, resume_requested=resume)
+        return _json_result(
+            {
+                "success": True,
+                "db": db_path,
+                "receipt": receipt_payload,
+                "next_step": _next_step_for_receipt(receipt_payload),
+            }
+        )
+    except Exception as exc:
+        return _tool_error(f"workflow_operator_respond failed: {type(exc).__name__}: {exc}")
+
+
 def _event_message_id(event: Any, source: Any) -> str | None:
     for obj in (event, source):
         for attr in ("message_id", "event_id", "id"):
@@ -385,6 +443,20 @@ WORKFLOW_APPROVALS_LIST_SCHEMA = {
     },
 }
 
+WORKFLOW_OPERATOR_STEPS_LIST_SCHEMA = {
+    "name": "workflow_operator_steps_list",
+    "description": "List pending hermes-workflows human/operator steps from a configured workflow SQLite DB or explicit DB path.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "db": {"type": "string", "description": "Configured DB alias or SQLite path."},
+            "status": {"type": "string", "default": "waiting", "description": "Operator step status filter."},
+            "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50},
+        },
+    },
+}
+
+
 WORKFLOW_APPROVAL_DECIDE_SCHEMA = {
     "name": "workflow_approval_decide",
     "description": "Record an approve/reject decision for a hermes-workflows approval with human provenance. Defaults to resume=false for gateway/plugin safety.",
@@ -409,6 +481,28 @@ WORKFLOW_APPROVAL_DECIDE_SCHEMA = {
     },
 }
 
+WORKFLOW_OPERATOR_RESPOND_SCHEMA = {
+    "name": "workflow_operator_respond",
+    "description": "Record a typed human/operator response for a hermes-workflows operator step. Defaults to resume=false for gateway/plugin safety.",
+    "parameters": {
+        "type": "object",
+        "required": ["db", "workflow_id", "key", "payload", "by"],
+        "properties": {
+            "db": {"type": "string", "description": "Configured DB alias or SQLite path."},
+            "workflow_id": {"type": "string"},
+            "key": {"type": "string"},
+            "payload": {"type": "object", "description": "Typed operator response payload."},
+            "by": {"type": "string", "description": "Human/operator id/name."},
+            "channel": {"type": "string", "default": "hermes-plugin"},
+            "message_id": {"type": "string"},
+            "message_url": {"type": "string"},
+            "event_id": {"type": "string"},
+            "idempotency_key": {"type": "string"},
+            "resume": {"type": "boolean", "default": False},
+        },
+    },
+}
+
 
 def register(ctx) -> None:
     ctx.register_tool(
@@ -420,11 +514,27 @@ def register(ctx) -> None:
         emoji="🧾",
     )
     ctx.register_tool(
+        name="workflow_operator_steps_list",
+        toolset=TOOLSET,
+        schema=WORKFLOW_OPERATOR_STEPS_LIST_SCHEMA,
+        handler=_handle_workflow_operator_steps_list,
+        description="List pending hermes-workflows operator steps.",
+        emoji="👤",
+    )
+    ctx.register_tool(
         name="workflow_approval_decide",
         toolset=TOOLSET,
         schema=WORKFLOW_APPROVAL_DECIDE_SCHEMA,
         handler=_handle_workflow_approval_decide,
         description="Record a human approval/rejection for hermes-workflows.",
         emoji="✅",
+    )
+    ctx.register_tool(
+        name="workflow_operator_respond",
+        toolset=TOOLSET,
+        schema=WORKFLOW_OPERATOR_RESPOND_SCHEMA,
+        handler=_handle_workflow_operator_respond,
+        description="Record a typed human/operator response for hermes-workflows.",
+        emoji="✍️",
     )
     ctx.register_hook("pre_gateway_dispatch", _handle_gateway_message)

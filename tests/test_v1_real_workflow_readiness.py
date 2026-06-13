@@ -1,4 +1,4 @@
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step, workflow
 
 
 STEP_RUNS = []
@@ -119,10 +119,38 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
         "key": "entity_b",
         "action": "reject",
         "by": "skylar",
-        "reason": "[REDACTED]",
+        "reason": "not needed",
         "source": {"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-b"},
     }
     assert engine.list_approvals(status="waiting") == []
+
+
+def test_submit_approval_decision_preserves_rejection_feedback(tmp_path):
+    db = tmp_path / "wf.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(approval_trip_workflow, {"destination": "NYC"}, workflow_id="wf_feedback")
+
+    engine.submit_approval_decision(
+        ApprovalDecisionInput(
+            workflow_id="wf_feedback",
+            key="approve_trip_plan",
+            action="reject",
+            by="skylar",
+            source={"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "feedback-1"},
+            reason="too generic; make it operational",
+            note="use concrete receipts",
+            idempotency_key="feedback-1",
+        ),
+        resume=False,
+    )
+
+    signal = next(event for event in engine.events("wf_feedback") if event["type"] == "SignalReceived")
+    assert signal["payload"]["payload"] == {
+        "action": "reject",
+        "by": "skylar",
+        "note": "use concrete receipts",
+        "reason": "too generic; make it operational",
+    }
 
 
 def test_run_until_idle_executes_local_steps_once_then_waits_for_approval(tmp_path):

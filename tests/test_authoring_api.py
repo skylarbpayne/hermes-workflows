@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, approve_until, parallel, pipeline, workflow
+from hermes_workflows import WorkflowEngine, agent, ask, approve_until, parallel, pipeline, workflow
 
 
 @dataclass
@@ -21,6 +21,18 @@ class DraftPacket:
 @dataclass
 class ItemPacket:
     text: str
+
+
+@dataclass
+class ReviewDecision:
+    action: str
+    feedback: str | None = None
+
+
+@dataclass
+class AngleChoice:
+    angle_id: str
+    rationale: str
 
 
 PROMPT_VERSION = "v1"
@@ -100,6 +112,51 @@ async def pipeline_with_approval_workflow(inputs):
     )
     assert all(isinstance(section, ItemPacket) for section in sections)
     return [section.text for section in sections]
+
+
+@workflow
+async def ask_angle_workflow(inputs):
+    choice = await ask(
+        prompt="Which angle should we pursue?",
+        key="choose_angle",
+        artifact={"options": inputs["angles"]},
+        output=AngleChoice,
+    )
+    assert isinstance(choice, AngleChoice)
+    return {"angle_id": choice.angle_id, "rationale": choice.rationale}
+
+
+@workflow
+async def parallel_ask_workflow(inputs):
+    reviews = await parallel(
+        [
+            ask(
+                prompt=f"Review section {item}",
+                key=f"review_{item}",
+                artifact={"section": item},
+                output=ReviewDecision,
+            )
+            for item in inputs["items"]
+        ]
+    )
+    assert all(isinstance(review, ReviewDecision) for review in reviews)
+    return [review.action for review in reviews]
+
+
+@workflow
+async def pipeline_with_ask_workflow(inputs):
+    reviews = await pipeline(
+        inputs["items"],
+        lambda item: ask(
+            prompt=f"Review section {item}",
+            key=f"review_{item}",
+            artifact={"section": item},
+            output=ReviewDecision,
+        ),
+        limit=2,
+    )
+    assert all(isinstance(review, ReviewDecision) for review in reviews)
+    return [review.feedback for review in reviews]
 
 
 def test_agent_requires_prompt():
@@ -241,3 +298,140 @@ def test_pipeline_supports_approval_stages(tmp_path):
 
     assert result.status == "completed"
     assert result.result == ["ALPHA"]
+
+
+
+def test_ask_collects_typed_human_input_without_requiring_approval_action(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(
+        ask_angle_workflow,
+        {"angles": ["inspectable", "resumable"]},
+        workflow_id="wf_ask_angle",
+    )
+
+    assert first.status == "waiting"
+    assert first.waiting_on == "signal:operator.response:choose_angle"
+    status = engine.workflow_status("wf_ask_angle")
+    assert status["approvals"] == []
+    assert [step["key"] for step in status["operator_steps"]] == ["choose_angle"]
+    step = status["steps"][0]
+    assert step["key"] == "choose_angle"
+    assert step["label"] == "Which angle should we pursue?"
+    assert step["completion_mode"] == "operator"
+    assert step["step_type"] == "operator"
+    assert step["request"]["artifact"] == {"options": ["inspectable", "resumable"]}
+    assert step["request"]["schema"].endswith(":AngleChoice")
+
+    receipt = engine.submit_operator_response(
+        workflow_id="wf_ask_angle",
+        key="choose_angle",
+        payload={"angle_id": "inspectable", "rationale": "clearest product claim"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-angle"},
+    )
+    assert receipt.status == "running"
+    result = engine.drain("wf_ask_angle")
+
+    assert result.status == "completed"
+    assert result.result == {"angle_id": "inspectable", "rationale": "clearest product claim"}
+
+
+def test_operator_response_can_be_recorded_without_inline_resume(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(
+        ask_angle_workflow,
+        {"angles": ["inspectable", "resumable"]},
+        workflow_id="wf_ask_angle_no_resume",
+    )
+
+    assert first.status == "waiting"
+    receipt = engine.submit_operator_response(
+        workflow_id="wf_ask_angle_no_resume",
+        key="choose_angle",
+        payload={"angle_id": "resumable", "rationale": "proves decoupled response recording"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-angle-no-resume"},
+        resume=False,
+    )
+
+    assert receipt.status == "response_recorded"
+    recorded = engine.workflow_status("wf_ask_angle_no_resume")
+    assert recorded["status"] == "running"
+    assert recorded["operator_steps"][0]["status"] == "completed"
+    assert recorded["operator_steps"][0]["output"]["angle_id"] == "resumable"
+
+    result = engine.drain("wf_ask_angle_no_resume")
+    assert result.status == "completed"
+    assert result.result == {"angle_id": "resumable", "rationale": "proves decoupled response recording"}
+
+
+def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(parallel_ask_workflow, {"items": ["one", "two"]}, workflow_id="wf_parallel_ask")
+
+    assert first.status == "waiting"
+    assert first.waiting_on == "parallel:0"
+    operator_steps = [step for step in engine.workflow_status("wf_parallel_ask")["steps"] if step.get("step_type") == "operator"]
+    assert [step["key"] for step in operator_steps] == ["review_one", "review_two"]
+    assert [step["request"]["schema"] for step in operator_steps] == [
+        f"{ReviewDecision.__module__}:ReviewDecision",
+        f"{ReviewDecision.__module__}:ReviewDecision",
+    ]
+
+    one = engine.signal(
+        "wf_parallel_ask",
+        "operator.response",
+        key="review_one",
+        payload={"action": "approve", "feedback": "good"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-one"},
+    )
+    after_one = engine.drain("wf_parallel_ask", initial=one)
+    assert after_one.status == "waiting"
+
+    two = engine.signal(
+        "wf_parallel_ask",
+        "operator.response",
+        key="review_two",
+        payload={"action": "revise", "feedback": "tighten"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-two"},
+    )
+    result = engine.drain("wf_parallel_ask", initial=two)
+
+    assert result.status == "completed"
+    assert result.result == ["approve", "revise"]
+
+
+def test_pipeline_ask_stage_fans_out_human_prompts(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    first = engine.run_until_idle(pipeline_with_ask_workflow, {"items": ["a", "b"]}, workflow_id="wf_pipeline_ask")
+
+    assert first.status == "waiting"
+    assert first.waiting_on == "parallel:0"
+    operator_steps = [step for step in engine.workflow_status("wf_pipeline_ask")["steps"] if step.get("step_type") == "operator"]
+    assert [step["key"] for step in operator_steps] == ["review_a", "review_b"]
+
+    engine.signal(
+        "wf_pipeline_ask",
+        "operator.response",
+        key="review_a",
+        payload={"action": "approve", "feedback": "ship a"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-a"},
+    )
+    result = engine.drain(
+        "wf_pipeline_ask",
+        initial=engine.signal(
+            "wf_pipeline_ask",
+            "operator.response",
+            key="review_b",
+            payload={"action": "approve", "feedback": "ship b"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-b"},
+        ),
+    )
+
+    assert result.status == "completed"
+    assert result.result == ["ship a", "ship b"]

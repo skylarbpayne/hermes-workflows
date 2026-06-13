@@ -8,8 +8,17 @@ v0 intentionally tiny:
 - External signals append events and wake/replay the decider.
 """
 
-from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView
-from .authoring import AgentCall, ContextBundle, agent, approve, approve_until, parallel, pipeline
+from .approvals import (
+    ApprovalDecision,
+    ApprovalDecisionInput,
+    ApprovalReceipt,
+    ApprovalView,
+    OperatorDecision,
+    OperatorResponseInput,
+    OperatorResponseReceipt,
+    OperatorStepView,
+)
+from .authoring import AgentCall, AskCall, ContextBundle, agent, ask, approve, approve_until, parallel, pipeline
 from .decorators import step, workflow
 from .engine import RunResult, WorkflowEngine
 from .invocation import InvocationService, TrustedResumer
@@ -22,10 +31,15 @@ from .workflow_values import Workflow
 
 __all__ = [
     "AgentCall",
+    "AskCall",
     "ApprovalDecision",
     "ApprovalDecisionInput",
     "ApprovalReceipt",
     "ApprovalView",
+    "OperatorDecision",
+    "OperatorResponseInput",
+    "OperatorResponseReceipt",
+    "OperatorStepView",
     "ContextBundle",
     "AgentRunnerError",
     "RunResult",
@@ -39,6 +53,7 @@ __all__ = [
     "WorkflowRegistry",
     "WorkflowWorkerService",
     "agent",
+    "ask",
     "approve",
     "approve_until",
     "build_workflow_receipt",
