@@ -24,7 +24,7 @@ Implemented surface:
 research = await agent("research", prompt="Research typed workflows", input=brief, context=[...], returns=ResearchPacket)
 sections = await parallel([agent("draft_section", prompt=f"Draft {s}", input=s, key_by=s.slug, returns=SectionDraft) for s in sections])
 final_sections = await pipeline(sections, humanize_section, evidence_check_section, limit=4)
-await approve_until("approve_final", draft, prompt="Approve final draft")
+await ask("Approve final draft", key="approve_final", artifact=draft, output=ReviewDecision)
 ```
 
 Durability rule: saved outputs replay only when the stored request fingerprint still matches the current rendered prompt, input, context hashes, return schema, and runner options.
@@ -38,7 +38,7 @@ flowchart TB
         A["agent('research')"]
         P["parallel([...], limit=4)"]
         L["pipeline(items, stages...)"]
-        H["approve / approve_until"]
+        H["ask"]
         S["step(local_python)"]
         W --> A
         W --> P
@@ -139,7 +139,7 @@ flowchart LR
     Research --> Angles["agent: angle_options"]
     Angles --> Choose{"approve: choose_angle"}
     Choose --> Outline["agent: outline"]
-    Outline --> OutlineApproval{"approve_until: approve_outline"}
+    Outline --> OutlineApproval{"ask: approve_outline"}
 
     OutlineApproval --> F["parallel: draft sections"]
 
@@ -161,7 +161,7 @@ flowchart LR
     S4 --> Pipe
 
     subgraph Pipe["pipeline: section polish"]
-        H1["agent: humanize_section"] --> E1["agent: evidence_check_section"] --> A1{"approve_until: approve_section"}
+        H1["agent: humanize_section"] --> E1["agent: evidence_check_section"] --> A1{"ask: approve_section"}
     end
 
     Pipe --> Assemble["agent: assemble_final_draft"]
@@ -180,7 +180,7 @@ The invisible shape is command rows, signals, and replay checkpoints. Those are 
 | `parallel(...)` | “Run these independent calls together.” | A fan-out/fan-in group plus child step events. | Block with child statuses and concurrency. |
 | `pipeline(...)` | “Apply stages to items.” | Stage/item progress, results, failures, resumable keys. | Matrix or swimlane: items × stages. |
 | `approve(...)` | “Human picks/accepts/decides.” | Approval request, decision, provenance, idempotency. | Approval card with consequence and source. |
-| `approve_until(...)` | “Loop until accepted.” | Attempts, feedback, revision linkage. | Approval gate with attempts/feedback history. |
+| `ask(...)` | “Loop until accepted.” | Attempts, feedback, revision linkage. | Approval gate with attempts/feedback history. |
 | `step(...)` | “Run local deterministic Python.” | Step request/result/error. | Plain local step card. |
 
 ## Layering plan
@@ -191,7 +191,7 @@ flowchart TB
         F1["agent"]
         F2["parallel"]
         F3["pipeline"]
-        F4["approve / approve_until"]
+        F4["ask"]
         F5["step"]
     end
 
@@ -364,7 +364,7 @@ gantt
     RED tests for top-level helpers         :b1, after a3, 1d
     AgentCall + required prompt             :b2, after b1, 1d
     prompt-builder examples                 :b3, after b2, 1d
-    approve / approve_until                 :b4, after b3, 1d
+    ask                 :b4, after b3, 1d
     parallel fan-out/fan-in                 :b5, after b4, 2d
     first-pass pipeline                     :b6, after b5, 2d
 
@@ -387,7 +387,7 @@ flowchart LR
     P1 --> B["prompt builders return AgentCall[T]"]
     P1 --> C["parallel([...])"]
     P1 --> D["pipeline(items, stages...)"]
-    P1 --> E["approve / approve_until"]
+    P1 --> E["ask"]
     P1 --> F["typed replay"]
     P1 --> G["context fingerprint guard"]
 
@@ -454,7 +454,7 @@ flowchart TD
     D2 -- yes --> D3{"Does pipeline render as items × stages?"}
     D3 -- no --> Pipe["Add stage/item metadata"]
     D3 -- yes --> D4{"Can approval loops revise without terminating?"}
-    D4 -- no --> Approval["Fix approve_until lifecycle"]
+    D4 -- no --> Approval["Fix ask lifecycle"]
     D4 -- yes --> Ship["Promote API in README/examples"]
 ```
 
@@ -479,7 +479,7 @@ A first version is good enough when this code is plausible, tested, and document
 async def blog_post(topic: str) -> str:
     research = await agent("research", input=topic, returns=ResearchPacket)
     outline = await agent("outline", input=research, returns=Outline)
-    outline = await approve_until("approve_outline", outline)
+    outline_review = await ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)
 
     drafts = await parallel(
         [agent("draft_section", input=s, key_by=s.slug, returns=SectionDraft) for s in outline.sections],
@@ -490,7 +490,7 @@ async def blog_post(topic: str) -> str:
         drafts,
         agent("humanize", returns=SectionDraft),
         agent("evidence_check", returns=SectionDraft),
-        approve_until("approve_section"),
+        lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision),
         limit=4,
     )
 
