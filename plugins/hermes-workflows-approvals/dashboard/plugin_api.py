@@ -231,9 +231,9 @@ def _runtime_semantics() -> dict[str, Any]:
         "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; operator responses and approval decisions resume trusted local workflow code when requested.",
         "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
         "agent_requests": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. agent(...) calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
-        "operator_responses": "Human/operator steps are completed by trusted operator surfaces setting typed step output with human provenance. Approval is one policy preset over this operator-step substrate.",
-        "approval_decisions": "Approval steps are the approve/reject policy preset for risky transitions, not the base human-input concept.",
-        "artifacts": "Operator-step, approval, and run artifacts are persisted in workflow history and returned as operator previews plus artifact_render descriptors. The dashboard does not host local media files.",
+        "operator_responses": "Human input requests are completed by trusted review surfaces setting typed step output with human provenance.",
+        "approval_decisions": "Approval gates are approve/reject review requests for risky transitions, not a separate place operators need to hunt for work.",
+        "artifacts": "Human input, approval, and run artifacts are persisted in workflow history and returned as review previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
 
 
@@ -819,10 +819,10 @@ def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
     artifact = step.get("artifact") if step.get("artifact") is not None else request.get("artifact")
     text = json.dumps({"artifact": artifact, "request": step.get("request")}, default=str).lower()
     if any(word in text for word in ("payment", "purchase", "delete", "publish", "send_email", "external_send", "credential")):
-        return {"level": "high", "reason": "This operator step may authorize an external, destructive, financial, or credential-affecting action."}
+        return {"level": "high", "reason": "This human input request may authorize an external, destructive, financial, or credential-affecting action."}
     if any(word in text for word in ("email", "calendar", "schedule", "deploy", "post", "message")):
-        return {"level": "medium", "reason": "This operator step may affect people, publishing, scheduling, or deployment state."}
-    return {"level": "low", "reason": "This operator step records human input/provenance for the trusted local workflow."}
+        return {"level": "medium", "reason": "This human input request may affect people, publishing, scheduling, or deployment state."}
+    return {"level": "low", "reason": "This human input request records input/provenance for the trusted local workflow."}
 
 
 def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
@@ -848,7 +848,7 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
         "waiting_on": step.get("waiting_on"),
         "requested_seq": step.get("requested_seq"),
         "risk": _risk_for_operator_step(step),
-        "consequence": "Records typed human/operator input with provenance, then the workflow worker or trusted runtime can continue.",
+        "consequence": "Records typed human input with provenance, then the workflow worker or trusted runtime can continue.",
     }
 
 

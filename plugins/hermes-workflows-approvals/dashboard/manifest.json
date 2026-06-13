@@ -1,7 +1,7 @@
 {
   "name": "hermes-workflows-approvals",
   "label": "Workflows",
-  "description": "Workflow observability and human/operator step controls for hermes-workflows SQLite DBs.",
+  "description": "Workflow observability, review queue, human input, and approval controls for hermes-workflows SQLite DBs.",
   "icon": "Workflow",
   "version": "0.2.0",
   "tab": { "path": "/workflows", "position": "after:kanban" },

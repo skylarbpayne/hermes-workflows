@@ -1187,25 +1187,33 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
     style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
 
-    for label in ("Overview", "Workflows", "Runs", "Approvals", "Artifacts"):
+    for label in ("Overview", "Workflows", "Runs", "Review Queue", "Artifacts"):
         assert label in index_js
     for phrase in (
         "Run workflow",
-        "Needs operator input",
-        "Operator Steps",
-        "Submit response",
+        "Needs review",
+        "Human input",
+        "Submit input",
         "What you are approving",
         "Record and resume",
         "View approval",
         "Run history",
         "Source",
         "Workflow state source",
-        "Human/operator steps record typed outputs; approval is only the approve/reject policy gate",
+        "Human input requests record typed outputs; approval gates are approve/reject review requests.",
         "artifact: ",
         "ArtifactInlinePreview",
         "hwf-markdown-preview",
     ):
         assert phrase in index_js
+    for confusing_phrase in (
+        "Operator Steps",
+        "Needs operator input",
+        "Submit response",
+        "JSON response payload",
+        "human/operator steps",
+    ):
+        assert confusing_phrase not in index_js
     assert "active_source" in index_js
     assert "firstDb" not in index_js
     assert "selected DB alias" not in index_js
@@ -1219,6 +1227,19 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
     assert "max-height: calc(100vh - 2rem)" in style_css
     assert "overflow: auto" in style_css
     assert ".hwf-close-button" in style_css
+
+
+def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_input():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    assert 'const reviewRequests = approvals.concat(operatorSteps);' in index_js
+    assert 'activeTab === "Review Queue"' in index_js
+    assert 'tabs: ["Overview", "Workflows", "Runs", "Review Queue", "Artifacts"]' in index_js
+    assert 'placeholder: "Paste JSON matching the requested schema"' in index_js
+    assert '"Schema: " + step.schema' in index_js
+    assert 'isReviewDecisionStep(step)' in index_js
+    assert 'submitReviewDecision("approve")' in index_js
+    assert 'submitReviewDecision("reject")' in index_js
 
 
 def test_dashboard_frontend_hides_successful_initial_loading_state():
