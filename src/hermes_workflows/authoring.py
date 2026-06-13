@@ -168,61 +168,6 @@ class AgentCall(Generic[T]):
 
 
 @dataclass(frozen=True)
-class ApprovalValueCall(Generic[T]):
-    key: str
-    value: T
-    prompt: str | None = None
-    approver: str = "human"
-    allowed: Sequence[str] | None = None
-    authority: Sequence[str] | None = None
-    timeout: str | None = None
-
-    def __await__(self):
-        return self._run().__await__()
-
-    async def _run(self) -> T:
-        ctx = current_context()
-        decision = await ctx.approve(
-            self.prompt or self.key,
-            key=self.key,
-            artifact=self.value,
-            approver=self.approver,
-            allowed=list(self.allowed or ["approve", "reject", "edit", "revise", "rerun"]),
-            authority=list(self.authority or []),
-            timeout=self.timeout,
-            feedback_loop=True,
-        )
-        if isinstance(decision, ApprovalDecision) and decision.approved:
-            return self.value
-        if isinstance(decision, ApprovalDecision) and decision.needs_revision:
-            raise ValueError(f"approval {self.key} needs revision: {decision.feedback or decision.action}")
-        return self.value
-
-
-@dataclass(frozen=True)
-class ApprovalStage:
-    key: str
-    prompt: str | None = None
-    approver: str = "human"
-    allowed: Sequence[str] | None = None
-    authority: Sequence[str] | None = None
-    timeout: str | None = None
-
-    def __call__(self, value: T) -> ApprovalValueCall[T]:
-        item_key = _default_item_key(value)
-        key = f"{self.key}:{_safe_key(item_key)}" if item_key is not None else self.key
-        return ApprovalValueCall(
-            key,
-            value,
-            prompt=self.prompt or self.key,
-            approver=self.approver,
-            allowed=self.allowed,
-            authority=self.authority,
-            timeout=self.timeout,
-        )
-
-
-@dataclass(frozen=True)
 class AskCall(Generic[T]):
     prompt: str
     key: str | None = None
@@ -362,15 +307,7 @@ async def pipeline(items: Iterable[Any], *stages: Any, limit: int | None = None)
         for index, item in enumerate(current):
             call = _stage_call(stage, item, stage_index=stage_index, item_index=index)
             calls.append(call)
-        if any(isinstance(call, ApprovalValueCall) for call in calls):
-            if not all(isinstance(call, ApprovalValueCall) for call in calls):
-                raise TypeError("pipeline approval stages cannot be mixed with agent/step calls in the same stage")
-            approved: list[Any] = []
-            for call in calls:
-                approved.append(await call)
-            current = approved
-        else:
-            current = await parallel(calls, limit=limit)
+        current = await parallel(calls, limit=limit)
     return current
 
 
@@ -396,38 +333,11 @@ async def approve(
     )
 
 
-def approve_until(
-    key: str,
-    value: Any = _MISSING,
-    *,
-    prompt: str | None = None,
-    approver: str = "human",
-    allowed: Sequence[str] | None = None,
-    authority: Sequence[str] | None = None,
-    timeout: str | None = None,
-) -> ApprovalStage | ApprovalValueCall[Any]:
-    if value is _MISSING:
-        return ApprovalStage(key, prompt=prompt, approver=approver, allowed=allowed, authority=authority, timeout=timeout)
-    return ApprovalValueCall(
-        key,
-        value,
-        prompt=prompt,
-        approver=approver,
-        allowed=allowed,
-        authority=authority,
-        timeout=timeout,
-    )
-
-
 async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:
     if isinstance(call, AgentCall):
         return await call._run_with_context(ctx, block=block)
     if isinstance(call, AskCall):
         return await call._run_with_context(ctx, block=block)
-    if isinstance(call, ApprovalValueCall):
-        if block:
-            return await call
-        raise TypeError("approval calls cannot be fanned out as non-blocking worker steps")
     if getattr(call, "__durable_step_call__", False):
         return await ctx.run_step(
             call.step_name,
@@ -446,8 +356,6 @@ async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:
 def _stage_call(stage: Any, item: Any, *, stage_index: int, item_index: int) -> Any:
     if isinstance(stage, AgentCall):
         return stage.with_input(item, key_by=_default_item_key(item) or f"{stage_index}-{item_index}")
-    if isinstance(stage, ApprovalStage):
-        return stage(item)
     if callable(stage):
         return stage(item)
     raise TypeError(f"unsupported pipeline stage: {type(stage).__name__}")

@@ -26,7 +26,17 @@ That API makes workflow authors think about handoff signals, waits, keys, and co
 ```python
 research = await agent("research", prompt="...", returns=ResearchPacket)
 sections = await parallel([...], limit=4)
-draft = await pipeline(sections, humanize, evidence_check, approve_until("approve_section"))
+draft = await pipeline(
+    sections,
+    humanize,
+    evidence_check,
+    lambda section: ask(
+        "Review section",
+        key=f"review_section_{section.id}",
+        artifact=section,
+        output=ReviewDecision,
+    ),
+)
 ```
 
 This doc is the grill session: shared language, uncomfortable questions, proposed answers, and implementation pressure points. It is deliberately in the repo so the language survives chat context and issue drift.
@@ -74,7 +84,7 @@ Non-goals for Hermes:
 | Agent call | A durable step completed by an agent/subagent/session runner | Yes | Public primitive: `agent(...)`. |
 | Parallel block | Fan-out/fan-in over independent calls | Yes | Public primitive: `parallel(...)`. |
 | Pipeline | Staged transformation over one or many items | Yes | Public primitive: `pipeline(...)`. |
-| Approval | Human/operator-completed step | Yes | Public primitive: `approve(...)`, `approve_until(...)`. |
+| Human input | Human/operator-completed step | Yes | Public primitive: `ask(...)`. |
 | Step | A durable unit in the run graph | Yes | Agent calls and approvals are step completion modes. |
 | Phase | Human-readable progress label/grouping | Maybe | Useful in UI, but not a substitute for steps. |
 | Signal | Runtime wake-up fact | No | Internal plumbing. Do not put in docs/examples unless debugging internals. |
@@ -119,7 +129,7 @@ Not:
 ```python
 from dataclasses import dataclass
 
-from hermes_workflows import agent, approve, approve_until, parallel, pipeline, workflow
+from hermes_workflows import agent, ask, parallel, pipeline, workflow
 
 
 @dataclass(frozen=True)
@@ -173,7 +183,7 @@ async def blog_post(topic: str) -> str:
         returns=list[str],
     )
 
-    outline = await approve_until("approve_outline", outline)
+    outline_review = await ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)
 
     section_drafts = await parallel(
         [
@@ -192,7 +202,7 @@ async def blog_post(topic: str) -> str:
         section_drafts,
         agent("humanize_section", prompt="Make the section sound like Skylar.", returns=SectionDraft),
         agent("evidence_check_section", prompt="Verify claims and sources.", returns=SectionDraft),
-        approve_until("approve_section"),
+        lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision),
         limit=4,
     )
 
@@ -344,7 +354,7 @@ A stage can be:
 
 ```python
 agent("humanize_section", prompt="...", returns=SectionDraft)
-approve_until("approve_section")
+lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision)
 step(normalize_section)
 lambda item: ...
 ```
@@ -365,19 +375,19 @@ Grill questions:
 2. **Should pipeline stages be sequential per item or barriered by stage?**
    Default should be stage barriers because it is easier to inspect and resume. Later we can allow streaming mode if needed.
 
-3. **How do approvals inside a pipeline work?**
-   `approve_until("approve_section")` inside a pipeline should create per-item approval steps with stable item-derived keys, but publicly still read as `approve_section/<item>`.
+3. **How do human/operator inputs inside a pipeline work?**
+   `lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision)` inside a pipeline should create per-item approval steps with stable item-derived keys, but publicly still read as `review_section/<item>`.
 
 4. **What does rejection do?**
-   For `approve_until`, rejection feeds the prior stage or configured revision stage. It should not terminate the whole workflow unless the author chooses that.
+   For `ask`, rejection feeds the prior stage or configured revision stage. It should not terminate the whole workflow unless the author chooses that.
 
-### `approve(...)` and `approve_until(...)`
+### `ask(...)`
 
 Human/operator gates remain first-class.
 
 ```python
-decision = await approve("choose_angle", artifact=angles, returns=SelectedAngle)
-outline = await approve_until("approve_outline", outline)
+decision = await ask("Choose an angle", key="choose_angle", artifact=angles, output=SelectedAngle)
+outline_review = await ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)
 ```
 
 Required semantics:
@@ -385,7 +395,7 @@ Required semantics:
 - Approval is a public step completed by a human/operator approval surface.
 - Raw approval signals and waits stay private.
 - Provenance is recorded: actor, channel, message/event handle, timestamp, idempotency key.
-- `approve_until` loops until approved, with feedback available to the revision stage.
+- `ask` loops until approved, with feedback available to the revision stage.
 - Approval attempts are lifecycle/provenance of one public approval step unless there is a good reason to split them.
 
 Grill questions:
@@ -406,8 +416,7 @@ Grill questions:
 | `agent(...)` | `agent(...)` + agent runner + step events | Public helper, typed replay, docs/examples, no visible `ctx`. |
 | `parallel(...)` | `ctx.gather`, outbox commands, worker service | Public helper that supports agent calls and inspectable fan-out/fan-in. |
 | `pipeline(...)` | repeated steps/gather plus metadata | Stage abstraction, per-item keying, topology/progress events. |
-| `approve(...)` | `ctx.approval.request(...)` | Public helper without visible `ctx`; typed return; better artifacts. |
-| `approve_until(...)` | `feedback_loop=True` plus hand-rolled loops | First-class loop semantics and feedback routing. |
+| `ask(...)` | `feedback_loop=True` plus hand-rolled loops | First-class loop semantics and feedback routing. |
 | typed return replay | JSON event payloads | Dataclass/Pydantic/schema rehydration based on return contract. |
 
 This means the rehaul is probably not a total rewrite. It is an API layer plus some real runtime gaps: typed replay, parallel agent calls, pipeline metadata, and approval-loop ergonomics.
@@ -554,7 +563,7 @@ One honest PR, not a timid breadcrumb trail. The API rehaul deserves one coheren
 
 1. Top-level `agent(...)` with required `prompt`, typed `input`, optional explicit `context`, `returns`, and replay-safe memoization.
 2. Higher-order prompt-builder examples: ordinary Python functions/templates that return `AgentCall[T]` objects from structured inputs.
-3. Top-level `approve(...)` and `approve_until(...)` wrappers over the existing approval substrate, with loop semantics.
+3. Top-level `ask(...)` wrappers over the existing approval substrate, with loop semantics.
 4. Top-level `parallel(...)` over existing gather/outbox semantics for agent calls and steps.
 5. First-pass `pipeline(...)` over parallel/stage metadata. It can be minimal, but it needs to exist in the same PR so the public model lands whole.
 6. Typed replay/rehydration for saved outputs, at least for dataclasses and plain JSON-compatible returns.
@@ -585,8 +594,7 @@ A contributor can write the blog workflow skeleton using only:
 - `agent`
 - `parallel`
 - `pipeline`
-- `approve`
-- `approve_until`
+- `ask`
 - normal Python/dataclasses
 
 No normal example uses:
@@ -622,13 +630,13 @@ Given three agent calls in `parallel([...])`, the workflow records three child s
 
 Given three items and two stages, the runtime records stage/item progress in a way the dashboard can render as staged work, and replay can resume after a mid-pipeline interruption without re-running completed item stages.
 
-### Approval-loop test
+### Ask feedback-loop test
 
-Given `approve_until("approve_outline", outline)`, rejection with feedback causes a new attempt/revision path and does not terminate the workflow unless configured to do so.
+Given `ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)`, rejection feedback can feed a normal Python revision loop without a special approval-loop primitive.
 
 ### Cutover test
 
-Pre-release compatibility is intentionally removed: normal authoring uses `agent(...)`, `parallel(...)`, `pipeline(...)`, `approve(...)`, and `approve_until(...)`; lower-level runtime hooks stay private/advanced only where the engine itself needs them.
+Pre-release compatibility is intentionally removed: normal authoring uses `agent(...)`, `ask(...)`, `parallel(...)`, and `pipeline(...)`; lower-level runtime hooks stay private/advanced only where the engine itself needs them.
 
 ## Proposed docs changes once implemented
 
@@ -657,8 +665,8 @@ Implemented in the one-PR branch `api-agent-parallel-pipeline`:
 - `AgentCall[T]` awaitables so authors can write `await agent(...)` or hand calls to `parallel(...)`.
 - Top-level `parallel(...)` over the existing durable step/outbox substrate; it enqueues every missing call before waiting.
 - Top-level `pipeline(...)` for staged transformation over item lists.
-- `approve(...)` and `approve_until(...)` helpers over existing approval signals.
-- Workflow-context binding so normal author code can omit visible `ctx`; `agent(...)`, `parallel(...)`, `pipeline(...)`, `approve(...)`, and `approve_until(...)` are the taught surface.
+- `ask(...)` helpers over existing approval signals.
+- Workflow-context binding so normal author code can omit visible `ctx`; `agent(...)`, `ask(...)`, `parallel(...)`, and `pipeline(...)` are the taught surface.
 - Replay safety via request fingerprints covering rendered prompt, structured input, context hashes, return schema, and runner-relevant options.
 
 Verification on this branch: `271 passed, 2 skipped`.

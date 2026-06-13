@@ -18,7 +18,7 @@ from .approvals import (
     OperatorResponseReceipt,
     OperatorStepView,
 )
-from .authoring import AgentCall, AskCall, ContextBundle, agent, ask, approve, approve_until, parallel, pipeline
+from .authoring import AgentCall, AskCall, ContextBundle, agent, ask, approve, parallel, pipeline
 from .decorators import step, workflow
 from .engine import RunResult, WorkflowEngine
 from .invocation import InvocationService, TrustedResumer
@@ -55,7 +55,6 @@ __all__ = [
     "agent",
     "ask",
     "approve",
-    "approve_until",
     "build_workflow_receipt",
     "redact_secrets",
     "render_prompt",

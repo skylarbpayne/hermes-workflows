@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, approve_until, parallel, pipeline, workflow
+from hermes_workflows import WorkflowEngine, agent, ask, parallel, pipeline, workflow
 
 
 @dataclass
@@ -61,7 +61,12 @@ async def memoized_context_workflow(inputs):
         context=[{"label": "brief", "content": CONTEXT_VERSION}],
         returns=ResearchPacket,
     )
-    await approve_until("approve_research", research, prompt="Approve research")
+    await ask(
+        "Approve research",
+        key="approve_research",
+        artifact=research,
+        output=ReviewDecision,
+    )
     return research.summary
 
 
@@ -96,18 +101,6 @@ async def pipeline_agent_workflow(inputs):
             key_by=item.text,
             returns=ItemPacket,
         ),
-        limit=2,
-    )
-    assert all(isinstance(section, ItemPacket) for section in sections)
-    return [section.text for section in sections]
-
-
-@workflow
-async def pipeline_with_approval_workflow(inputs):
-    sections = await pipeline(
-        inputs["items"],
-        lambda item: agent("upper", prompt=f"Uppercase {item}", input={"item": item}, key_by=item, returns=ItemPacket),
-        approve_until("approve_section", prompt="Approve section"),
         limit=2,
     )
     assert all(isinstance(section, ItemPacket) for section in sections)
@@ -212,18 +205,18 @@ def test_agent_replay_fails_loudly_when_prompt_or_context_fingerprint_changes(tm
 
     assert first.status == "waiting"
     assert len(calls) == 1
-    approval = engine.workflow_status("wf_memoized")["approvals"][0]
+    operator_step = engine.workflow_status("wf_memoized")["operator_steps"][0]
 
     PROMPT_VERSION = "v2"
     CONTEXT_VERSION = "ctx-v2"
-    approved = engine.signal(
+    responded = engine.signal(
         "wf_memoized",
-        "approval.decision",
-        key=approval["key"],
-        payload={"action": "approve", "by": "skylar"},
-        source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-approve"},
+        "operator.response",
+        key=operator_step["key"],
+        payload={"action": "approve", "feedback": "looks good"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "event_id": "evt-respond"},
     )
-    result = engine.drain("wf_memoized", initial=approved)
+    result = engine.drain("wf_memoized", initial=responded)
 
     assert result.status == "failed"
     assert "fingerprint changed" in (result.error or "")
@@ -276,28 +269,6 @@ def test_pipeline_runs_stages_over_items_with_typed_stage_outputs(tmp_path):
     step_ids = [step["id"] for step in status["steps"]]
     assert "agent:upper:alpha" in step_ids
     assert "agent:tag:ALPHA" in step_ids
-
-
-def test_pipeline_supports_approval_stages(tmp_path):
-    db = tmp_path / "workflow.sqlite"
-    engine = WorkflowEngine(db, agent_runner=lambda request: {"output": {"text": request["input"]["item"].upper()}})
-
-    first = engine.run_until_idle(pipeline_with_approval_workflow, {"items": ["alpha"]}, workflow_id="wf_pipeline_approval")
-
-    assert first.status == "waiting"
-    assert first.waiting_on == "signal:approval.decision:approve_section"
-
-    signaled = engine.signal(
-        "wf_pipeline_approval",
-        "approval.decision",
-        key="approve_section",
-        payload={"action": "approve"},
-        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m1"},
-    )
-    result = engine.drain("wf_pipeline_approval", initial=signaled)
-
-    assert result.status == "completed"
-    assert result.result == ["ALPHA"]
 
 
 
