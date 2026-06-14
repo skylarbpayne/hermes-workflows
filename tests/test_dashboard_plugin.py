@@ -1231,6 +1231,7 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
 
 def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_input():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
 
     assert 'const reviewRequests = reviewRequestsData.data && reviewRequestsData.data.review_requests || overviewData.active_review_requests || [];' in index_js
     assert 'activeTab === "Review Queue"' in index_js
@@ -1239,9 +1240,13 @@ def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_inpu
     assert 'function HumanInputCard' in index_js
     assert 'input_surface' in index_js
     assert 'surface.kind === "review_decision"' in index_js
-    assert 'submitReviewDecision("approve")' in index_js
-    assert 'submitReviewDecision("reject")' in index_js
-    assert 'Request edits' in index_js
+    assert 'normalizeAction' in index_js
+    assert 'submitReviewDecision(action.value)' in index_js
+    assert 'formatActionLabel(action)' in index_js
+    assert 'Request edits' not in index_js
+    assert 'submitReviewDecision("reject")' not in index_js
+    assert ".hwf-review-action-row button" in style_css
+    assert "letter-spacing: normal" in style_css
     assert 'Upload support is not wired yet' in index_js
     assert 'OperatorStepCard' not in index_js
     assert 'operatorStepsData' not in index_js

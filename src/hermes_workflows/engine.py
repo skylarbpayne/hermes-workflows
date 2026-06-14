@@ -1500,8 +1500,10 @@ class WorkflowEngine:
             request["kind"] = "human_input"
             request["request_type"] = "human_input"
             request.setdefault("source", None)
-            request["request_schema"] = _review_request_schema_descriptor(schema_id)
-            request["input_surface"] = _review_input_surface(schema_id)
+            raw_descriptor = request.get("schema_descriptor")
+            descriptor = raw_descriptor if isinstance(raw_descriptor, dict) else _review_request_schema_descriptor(schema_id)
+            request["request_schema"] = descriptor
+            request["input_surface"] = _review_input_surface(descriptor)
             requests.append(request)
         return requests
 
@@ -1521,6 +1523,8 @@ class WorkflowEngine:
                 if isinstance(request, dict):
                     item.setdefault("artifact", request.get("artifact"))
                     item.setdefault("schema", request.get("schema"))
+                    item.setdefault("schema_descriptor", request.get("schema_descriptor"))
+                    item.setdefault("context", request.get("context"))
                     item.setdefault("approver", request.get("approver"))
                     item.setdefault("timeout", request.get("timeout"))
             operator_steps.append(item)
@@ -3098,6 +3102,8 @@ class WorkflowContext:
         key: str,
         artifact: Any = None,
         schema: str = "json",
+        schema_descriptor: Optional[dict[str, Any]] = None,
+        context: Optional[list[dict[str, Any]]] = None,
         approver: str = "human",
         timeout: Optional[str] = None,
         block: bool = True,
@@ -3109,6 +3115,8 @@ class WorkflowContext:
             key=key,
             artifact=artifact,
             schema=schema,
+            schema_descriptor=schema_descriptor,
+            context=context,
             approver=approver,
             timeout=timeout,
             block=block,
@@ -3257,6 +3265,8 @@ class ApprovalClient:
         key: str,
         artifact: Any = None,
         schema: str = "json",
+        schema_descriptor: Optional[dict[str, Any]] = None,
+        context: Optional[list[dict[str, Any]]] = None,
         approver: str = "human",
         timeout: Optional[str] = None,
         block: bool = True,
@@ -3272,6 +3282,8 @@ class ApprovalClient:
             "key": key,
             "artifact": artifact,
             "schema": schema,
+            "schema_descriptor": schema_descriptor,
+            "context": context or [],
             "approver": approver,
             "allowed": None,
             "authority": [],
@@ -3585,12 +3597,22 @@ def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:
     return descriptor
 
 
-def _review_input_surface(schema_id: str) -> dict[str, Any]:
-    descriptor = _review_request_schema_descriptor(schema_id)
+def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
+    descriptor = schema if isinstance(schema, dict) else _review_request_schema_descriptor(schema)
+    fields = descriptor.get("fields") if isinstance(descriptor.get("fields"), list) else []
+    action_field = next((field for field in fields if isinstance(field, dict) and field.get("name") == "action" and field.get("kind") == "choice"), None)
+    action_options = action_field.get("options") or [] if isinstance(action_field, dict) else []
+    if action_field:
+        actions = [_review_action_descriptor(option) for option in action_options]
+        return {
+            "kind": "review_decision",
+            "actions": actions,
+            "feedback": {"kind": "text", "optional": True, "placeholder": "What should change?"},
+        }
     if descriptor["kind"] == "review_decision":
         return {
             "kind": "review_decision",
-            "actions": ["approve", "reject", "edit", "rerun"],
+            "actions": [_review_action_descriptor(action) for action in ["approve", "request_changes"]],
             "feedback": {"kind": "text", "optional": True},
         }
     if descriptor["kind"] == "text":
@@ -3598,6 +3620,15 @@ def _review_input_surface(schema_id: str) -> dict[str, Any]:
     if descriptor["kind"] == "structured_object":
         return {"kind": "structured_form", "schema": descriptor}
     return {"kind": "json_object", "schema": descriptor}
+
+
+def _review_action_descriptor(action: Any) -> dict[str, Any]:
+    value = str(action)
+    label = value.replace("_", " ").strip().capitalize() or value
+    item: dict[str, Any] = {"value": value, "label": label}
+    if value != "approve":
+        item["requires_feedback"] = True
+    return item
 
 
 def _to_jsonable(value: Any) -> Any:

@@ -5,8 +5,8 @@ import hashlib
 import inspect
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass
-from typing import Any, Callable, Generic, TypeVar
+from dataclasses import MISSING, dataclass, fields, is_dataclass
+from typing import Any, Callable, Generic, Literal, TypeVar, get_args, get_origin, get_type_hints
 
 from .approvals import ApprovalDecision
 from .engine import PendingStep
@@ -171,8 +171,9 @@ class AgentCall(Generic[T]):
 class AskCall(Generic[T]):
     prompt: str
     key: str | None = None
-    artifact: Any = None
-    output: Any = dict
+    input: Any = None
+    context: Any = None
+    returns: Any = dict
     approver: str = "human"
     timeout: str | None = None
 
@@ -192,15 +193,17 @@ class AskCall(Generic[T]):
         result = await ctx._request_human_input(
             self.prompt,
             key=key,
-            artifact=self.artifact,
-            schema=_return_schema_id(self.output),
+            artifact=self.input,
+            schema=_return_schema_id(self.returns),
+            schema_descriptor=_return_schema_descriptor(self.returns),
+            context=_context_manifest(self.context),
             approver=self.approver,
             timeout=self.timeout,
             block=block,
         )
         if isinstance(result, PendingStep):
             return result
-        return _coerce_return(result, self.output)
+        return _coerce_return(result, self.returns)
 
     def step_key(self, ctx: Any) -> str:
         if self.key is not None:
@@ -269,16 +272,33 @@ def agent(
     )
 
 
+_UNSET = object()
+
+
 def ask(
     prompt: str,
     *,
     key: str | None = None,
-    artifact: Any = None,
-    output: Any = dict,
+    input: Any = None,
+    context: Any = None,
+    returns: Any = dict,
+    artifact: Any = _UNSET,
+    output: Any = _UNSET,
     approver: str = "human",
     timeout: str | None = None,
 ) -> AskCall[Any]:
-    return AskCall(prompt, key=key, artifact=artifact, output=output, approver=approver, timeout=timeout)
+    """Request typed input from a Review Queue surface.
+
+    `ask(...)` mirrors `agent(...)`: `input=` is the value/artifact to review,
+    `context=` is extra context, and `returns=` is the typed response contract.
+    `artifact=` and `output=` are accepted as legacy aliases during the cutover.
+    """
+
+    if artifact is not _UNSET:
+        input = artifact
+    if output is not _UNSET:
+        returns = output
+    return AskCall(prompt, key=key, input=input, context=context, returns=returns, approver=approver, timeout=timeout)
 
 
 async def parallel(calls: Iterable[Any], *, limit: int | None = None) -> list[Any]:
@@ -406,6 +426,47 @@ def _coerce_return(value: Any, returns: Any) -> Any:
         kwargs = {field.name: value[field.name] for field in fields(returns) if field.name in value}
         return returns(**kwargs)
     return value
+
+
+def _return_schema_descriptor(returns: Any) -> dict[str, Any]:
+    schema_id = _return_schema_id(returns)
+    if returns is None or returns in (Any, dict):
+        return {"id": schema_id, "name": "json", "kind": "json_object"}
+    if returns is str:
+        return {"id": schema_id, "name": "str", "kind": "text"}
+    if returns in (int, float, bool):
+        return {"id": schema_id, "name": returns.__name__, "kind": "scalar", "type": returns.__name__}
+    if is_dataclass(returns) and isinstance(returns, type):
+        type_hints = get_type_hints(returns)
+        field_descriptors = [_field_schema_descriptor(field, annotation=type_hints.get(field.name, field.type)) for field in fields(returns)]
+        return {
+            "id": schema_id,
+            "name": returns.__qualname__,
+            "kind": "structured_object",
+            "module": returns.__module__,
+            "fields": field_descriptors,
+        }
+    return {"id": schema_id, "name": str(returns), "kind": "structured_object"}
+
+
+def _field_schema_descriptor(field: Any, *, annotation: Any) -> dict[str, Any]:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    required = field.default is MISSING and field.default_factory is MISSING
+    descriptor: dict[str, Any] = {"name": field.name, "kind": "scalar", "required": required}
+    if origin is Literal:
+        descriptor["kind"] = "choice"
+        descriptor["options"] = list(args)
+        return descriptor
+    if annotation is str:
+        descriptor["kind"] = "text"
+    elif annotation is bool:
+        descriptor["kind"] = "boolean"
+    elif annotation in (int, float):
+        descriptor["kind"] = "number"
+    else:
+        descriptor["kind"] = "object"
+    return descriptor
 
 
 def _return_schema_id(returns: Any) -> str:

@@ -33,8 +33,8 @@ draft = await pipeline(
     lambda section: ask(
         "Review section",
         key=f"review_section_{section.id}",
-        artifact=section,
-        output=ReviewDecision,
+        input=section,
+        returns=ReviewDecision,
     ),
 )
 ```
@@ -170,9 +170,10 @@ async def blog_post(topic: str) -> str:
         returns=list[str],
     )
 
-    angle = await approve(
-        "choose_angle",
-        artifact=angles,
+    angle = await ask(
+        "Choose angle",
+        key="choose_angle",
+        input=angles,
         returns=str,
     )
 
@@ -183,7 +184,7 @@ async def blog_post(topic: str) -> str:
         returns=list[str],
     )
 
-    outline_review = await ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)
+    outline_review = await ask("Review outline", key="review_outline", input=outline, returns=ReviewDecision)
 
     section_drafts = await parallel(
         [
@@ -202,7 +203,7 @@ async def blog_post(topic: str) -> str:
         section_drafts,
         agent("humanize_section", prompt="Make the section sound like Skylar.", returns=SectionDraft),
         agent("evidence_check_section", prompt="Verify claims and sources.", returns=SectionDraft),
-        lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision),
+        lambda section: ask("Review section", key=f"review_section_{section.id}", input=section, returns=ReviewDecision),
         limit=4,
     )
 
@@ -354,7 +355,7 @@ A stage can be:
 
 ```python
 agent("humanize_section", prompt="...", returns=SectionDraft)
-lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision)
+lambda section: ask("Review section", key=f"review_section_{section.id}", input=section, returns=ReviewDecision)
 step(normalize_section)
 lambda item: ...
 ```
@@ -376,24 +377,24 @@ Grill questions:
    Default should be stage barriers because it is easier to inspect and resume. Later we can allow streaming mode if needed.
 
 3. **How do human/review inputs inside a pipeline work?**
-   `lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision)` inside a pipeline should create per-item Review Queue requests with stable item-derived keys, but publicly still read as `review_section/<item>`.
+   `lambda section: ask("Review section", key=f"review_section_{section.id}", input=section, returns=ReviewDecision)` inside a pipeline should create per-item Review Queue requests with stable item-derived keys, but publicly still read as `review_section/<item>`.
 
 4. **What does rejection do?**
-   For `ask(..., output=ReviewDecision)`, rejection/edit feedback feeds the prior stage or configured revision stage. It should not terminate the whole workflow unless the author chooses that.
+   For `ask(..., returns=ReviewDecision)`, rejection/edit feedback feeds the prior stage or configured revision stage. It should not terminate the whole workflow unless the author chooses that.
 
 ### `ask(...)`
 
 `ask(...)` is the general typed human/external-feedback primitive. The product surface is the Review Queue; approval is one schema/preset over the same request model.
 
 ```python
-decision = await ask("Choose an angle", key="choose_angle", artifact=angles, output=SelectedAngle)
-outline_review = await ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)
+decision = await ask("Choose an angle", key="choose_angle", input=angles, returns=SelectedAngle)
+outline_review = await ask("Review outline", key="review_outline", input=outline, returns=ReviewDecision)
 ```
 
 Required semantics:
 
 - Human-input requests and approval gates appear in one Review Queue: what needs attention.
-- The requested schema drives the input surface: `ReviewDecision` renders explicit approve/reject/edit/rerun controls; structured outputs render forms or structured-entry fallbacks.
+- The requested schema drives the input surface: a dataclass response with an `action: Literal[...]` field renders those exact action choices; structured outputs render forms or structured-entry fallbacks.
 - Raw approval/signal/wait plumbing stays private.
 - Provenance is recorded: actor, channel/source, message/event handle, timestamp, idempotency key, and submitted value.
 - `ask(...)` composes inside `parallel(...)` and `pipeline(...)`: all ready cards emit before waiting, each with its own key/artifact/schema/provenance.
@@ -633,7 +634,7 @@ Given three items and two stages, the runtime records stage/item progress in a w
 
 ### Ask feedback-loop test
 
-Given `ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)`, rejection feedback can feed a normal Python revision loop without a special approval-loop primitive.
+Given `ask("Review outline", key="review_outline", input=outline, returns=ReviewDecision)`, rejection feedback can feed a normal Python revision loop without a special approval-loop primitive.
 
 ### Cutover test
 

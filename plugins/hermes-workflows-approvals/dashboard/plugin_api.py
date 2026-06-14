@@ -833,12 +833,21 @@ def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:
     return descriptor
 
 
-def _review_input_surface(schema_id: str) -> dict[str, Any]:
-    descriptor = _review_request_schema_descriptor(schema_id)
+def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
+    descriptor = schema if isinstance(schema, dict) else _review_request_schema_descriptor(schema)
+    fields = descriptor.get("fields") if isinstance(descriptor.get("fields"), list) else []
+    action_field = next((field for field in fields if isinstance(field, dict) and field.get("name") == "action" and field.get("kind") == "choice"), None)
+    action_options = (action_field.get("options") or []) if isinstance(action_field, dict) else []
+    if action_field:
+        return {
+            "kind": "review_decision",
+            "actions": [_review_action_descriptor(option) for option in action_options],
+            "feedback": {"kind": "text", "optional": True, "placeholder": "What should change?"},
+        }
     if descriptor["kind"] == "review_decision":
         return {
             "kind": "review_decision",
-            "actions": ["approve", "reject", "edit", "rerun"],
+            "actions": [_review_action_descriptor(action) for action in ["approve", "request_changes"]],
             "feedback": {"kind": "text", "optional": True},
         }
     if descriptor["kind"] == "text":
@@ -846,6 +855,15 @@ def _review_input_surface(schema_id: str) -> dict[str, Any]:
     if descriptor["kind"] == "structured_object":
         return {"kind": "structured_form", "schema": descriptor}
     return {"kind": "json_object", "schema": descriptor}
+
+
+def _review_action_descriptor(action: Any) -> dict[str, Any]:
+    value = str(action)
+    label = value.replace("_", " ").strip().capitalize() or value
+    item: dict[str, Any] = {"value": value, "label": label}
+    if value != "approve":
+        item["requires_feedback"] = True
+    return item
 
 
 def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
@@ -866,6 +884,8 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
     artifact = _operator_approval_artifact(step.get("artifact") if step.get("artifact") is not None else request.get("artifact"))
     prompt = step.get("prompt") or step.get("label") or step.get("key") or "Operator input needed"
     schema_id = str(step.get("schema") or request.get("schema") or "json")
+    raw_descriptor = step.get("schema_descriptor") if isinstance(step.get("schema_descriptor"), dict) else request.get("schema_descriptor")
+    descriptor = raw_descriptor if isinstance(raw_descriptor, dict) else _review_request_schema_descriptor(schema_id)
     return {
         "db_alias": db_alias,
         "workflow_id": step.get("workflow_id"),
@@ -879,8 +899,8 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
         "prompt": prompt,
         "approver": step.get("approver") or request.get("approver"),
         "schema": schema_id,
-        "request_schema": _review_request_schema_descriptor(schema_id),
-        "input_surface": _review_input_surface(schema_id),
+        "request_schema": descriptor,
+        "input_surface": _review_input_surface(descriptor),
         "artifact_preview": _redact_artifact_local_refs(artifact),
         "artifact_render": _artifact_descriptor(artifact),
         "output": step.get("output"),
