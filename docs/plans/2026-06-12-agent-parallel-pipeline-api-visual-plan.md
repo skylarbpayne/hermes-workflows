@@ -24,7 +24,7 @@ Implemented surface:
 research = await agent("research", prompt="Research typed workflows", input=brief, context=[...], returns=ResearchPacket)
 sections = await parallel([agent("draft_section", prompt=f"Draft {s}", input=s, key_by=s.slug, returns=SectionDraft) for s in sections])
 final_sections = await pipeline(sections, humanize_section, evidence_check_section, limit=4)
-await ask("Approve final draft", key="approve_final", artifact=draft, output=ReviewDecision)
+await ask("Review final draft", key="review_final", input=draft, returns=ReviewDecision)
 ```
 
 Durability rule: saved outputs replay only when the stored request fingerprint still matches the current rendered prompt, input, context hashes, return schema, and runner options.
@@ -479,7 +479,7 @@ A first version is good enough when this code is plausible, tested, and document
 async def blog_post(topic: str) -> str:
     research = await agent("research", input=topic, returns=ResearchPacket)
     outline = await agent("outline", input=research, returns=Outline)
-    outline_review = await ask("Review outline", key="review_outline", artifact=outline, output=ReviewDecision)
+    outline_review = await ask("Review outline", key="review_outline", input=outline, returns=ReviewDecision)
 
     drafts = await parallel(
         [agent("draft_section", input=s, key_by=s.slug, returns=SectionDraft) for s in outline.sections],
@@ -490,7 +490,7 @@ async def blog_post(topic: str) -> str:
         drafts,
         agent("humanize", returns=SectionDraft),
         agent("evidence_check", returns=SectionDraft),
-        lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision),
+        lambda section: ask("Review section", key=f"review_section_{section.id}", input=section, returns=ReviewDecision),
         limit=4,
     )
 

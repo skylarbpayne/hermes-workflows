@@ -259,7 +259,18 @@
     if (!step || step.status !== "waiting") return e("span", { className: "hwf-muted" }, step && step.status === "completed" ? "answered" : "no actions");
     function isReviewDecisionStep(step) {
       const surface = step && step.input_surface || {};
-      return surface.kind === "review_decision" || String(step && step.schema || "").endsWith(":ReviewDecision") || /approve|review/i.test(String(step && (step.prompt || step.key) || ""));
+      return surface.kind === "review_decision";
+    }
+    function normalizeAction(action) {
+      if (action && typeof action === "object") return action;
+      const value = String(action || "");
+      return { value: value, label: formatActionLabel(value) };
+    }
+    function formatActionLabel(action) {
+      const label = action && typeof action === "object" ? action.label : null;
+      if (label) return label;
+      const value = action && typeof action === "object" ? action.value : String(action || "");
+      return value.replace(/_/g, " ").replace(/^./, function (ch) { return ch.toUpperCase(); });
     }
     function submitPayload(payload) {
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) { setUi(Object.assign({}, ui, { error: "Payload must be a JSON object" })); return; }
@@ -284,12 +295,20 @@
       submitPayload({ action: action, feedback: ui.feedback || undefined });
     }
     if (isReviewDecisionStep(step)) {
-      return e("div", { className: "hwf-approval-actions" },
-        e(Input, { value: ui.feedback, placeholder: "Optional feedback for this review", onInput: function (event) { setUi(Object.assign({}, ui, { feedback: event.target.value })); } }),
-        e(Button, { disabled: ui.busy, onClick: function () { submitReviewDecision("approve"); } }, "Approve"),
-        e(Button, { disabled: ui.busy, variant: "outline", onClick: function () { submitReviewDecision("reject"); } }, "Reject"),
-        e(Button, { disabled: ui.busy, variant: "outline", onClick: function () { submitReviewDecision("edit"); } }, "Request edits"),
-        e(Button, { disabled: ui.busy, variant: "outline", onClick: function () { submitReviewDecision("rerun"); } }, "Rerun"),
+      const surface = step.input_surface || {};
+      const actions = (surface.actions && surface.actions.length ? surface.actions : [{ value: "approve", label: "Approve" }, { value: "request_changes", label: "Request changes", requires_feedback: true }]).map(normalizeAction);
+      const feedback = surface.feedback || {};
+      return e("div", { className: "hwf-approval-actions hwf-review-actions" },
+        e(Input, { value: ui.feedback, placeholder: feedback.placeholder || "What should change?", onInput: function (event) { setUi(Object.assign({}, ui, { feedback: event.target.value })); } }),
+        e("div", { className: "hwf-review-action-row" },
+          actions.map(function (action) {
+            return e(Button, {
+              key: action.value,
+              disabled: ui.busy,
+              variant: action.value === "approve" ? undefined : "outline",
+              onClick: function () { submitReviewDecision(action.value); }
+            }, formatActionLabel(action));
+          })),
         ui.done && e("span", { className: "hwf-ok" }, ui.done),
         ui.error && e("span", { className: "hwf-bad" }, ui.error));
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import pytest
 
@@ -25,7 +26,13 @@ class ItemPacket:
 
 @dataclass
 class ReviewDecision:
-    action: str
+    action: Literal["approve", "request_changes"]
+    feedback: str | None = None
+
+
+@dataclass
+class PublishChoice:
+    action: Literal["ship", "revise"]
     feedback: str | None = None
 
 
@@ -64,8 +71,8 @@ async def memoized_context_workflow(inputs):
     await ask(
         "Approve research",
         key="approve_research",
-        artifact=research,
-        output=ReviewDecision,
+        input=research,
+        returns=ReviewDecision,
     )
     return research.summary
 
@@ -112,8 +119,8 @@ async def ask_angle_workflow(inputs):
     choice = await ask(
         prompt="Which angle should we pursue?",
         key="choose_angle",
-        artifact={"options": inputs["angles"]},
-        output=AngleChoice,
+        input={"options": inputs["angles"]},
+        returns=AngleChoice,
     )
     assert isinstance(choice, AngleChoice)
     return {"angle_id": choice.angle_id, "rationale": choice.rationale}
@@ -126,8 +133,8 @@ async def parallel_ask_workflow(inputs):
             ask(
                 prompt=f"Review section {item}",
                 key=f"review_{item}",
-                artifact={"section": item},
-                output=ReviewDecision,
+                input={"section": item},
+                returns=ReviewDecision,
             )
             for item in inputs["items"]
         ]
@@ -143,8 +150,8 @@ async def pipeline_with_ask_workflow(inputs):
         lambda item: ask(
             prompt=f"Review section {item}",
             key=f"review_{item}",
-            artifact={"section": item},
-            output=ReviewDecision,
+            input={"section": item},
+            returns=ReviewDecision,
         ),
         limit=2,
     )
@@ -155,6 +162,13 @@ async def pipeline_with_ask_workflow(inputs):
 def test_agent_requires_prompt():
     with pytest.raises(TypeError, match="prompt"):
         agent("research")
+
+
+def test_ask_does_not_accept_legacy_artifact_or_output_names():
+    with pytest.raises(TypeError, match="artifact"):
+        ask("Review", key="review", artifact={"old": True})
+    with pytest.raises(TypeError, match="output"):
+        ask("Review", key="review", input={"new": True}, output=ReviewDecision)
 
 
 def test_agent_prompt_input_context_are_sent_to_runner_and_typed_output_replays(tmp_path):
@@ -298,6 +312,7 @@ def test_ask_collects_typed_human_input_without_requiring_approval_action(tmp_pa
     assert review_request["kind"] == "human_input"
     assert review_request["key"] == "choose_angle"
     assert review_request["request_schema"]["id"].endswith(":AngleChoice")
+    assert review_request["request_schema"]["fields"][0]["name"] == "angle_id"
     assert review_request["input_surface"]["kind"] == "structured_form"
     assert review_request["source"] is None
 
@@ -360,7 +375,16 @@ def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
     review_requests = engine.workflow_status("wf_parallel_ask")["review_requests"]
     assert [request["key"] for request in review_requests] == ["review_one", "review_two"]
     assert [request["input_surface"]["kind"] for request in review_requests] == ["review_decision", "review_decision"]
-    assert review_requests[0]["input_surface"]["actions"] == ["approve", "reject", "edit", "rerun"]
+    assert review_requests[0]["request_schema"]["fields"][0] == {
+        "name": "action",
+        "kind": "choice",
+        "options": ["approve", "request_changes"],
+        "required": True,
+    }
+    assert review_requests[0]["input_surface"]["actions"] == [
+        {"value": "approve", "label": "Approve"},
+        {"value": "request_changes", "label": "Request changes", "requires_feedback": True},
+    ]
 
     one = engine.signal(
         "wf_parallel_ask",
@@ -376,13 +400,59 @@ def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
         "wf_parallel_ask",
         "operator.response",
         key="review_two",
-        payload={"action": "revise", "feedback": "tighten"},
+        payload={"action": "request_changes", "feedback": "tighten"},
         source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-two"},
     )
     result = engine.drain("wf_parallel_ask", initial=two)
 
     assert result.status == "completed"
-    assert result.result == ["approve", "revise"]
+    assert result.result == ["approve", "request_changes"]
+
+
+def test_dataclass_action_literal_automatically_drives_review_actions(tmp_path):
+    @workflow
+    async def publish_choice_workflow(inputs):
+        decision = await ask(
+            prompt="Review publish choice",
+            key="review_publish_choice",
+            input={"draft": inputs["draft"]},
+            returns=PublishChoice,
+        )
+        assert isinstance(decision, PublishChoice)
+        return {"action": decision.action, "feedback": decision.feedback}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(publish_choice_workflow, {"draft": "hello"}, workflow_id="wf_publish_choice")
+
+    assert first.status == "waiting"
+    request = engine.workflow_status("wf_publish_choice")["review_requests"][0]
+    assert request["request_schema"]["name"] == "PublishChoice"
+    assert request["request_schema"]["fields"][0] == {
+        "name": "action",
+        "kind": "choice",
+        "options": ["ship", "revise"],
+        "required": True,
+    }
+    assert request["input_surface"] == {
+        "kind": "review_decision",
+        "actions": [
+            {"value": "ship", "label": "Ship"},
+            {"value": "revise", "label": "Revise", "requires_feedback": True},
+        ],
+        "feedback": {"kind": "text", "optional": True, "placeholder": "What should change?"},
+    }
+
+    engine.submit_operator_response(
+        workflow_id="wf_publish_choice",
+        key="review_publish_choice",
+        payload={"action": "revise", "feedback": "needs a sharper opener"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-publish"},
+    )
+    result = engine.drain("wf_publish_choice")
+
+    assert result.status == "completed"
+    assert result.result == {"action": "revise", "feedback": "needs a sharper opener"}
 
 
 def test_pipeline_ask_stage_fans_out_human_prompts(tmp_path):
