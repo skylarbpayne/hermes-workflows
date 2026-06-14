@@ -523,7 +523,7 @@ def test_cli_worker_process_executes_pending_command_across_processes(tmp_path):
     }
 
 
-def test_cli_worker_service_executes_pending_command_without_workflow_id_or_ref(tmp_path):
+def test_cli_worker_config_mode_executes_pending_command_without_workflow_id_or_ref(tmp_path):
     (tmp_path / "worker_wf.py").write_text(CLI_WORKFLOW_MODULE)
     db = tmp_path / "workflow.sqlite"
     registry = tmp_path / "workflows.registry.json"
@@ -554,7 +554,7 @@ def test_cli_worker_service_executes_pending_command_without_workflow_id_or_ref(
 
     worker_result = run_cli(
         tmp_path,
-        "worker-service",
+        "worker",
         "--config",
         str(registry),
         "--db",

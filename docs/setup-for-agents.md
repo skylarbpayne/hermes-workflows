@@ -119,15 +119,15 @@ hermes-workflows resume-pending \
 
 `resume-pending` fails closed unless the registry entry has `trusted_resume: true`. Receipts are redacted JSON that can be pasted into Kanban comments or attached to dashboard artifacts.
 
-For autonomous step execution, run the resident worker service from the same registry instead of manually targeting one workflow id:
+For autonomous workflow execution, run the resident Workflow Worker from the same registry instead of manually targeting one workflow id:
 
 ```bash
-hermes-workflows worker-service \
+hermes-workflows worker \
   --config .hermes/workflows.registry.json \
   --worker-id workflows-local-worker
 ```
 
-`worker-service` leases pending or lease-expired `run_workflow`, `run_step`, and child-workflow commands across configured DB sources, loads each workflow instance's stored `workflow_ref`, executes the command, and keeps looping until the run reaches the next durable wait or terminal state. The stored `workflow_ref` must match a workflow entry in the registry for that DB; DB-only sources are rejected so a poisoned SQLite row cannot make the resident worker import arbitrary local Python. Omit `--idle-exit-after` for an always-on supervisor/launchd process; use `--once` or `--max-commands` for tests and smoke runs. The older `worker --db --id <workflow_ref>` command remains a narrow manual drain for one known workflow.
+`worker --config` leases pending or lease-expired `run_workflow`, `run_step`, agent, and child-workflow commands across configured DB sources, loads each workflow instance's stored `workflow_ref`, executes the command, and keeps looping until the run reaches the next durable wait or terminal state. The stored `workflow_ref` must match a workflow entry in the registry for that DB; DB-only sources are rejected so a poisoned SQLite row cannot make the resident worker import arbitrary local Python. Omit `--idle-exit-after` for an always-on supervisor/launchd process; use `--once` or `--max-commands` for tests and smoke runs. Scoped `worker <workflow_ref> --db ... --id ...` remains a narrow manual drain for one known workflow.
 
 ## The mental model
 
@@ -136,7 +136,7 @@ A workflow function is a decider. It replays from the top on every run, resolves
 ```text
 operator runs `hermes-workflows run <name-or-path>` or `uv run workflow.py`
   -> workflow emits missing commands and exits when waiting
-resident `hermes-workflows worker-service --config ...` leases runnable step commands
+resident `hermes-workflows worker --config ...` leases runnable step commands
   -> step outputs are recorded and the decider is replayed to the next wait/terminal state
 adapters publish signals or approval decisions
   -> `resume-trusted`/`resume-pending` or another trusted runner re-invokes the entrypoint

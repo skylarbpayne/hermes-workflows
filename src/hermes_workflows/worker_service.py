@@ -63,7 +63,7 @@ class WorkflowWorkerService:
         self,
         sources: Iterable[WorkerServiceSource],
         *,
-        worker_id: str = "workflow-worker-service",
+        worker_id: str = "workflow-worker",
         lease_seconds: int = 30,
         agent_runner: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
@@ -80,7 +80,7 @@ class WorkflowWorkerService:
         registry: WorkflowRegistry,
         *,
         db: str | None = None,
-        worker_id: str = "workflow-worker-service",
+        worker_id: str = "workflow-worker",
         lease_seconds: int = 30,
         agent_runner: Callable[[dict[str, Any]], Any] | None = None,
     ) -> "WorkflowWorkerService":
@@ -189,7 +189,7 @@ class WorkflowWorkerService:
             workflow_ref = str(workflow_ref)
             if workflow_ref not in source.allowed_workflow_refs:
                 raise ValueError(
-                    f"workflow_ref {workflow_ref!r} is not allowlisted for worker-service DB source {source.name!r}"
+                    f"workflow_ref {workflow_ref!r} is not allowlisted for Workflow Worker DB source {source.name!r}"
                 )
             engine = WorkflowEngine(Path(source.path), agent_runner=self.agent_runner)
             instance = engine._instance(workflow_id)

@@ -1054,7 +1054,7 @@ class WorkflowEngine:
         limit: Optional[int] = None,
         include_external_agent: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return workflow instances with runnable worker-service commands.
+        """Return workflow instances with commands runnable by the Workflow Worker.
 
         This intentionally spans all workflow instances in one DB. The per-workflow
         `worker` command still drains a known workflow id; resident workers use this

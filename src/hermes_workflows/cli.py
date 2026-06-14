@@ -43,6 +43,14 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def add_agent_runner_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--agent-command", help="Provider command for agent(...) jobs; also reads HERMES_WORKFLOWS_AGENT_COMMAND")
+    parser.add_argument("--agent-arg", action="append", default=[], help="Argument passed to --agent-command; repeat for multiple args")
+    parser.add_argument("--agent-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--max-agent-stdout-bytes", type=positive_int, default=1_000_000)
+    parser.add_argument("--max-agent-stderr-bytes", type=positive_int, default=4096)
+
+
 def agent_runner_from_args(args: argparse.Namespace):
     command = getattr(args, "agent_command", None) or os.environ.get("HERMES_WORKFLOWS_AGENT_COMMAND")
     agent_args = list(getattr(args, "agent_arg", []) or [])
@@ -249,7 +257,7 @@ def run_engine_cli(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_worker_service_cli(args: argparse.Namespace) -> int:
+def run_worker_registry_cli(args: argparse.Namespace) -> int:
     registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
     try:
         service = WorkflowWorkerService.from_registry(
@@ -278,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     visible_commands = (
-        "{registry,invoke,resume-trusted,resume-pending,start,run,worker,worker-service,signal,"
+        "{registry,invoke,resume-trusted,resume-pending,start,run,worker,signal,"
         "reconcile-child,reconcile-children,cancel,status,list,events,outbox,"
         "dashboard,serve-dashboard,doctor,approve,reject}"
     )
@@ -350,41 +358,22 @@ def main(argv: list[str] | None = None) -> int:
     run_engine.add_argument("--max-resumes", type=positive_int)
     sub._choices_actions = [action for action in sub._choices_actions if action.dest != "_run-engine"]
 
-    worker = sub.add_parser("worker", help="Execute leased run_step commands for a workflow")
-    worker.add_argument("workflow_ref", help="module:function; imported so the decider and steps are registered")
-    worker.add_argument("--db", required=True, type=Path)
-    worker.add_argument("--id", required=True, dest="workflow_id")
-    worker.add_argument("--worker-id", default="cli-worker")
+    worker = sub.add_parser("worker", help="Run the Workflow Worker in resident or scoped mode")
+    worker.add_argument("workflow_ref", nargs="?", help="scoped debug/recovery mode: module:function to drain one workflow id")
+    worker.add_argument("--config", type=Path, help="resident mode: workflow registry/config to scan for runnable work")
+    worker.add_argument("--db", help="configured DB alias, explicit local DB path, or scoped-mode DB path")
+    worker.add_argument("--id", dest="workflow_id", help="scoped debug/recovery mode: workflow instance id")
+    worker.add_argument("--worker-id", default="workflow-worker")
     worker.add_argument("--lease-seconds", type=int, default=30)
+    worker.add_argument("--poll-interval", type=float, default=1.0, help="resident mode: sleep interval while waiting for work")
     worker.add_argument("--once", action="store_true", help="Execute at most one command")
-    worker.add_argument("--max-commands", type=int)
-    worker.add_argument("--agent-command", help="Provider command for agent(...) jobs; also reads HERMES_WORKFLOWS_AGENT_COMMAND")
-    worker.add_argument("--agent-arg", action="append", default=[], help="Argument passed to --agent-command; repeat for multiple args")
-    worker.add_argument("--agent-timeout-seconds", type=float, default=120.0)
-    worker.add_argument("--max-agent-stdout-bytes", type=positive_int, default=1_000_000)
-    worker.add_argument("--max-agent-stderr-bytes", type=positive_int, default=4096)
-
-    worker_service = sub.add_parser(
-        "worker-service",
-        help="Run a resident worker that leases commands across configured workflow DB sources",
-    )
-    worker_service.add_argument("--config", type=Path)
-    worker_service.add_argument("--db", help="configured DB alias or explicit local DB path; omitted drains all configured DB sources")
-    worker_service.add_argument("--worker-id", default="workflow-worker-service")
-    worker_service.add_argument("--lease-seconds", type=int, default=30)
-    worker_service.add_argument("--poll-interval", type=float, default=1.0)
-    worker_service.add_argument("--once", action="store_true", help="Execute at most one command globally, then exit")
-    worker_service.add_argument("--max-commands", type=positive_int, help="Exit after executing this many commands")
-    worker_service.add_argument(
+    worker.add_argument("--max-commands", type=positive_int, help="Exit after executing this many commands")
+    worker.add_argument(
         "--idle-exit-after",
         type=float,
-        help="Exit after this many idle seconds; omit for a resident always-on process",
+        help="resident mode: exit after this many idle seconds; omit for an always-on process",
     )
-    worker_service.add_argument("--agent-command", help="Provider command for agent(...) jobs; also reads HERMES_WORKFLOWS_AGENT_COMMAND")
-    worker_service.add_argument("--agent-arg", action="append", default=[], help="Argument passed to --agent-command; repeat for multiple args")
-    worker_service.add_argument("--agent-timeout-seconds", type=float, default=120.0)
-    worker_service.add_argument("--max-agent-stdout-bytes", type=positive_int, default=1_000_000)
-    worker_service.add_argument("--max-agent-stderr-bytes", type=positive_int, default=4096)
+    add_agent_runner_args(worker)
 
     signal = sub.add_parser("signal", help="Record a signal and enqueue workflow continuation")
     signal.add_argument("workflow_ref", help="module:function; imported so the decider is registered")
@@ -546,8 +535,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_via_uv(raw_argv, args)
     if args.command == "_run-engine":
         return run_engine_cli(args)
-    if args.command == "worker-service":
-        return run_worker_service_cli(args)
+    if args.command == "worker" and args.config is not None:
+        return run_worker_registry_cli(args)
+    if args.command == "worker" and (not args.workflow_ref or not args.db or not args.workflow_id):
+        raise SystemExit("worker scoped mode requires workflow_ref, --db, and --id unless --config is supplied")
 
     read_only_commands = {"status", "list", "events", "outbox", "dashboard", "serve-dashboard"}
     engine = WorkflowEngine(
