@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .agent_runner import build_agent_runner
 from .approvals import ApprovalDecisionInput
 from .dashboard import render_dashboard
 from .dashboard_server import serve_dashboard
@@ -40,6 +41,25 @@ def positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def agent_runner_from_args(args: argparse.Namespace):
+    command = getattr(args, "agent_command", None) or os.environ.get("HERMES_WORKFLOWS_AGENT_COMMAND")
+    agent_args = list(getattr(args, "agent_arg", []) or [])
+    if not agent_args and os.environ.get("HERMES_WORKFLOWS_AGENT_ARGS_JSON"):
+        loaded = json.loads(os.environ["HERMES_WORKFLOWS_AGENT_ARGS_JSON"])
+        if not isinstance(loaded, list) or not all(isinstance(item, str) for item in loaded):
+            raise SystemExit("HERMES_WORKFLOWS_AGENT_ARGS_JSON must be a JSON array of strings")
+        agent_args = loaded
+    if not command:
+        return None
+    return build_agent_runner(
+        agent_command=command,
+        agent_args=agent_args,
+        timeout_seconds=float(getattr(args, "agent_timeout_seconds", 120.0)),
+        max_stdout_bytes=int(getattr(args, "max_agent_stdout_bytes", 1_000_000)),
+        max_stderr_bytes=int(getattr(args, "max_agent_stderr_bytes", 4096)),
+    )
 
 
 def print_json(payload: Any) -> None:
@@ -237,6 +257,7 @@ def run_worker_service_cli(args: argparse.Namespace) -> int:
             db=args.db,
             worker_id=args.worker_id,
             lease_seconds=args.lease_seconds,
+            agent_runner=agent_runner_from_args(args),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -337,6 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--lease-seconds", type=int, default=30)
     worker.add_argument("--once", action="store_true", help="Execute at most one command")
     worker.add_argument("--max-commands", type=int)
+    worker.add_argument("--agent-command", help="Provider command for agent(...) jobs; also reads HERMES_WORKFLOWS_AGENT_COMMAND")
+    worker.add_argument("--agent-arg", action="append", default=[], help="Argument passed to --agent-command; repeat for multiple args")
+    worker.add_argument("--agent-timeout-seconds", type=float, default=120.0)
+    worker.add_argument("--max-agent-stdout-bytes", type=positive_int, default=1_000_000)
+    worker.add_argument("--max-agent-stderr-bytes", type=positive_int, default=4096)
 
     worker_service = sub.add_parser(
         "worker-service",
@@ -354,6 +380,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         help="Exit after this many idle seconds; omit for a resident always-on process",
     )
+    worker_service.add_argument("--agent-command", help="Provider command for agent(...) jobs; also reads HERMES_WORKFLOWS_AGENT_COMMAND")
+    worker_service.add_argument("--agent-arg", action="append", default=[], help="Argument passed to --agent-command; repeat for multiple args")
+    worker_service.add_argument("--agent-timeout-seconds", type=float, default=120.0)
+    worker_service.add_argument("--max-agent-stdout-bytes", type=positive_int, default=1_000_000)
+    worker_service.add_argument("--max-agent-stderr-bytes", type=positive_int, default=4096)
 
     signal = sub.add_parser("signal", help="Record a signal and enqueue workflow continuation")
     signal.add_argument("workflow_ref", help="module:function; imported so the decider is registered")
@@ -519,7 +550,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_worker_service_cli(args)
 
     read_only_commands = {"status", "list", "events", "outbox", "dashboard", "serve-dashboard"}
-    engine = WorkflowEngine(args.db, read_only=args.command in read_only_commands)
+    engine = WorkflowEngine(
+        args.db,
+        read_only=args.command in read_only_commands,
+        agent_runner=agent_runner_from_args(args) if args.command == "worker" else None,
+    )
     workflow = None
     if hasattr(args, "workflow_ref") and not (args.command == "serve-dashboard" and not args.enable_approval_actions):
         workflow = load_workflow(args.workflow_ref)

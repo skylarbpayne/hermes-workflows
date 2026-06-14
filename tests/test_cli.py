@@ -78,6 +78,34 @@ async def generated_parent_workflow(ctx, inputs):
     return await child(inputs["item"], key=inputs["item"]["id"])
 '''
 
+AGENT_RUNNER_WORKFLOW_MODULE = '''
+from hermes_workflows import agent, workflow
+
+@workflow
+async def agent_runner_workflow(ctx, inputs):
+    packet = await agent(
+        "writer",
+        prompt="Write a short packet.",
+        input={"topic": inputs["topic"]},
+        returns=dict,
+        key="write_packet",
+    )
+    return {"packet": packet}
+'''
+
+AGENT_PROVIDER_MODULE = '''
+import json
+import sys
+
+prompt = sys.stdin.read()
+if "agent.runner_request.v1" not in prompt:
+    raise SystemExit("missing runner request")
+print(json.dumps({
+    "output": {"summary": "agent ran from provider", "saw_request": "agent.runner_request.v1" in prompt},
+    "provenance": {"model": "fake-provider"},
+}))
+'''
+
 
 def run_cli(tmp_path, *args, env_extra=None):
     env = os.environ.copy()
@@ -111,6 +139,137 @@ def run_worker(tmp_path, workflow_ref, db, workflow_id, *, max_commands=None, on
     if max_commands is not None:
         args.extend(["--max-commands", str(max_commands)])
     return json.loads(run_cli(tmp_path, *args).stdout)
+
+
+def test_worker_cli_executes_agent_jobs_with_configured_provider_command(tmp_path):
+    (tmp_path / "agent_runner_wf.py").write_text(AGENT_RUNNER_WORKFLOW_MODULE)
+    provider = tmp_path / "agent_provider.py"
+    provider.write_text(AGENT_PROVIDER_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "agent_runner_wf:agent_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_runner_cli",
+            "--input-json",
+            json.dumps({"topic": "package worker"}),
+        ).stdout
+    )
+
+    assert started["status"] == "running"
+
+    waiting = json.loads(
+        run_cli(
+            tmp_path,
+            "worker",
+            "agent_runner_wf:agent_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_runner_cli",
+            "--worker-id",
+            "test-agent-runner-without-provider",
+            "--once",
+        ).stdout
+    )
+    assert waiting["status"] == "waiting"
+    assert waiting["waiting_on"] == "signal:agent.completed:write_packet"
+
+    completed = json.loads(
+        run_cli(
+            tmp_path,
+            "worker",
+            "agent_runner_wf:agent_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_runner_cli",
+            "--worker-id",
+            "test-agent-runner-worker",
+            "--max-commands",
+            "10",
+            "--agent-command",
+            sys.executable,
+            "--agent-arg",
+            str(provider),
+        ).stdout
+    )
+
+    assert completed["status"] == "completed"
+    assert completed["result"]["packet"] == {"summary": "agent ran from provider", "saw_request": True}
+
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    outbox = [dict(row) for row in con.execute("SELECT type, key, status FROM workflow_commands_outbox ORDER BY id")]
+    assert all(row["status"] == "completed" for row in outbox)
+    assert not any(row["type"] == "external_agent" and row["status"] == "pending" for row in outbox)
+
+
+def test_worker_service_cli_executes_agent_jobs_with_configured_provider_command(tmp_path):
+    (tmp_path / "agent_runner_wf.py").write_text(AGENT_RUNNER_WORKFLOW_MODULE)
+    provider = tmp_path / "agent_provider.py"
+    provider.write_text(AGENT_PROVIDER_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    registry = tmp_path / "workflows.registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "dbs": {"service": str(db)},
+                "workflows": {
+                    "agent-worker": {"workflow_ref": "agent_runner_wf:agent_runner_workflow", "db": "service"}
+                },
+            }
+        )
+    )
+
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "agent_runner_wf:agent_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_runner_service",
+            "--input-json",
+            json.dumps({"topic": "service worker"}),
+        ).stdout
+    )
+    assert started["status"] == "running"
+
+    service = json.loads(
+        run_cli(
+            tmp_path,
+            "worker-service",
+            "--config",
+            str(registry),
+            "--db",
+            "service",
+            "--worker-id",
+            "test-agent-runner-service",
+            "--max-commands",
+            "10",
+            "--idle-exit-after",
+            "0.1",
+            "--agent-command",
+            sys.executable,
+            "--agent-arg",
+            str(provider),
+        ).stdout
+    )
+
+    assert service["errors"] == []
+    assert service["executed"] >= 2
+    assert service["executions"][-1]["status"] == "completed"
+
+    status = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_agent_runner_service").stdout)
+    assert status["status"] == "completed"
+    assert status["result"]["packet"] == {"summary": "agent ran from provider", "saw_request": True}
 
 
 def start_to_waiting(tmp_path, workflow_ref, db, workflow_id, input_json, *, max_commands=3):

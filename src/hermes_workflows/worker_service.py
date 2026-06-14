@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .engine import RunResult, WorkflowEngine, _WORKFLOW_REGISTRY
 from .registry import WorkflowDbConfig, WorkflowRegistry
@@ -65,12 +65,14 @@ class WorkflowWorkerService:
         *,
         worker_id: str = "workflow-worker-service",
         lease_seconds: int = 30,
+        agent_runner: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self.sources = list(sources)
         if not self.sources:
             raise ValueError("worker service needs at least one workflow DB source")
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        self.agent_runner = agent_runner
 
     @classmethod
     def from_registry(
@@ -80,11 +82,13 @@ class WorkflowWorkerService:
         db: str | None = None,
         worker_id: str = "workflow-worker-service",
         lease_seconds: int = 30,
+        agent_runner: Callable[[dict[str, Any]], Any] | None = None,
     ) -> "WorkflowWorkerService":
         return cls(
             _sources_from_registry(registry, db=db),
             worker_id=worker_id,
             lease_seconds=lease_seconds,
+            agent_runner=agent_runner,
         )
 
     def tick(self, *, max_commands: int | None = None) -> WorkerServiceTick:
@@ -163,8 +167,8 @@ class WorkflowWorkerService:
         *,
         skipped_commands: set[tuple[str, int]] | None = None,
     ) -> dict[str, Any] | None:
-        engine = WorkflowEngine(Path(source.path))
-        for row in engine.runnable_workflows():
+        engine = WorkflowEngine(Path(source.path), agent_runner=self.agent_runner)
+        for row in engine.runnable_workflows(include_external_agent=self.agent_runner is not None):
             if skipped_commands and (source.path, int(row["command_id"])) in skipped_commands:
                 continue
             return row
@@ -187,7 +191,7 @@ class WorkflowWorkerService:
                 raise ValueError(
                     f"workflow_ref {workflow_ref!r} is not allowlisted for worker-service DB source {source.name!r}"
                 )
-            engine = WorkflowEngine(Path(source.path))
+            engine = WorkflowEngine(Path(source.path), agent_runner=self.agent_runner)
             instance = engine._instance(workflow_id)
             workflow_fn = load_workflow_ref(workflow_ref)
             registered_name = getattr(workflow_fn, "__workflow_name__", getattr(workflow_fn, "__name__", None))
