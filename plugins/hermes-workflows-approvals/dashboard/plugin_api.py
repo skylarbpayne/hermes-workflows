@@ -228,10 +228,10 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
 
 def _runtime_semantics() -> dict[str, Any]:
     return {
-        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; operator responses and approval decisions resume trusted local workflow code when requested.",
-        "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the operator UI shows the active source instead of making users choose debug databases.",
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; review responses and approval decisions resume trusted local workflow code when requested.",
+        "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the review UI shows the active source instead of making users choose debug databases.",
         "agent_requests": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. agent(...) calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
-        "operator_responses": "Human input requests are completed by trusted review surfaces setting typed step output with human provenance.",
+        "review_responses": "Human input requests are completed by trusted review surfaces setting typed step output with provenance.",
         "approval_decisions": "Approval gates are approve/reject review requests for risky transitions, not a separate place operators need to hunt for work.",
         "artifacts": "Human input, approval, and run artifacts are persisted in workflow history and returned as review previews plus artifact_render descriptors. The dashboard does not host local media files.",
     }
@@ -813,6 +813,41 @@ def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
     return {"level": "low", "reason": "Approval records human provenance and resumes the trusted local workflow; no obvious external/destructive keyword was detected."}
 
 
+def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:
+    normalized = schema_id or "json"
+    if ":" in normalized:
+        module, name = normalized.rsplit(":", 1)
+    else:
+        module, name = "", normalized
+    if name == "ReviewDecision":
+        kind = "review_decision"
+    elif normalized in {"json", "dict", "builtins:dict"}:
+        kind = "json_object"
+    elif normalized in {"str", "builtins:str"}:
+        kind = "text"
+    else:
+        kind = "structured_object"
+    descriptor = {"id": normalized, "name": name or normalized, "kind": kind}
+    if module:
+        descriptor["module"] = module
+    return descriptor
+
+
+def _review_input_surface(schema_id: str) -> dict[str, Any]:
+    descriptor = _review_request_schema_descriptor(schema_id)
+    if descriptor["kind"] == "review_decision":
+        return {
+            "kind": "review_decision",
+            "actions": ["approve", "reject", "edit", "rerun"],
+            "feedback": {"kind": "text", "optional": True},
+        }
+    if descriptor["kind"] == "text":
+        return {"kind": "textarea", "placeholder": "Enter feedback"}
+    if descriptor["kind"] == "structured_object":
+        return {"kind": "structured_form", "schema": descriptor}
+    return {"kind": "json_object", "schema": descriptor}
+
+
 def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
     raw_request = step.get("request")
     request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
@@ -826,9 +861,11 @@ def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
 
 
 def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
-    request = step.get("request") if isinstance(step.get("request"), dict) else {}
+    raw_request = step.get("request")
+    request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
     artifact = _operator_approval_artifact(step.get("artifact") if step.get("artifact") is not None else request.get("artifact"))
     prompt = step.get("prompt") or step.get("label") or step.get("key") or "Operator input needed"
+    schema_id = str(step.get("schema") or request.get("schema") or "json")
     return {
         "db_alias": db_alias,
         "workflow_id": step.get("workflow_id"),
@@ -836,11 +873,14 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
         "workflow_ref": step.get("workflow_ref"),
         "key": step.get("key"),
         "status": step.get("status"),
-        "kind": step.get("kind") or step.get("step_type") or "operator",
+        "kind": "human_input",
+        "request_type": "human_input",
         "headline": prompt,
         "prompt": prompt,
         "approver": step.get("approver") or request.get("approver"),
-        "schema": step.get("schema") or request.get("schema"),
+        "schema": schema_id,
+        "request_schema": _review_request_schema_descriptor(schema_id),
+        "input_surface": _review_input_surface(schema_id),
         "artifact_preview": _redact_artifact_local_refs(artifact),
         "artifact_render": _artifact_descriptor(artifact),
         "output": step.get("output"),
@@ -862,10 +902,22 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
         "workflow_ref": approval.get("workflow_ref"),
         "key": approval.get("key"),
         "status": approval.get("status"),
+        "kind": "approval_policy",
+        "request_type": "approval_policy",
         "headline": prompt,
         "prompt": prompt,
         "approver": approval.get("approver"),
         "allowed": approval.get("allowed") or ["approve", "reject"],
+        "request_schema": {
+            "id": "hermes_workflows.approvals:ApprovalDecision",
+            "name": "ApprovalDecision",
+            "kind": "approval_decision",
+        },
+        "input_surface": {
+            "kind": "approval_decision",
+            "actions": list(approval.get("allowed") or ["approve", "reject"]),
+            "feedback": {"kind": "text", "optional": True},
+        },
         "authority": approval.get("authority"),
         "artifact_preview": _redact_artifact_local_refs(artifact),
         "artifact_render": _artifact_descriptor(artifact),
@@ -1117,6 +1169,24 @@ async def active_operator_steps(db: str | None = None, status: str | None = "wai
     return {"db_alias": db_alias, "count": len(operator_steps), "operator_steps": operator_steps, "runtime_semantics": _runtime_semantics()}
 
 
+@router.get("/review-requests")
+async def active_review_requests(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
+    db_alias, db_path = _resolve_dashboard_db(db)
+    engine = WorkflowEngine(db_path, read_only=True)
+    max_items = _int(limit, default=100, maximum=500)
+    approvals = [
+        _approval_card(approval_view_to_dict(approval), db_alias=db_alias)
+        for approval in engine.list_approvals(status=status)[:max_items]
+    ]
+    remaining = max(0, max_items - len(approvals))
+    human_inputs = [
+        _operator_step_card(_strip_internal_fields(step), db_alias=db_alias)
+        for step in engine.list_operator_steps(status=status)[:remaining]
+    ]
+    review_requests = approvals + human_inputs
+    return {"db_alias": db_alias, "count": len(review_requests), "review_requests": review_requests, "runtime_semantics": _runtime_semantics()}
+
+
 @router.get("/approvals")
 async def active_approvals(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
@@ -1199,6 +1269,7 @@ async def overview(
     definitions = [_definition_payload(definition, engine) for definition in _catalog_for_engine(engine)]
     approvals = [_approval_card(approval_view_to_dict(approval), db_alias=db_alias) for approval in engine.list_approvals(status="waiting")[:50]]
     operator_steps = [_operator_step_card(_strip_internal_fields(step), db_alias=db_alias) for step in engine.list_operator_steps(status="waiting")[:50]]
+    review_requests = approvals + operator_steps
     return {
         "db_alias": db_alias,
         "workflow_count": len(workflows),
@@ -1206,6 +1277,8 @@ async def overview(
         "workflows": workflows,
         "definitions_count": len(definitions),
         "definitions": definitions,
+        "active_review_request_count": len(review_requests),
+        "active_review_requests": review_requests,
         "active_operator_step_count": len(operator_steps),
         "active_operator_steps": operator_steps,
         "active_approval_count": len(approvals),
@@ -1239,11 +1312,16 @@ async def workflow_status(
 
 @router.post("/operator-steps/response")
 async def respond_operator_step(body: dict[str, Any]) -> dict[str, Any]:
+    return await respond_review_request(body)
+
+
+@router.post("/review-requests/response")
+async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
     approver_id = _dashboard_approver_id()
     if not approver_id:
         raise HTTPException(
             status_code=403,
-            detail="Dashboard operator responses require server-configured dashboard_approver_id.",
+            detail="Dashboard review responses require server-configured dashboard_approver_id.",
         )
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
     workflow_id = str(body.get("workflow_id") or "").strip()
@@ -1252,7 +1330,7 @@ async def respond_operator_step(body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
     if not payload:
-        raise HTTPException(status_code=400, detail="operator response payload is required")
+        raise HTTPException(status_code=400, detail="review response payload is required")
     decision_actor = _dashboard_decision_actor(approver_id)
     message_id = f"dashboard:{uuid.uuid4()}"
 
@@ -1284,7 +1362,7 @@ async def respond_operator_step(body: dict[str, Any]) -> dict[str, Any]:
     try:
         receipt, post_resume = await asyncio.to_thread(record_and_resume)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"operator response/resume failed: {type(exc).__name__}: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"review response/resume failed: {type(exc).__name__}: {exc}") from exc
     receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
     return {
         "success": True,

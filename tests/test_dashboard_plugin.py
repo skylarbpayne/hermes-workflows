@@ -1232,14 +1232,20 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
 def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_input():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
 
-    assert 'const reviewRequests = approvals.concat(operatorSteps);' in index_js
+    assert 'const reviewRequests = reviewRequestsData.data && reviewRequestsData.data.review_requests || overviewData.active_review_requests || [];' in index_js
     assert 'activeTab === "Review Queue"' in index_js
     assert 'tabs: ["Overview", "Workflows", "Runs", "Review Queue", "Artifacts"]' in index_js
-    assert 'placeholder: "Paste JSON matching the requested schema"' in index_js
-    assert '"Schema: " + step.schema' in index_js
-    assert 'isReviewDecisionStep(step)' in index_js
+    assert 'API + "/review-requests"' in index_js
+    assert 'function HumanInputCard' in index_js
+    assert 'input_surface' in index_js
+    assert 'surface.kind === "review_decision"' in index_js
     assert 'submitReviewDecision("approve")' in index_js
     assert 'submitReviewDecision("reject")' in index_js
+    assert 'Request edits' in index_js
+    assert 'Upload support is not wired yet' in index_js
+    assert 'OperatorStepCard' not in index_js
+    assert 'operatorStepsData' not in index_js
+    assert 'Paste JSON matching the requested schema' not in index_js
 
 
 def test_dashboard_frontend_hides_successful_initial_loading_state():

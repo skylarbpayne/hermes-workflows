@@ -85,7 +85,7 @@ def test_plugin_entrypoint_and_directory_manifest_are_present():
     shim = Path("plugins/hermes-workflows-approvals/__init__.py")
     assert manifest.exists()
     assert shim.exists()
-    assert "workflow_approvals_list" in manifest.read_text()
+    assert "workflow_review_requests_list" in manifest.read_text()
     assert "pre_gateway_dispatch" in manifest.read_text()
 
 
@@ -96,15 +96,13 @@ def test_plugin_registers_approval_tools_and_gateway_hook():
     register(ctx)
 
     assert set(ctx.tools) == {
-        "workflow_approvals_list",
-        "workflow_operator_steps_list",
+        "workflow_review_requests_list",
+        "workflow_review_respond",
         "workflow_approval_decide",
-        "workflow_operator_respond",
     }
-    assert ctx.tools["workflow_approvals_list"]["toolset"] == "hermes_workflows_approvals"
-    assert ctx.tools["workflow_operator_steps_list"]["toolset"] == "hermes_workflows_approvals"
+    assert ctx.tools["workflow_review_requests_list"]["toolset"] == "hermes_workflows_approvals"
+    assert ctx.tools["workflow_review_respond"]["toolset"] == "hermes_workflows_approvals"
     assert ctx.tools["workflow_approval_decide"]["toolset"] == "hermes_workflows_approvals"
-    assert ctx.tools["workflow_operator_respond"]["toolset"] == "hermes_workflows_approvals"
     assert "pre_gateway_dispatch" in ctx.hooks
 
 
@@ -133,7 +131,7 @@ def test_configured_dbs_accepts_json_string_from_hermes_config(monkeypatch, tmp_
 
 
 
-def test_workflow_approvals_list_returns_bounded_redacted_pending_approval(tmp_path):
+def test_workflow_review_requests_list_returns_bounded_redacted_pending_request(tmp_path):
     from hermes_workflows.hermes_plugin_approvals import register
 
     db = tmp_path / "workflow.sqlite"
@@ -141,10 +139,10 @@ def test_workflow_approvals_list_returns_bounded_redacted_pending_approval(tmp_p
     ctx = FakePluginContext()
     register(ctx)
 
-    result = parse_tool_result(ctx.tools["workflow_approvals_list"]["handler"]({"db": str(db)}))
+    result = parse_tool_result(ctx.tools["workflow_review_requests_list"]["handler"]({"db": str(db)}))
 
     assert result["count"] == 1
-    approval = result["approvals"][0]
+    approval = result["review_requests"][0]
     assert approval["workflow_id"] == "wf_plugin"
     assert approval["workflow_ref"] == "tests.test_hermes_plugin_approvals:plugin_approval_workflow"
     assert approval["key"] == "approve_plugin_test"
@@ -166,9 +164,9 @@ def test_decision_tokens_use_configured_db_alias_not_raw_db_path(tmp_path, monke
     ctx = FakePluginContext()
     register(ctx)
 
-    result = parse_tool_result(ctx.tools["workflow_approvals_list"]["handler"]({"db": "launch"}))
+    result = parse_tool_result(ctx.tools["workflow_review_requests_list"]["handler"]({"db": "launch"}))
 
-    token = result["approvals"][0]["decision_token_approve"]
+    token = result["review_requests"][0]["decision_token_approve"]
     parsed = parse_decision_token(token)
     assert parsed is not None
     assert parsed["db"] == "launch"

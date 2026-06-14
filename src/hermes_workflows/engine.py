@@ -1326,6 +1326,8 @@ class WorkflowEngine:
         pending_commands = self._active_commands(workflow_id)
         child_workflows = self._child_workflow_summaries(row, events)
         steps = self._step_summaries(events)
+        approvals = self._approval_summaries(events)
+        human_inputs = self._operator_step_summaries(events, steps=steps)
         status = {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
@@ -1342,8 +1344,9 @@ class WorkflowEngine:
             "pending_commands": pending_commands,
             "diagnostics": self._command_diagnostics(pending_commands),
             "child_workflows": child_workflows,
-            "approvals": self._approval_summaries(events),
-            "operator_steps": self._operator_step_summaries(events, steps=steps),
+            "approvals": approvals,
+            "operator_steps": human_inputs,
+            "review_requests": self._review_request_summaries(human_inputs, approvals=approvals),
             "steps": steps,
         }
         if command_history is not None:
@@ -1468,6 +1471,39 @@ class WorkflowEngine:
                 summary["validation_error"] = validation_error
             approvals.append(summary)
         return approvals
+
+    def _review_request_summaries(
+        self,
+        human_inputs: list[dict[str, Any]],
+        *,
+        approvals: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        requests: list[dict[str, Any]] = []
+        for item in approvals:
+            request = dict(item)
+            request["kind"] = "approval_policy"
+            request["request_type"] = "approval_policy"
+            request["input_surface"] = {
+                "kind": "approval_decision",
+                "actions": list(request.get("allowed") or ["approve", "reject"]),
+                "feedback": {"kind": "text", "optional": True},
+            }
+            request["request_schema"] = {
+                "id": "hermes_workflows.approvals:ApprovalDecision",
+                "name": "ApprovalDecision",
+                "kind": "approval_decision",
+            }
+            requests.append(request)
+        for item in human_inputs:
+            request = dict(item)
+            schema_id = str(request.get("schema") or "json")
+            request["kind"] = "human_input"
+            request["request_type"] = "human_input"
+            request.setdefault("source", None)
+            request["request_schema"] = _review_request_schema_descriptor(schema_id)
+            request["input_surface"] = _review_input_surface(schema_id)
+            requests.append(request)
+        return requests
 
     def _operator_step_summaries(self, events: List[Dict[str, Any]], *, steps: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         step_summaries = steps if steps is not None else self._step_summaries(events)
@@ -3527,6 +3563,41 @@ def _diagnostic_message(label: str) -> str:
         "orphaned_or_inconsistent": "Command is pending or running but does not match the workflow's current wait state.",
     }
     return messages.get(label, "Command has an unknown diagnostic state.")
+
+
+def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:
+    normalized = schema_id or "json"
+    if ":" in normalized:
+        module, name = normalized.rsplit(":", 1)
+    else:
+        module, name = "", normalized
+    if name == "ReviewDecision":
+        kind = "review_decision"
+    elif normalized in {"json", "dict", "builtins:dict"}:
+        kind = "json_object"
+    elif normalized in {"str", "builtins:str"}:
+        kind = "text"
+    else:
+        kind = "structured_object"
+    descriptor = {"id": normalized, "name": name or normalized, "kind": kind}
+    if module:
+        descriptor["module"] = module
+    return descriptor
+
+
+def _review_input_surface(schema_id: str) -> dict[str, Any]:
+    descriptor = _review_request_schema_descriptor(schema_id)
+    if descriptor["kind"] == "review_decision":
+        return {
+            "kind": "review_decision",
+            "actions": ["approve", "reject", "edit", "rerun"],
+            "feedback": {"kind": "text", "optional": True},
+        }
+    if descriptor["kind"] == "text":
+        return {"kind": "textarea", "placeholder": "Enter feedback"}
+    if descriptor["kind"] == "structured_object":
+        return {"kind": "structured_form", "schema": descriptor}
+    return {"kind": "json_object", "schema": descriptor}
 
 
 def _to_jsonable(value: Any) -> Any:

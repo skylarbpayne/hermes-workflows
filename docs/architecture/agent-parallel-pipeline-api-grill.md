@@ -375,15 +375,15 @@ Grill questions:
 2. **Should pipeline stages be sequential per item or barriered by stage?**
    Default should be stage barriers because it is easier to inspect and resume. Later we can allow streaming mode if needed.
 
-3. **How do human/operator inputs inside a pipeline work?**
-   `lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision)` inside a pipeline should create per-item approval steps with stable item-derived keys, but publicly still read as `review_section/<item>`.
+3. **How do human/review inputs inside a pipeline work?**
+   `lambda section: ask("Review section", key=f"review_section_{section.id}", artifact=section, output=ReviewDecision)` inside a pipeline should create per-item Review Queue requests with stable item-derived keys, but publicly still read as `review_section/<item>`.
 
 4. **What does rejection do?**
-   For `ask`, rejection feeds the prior stage or configured revision stage. It should not terminate the whole workflow unless the author chooses that.
+   For `ask(..., output=ReviewDecision)`, rejection/edit feedback feeds the prior stage or configured revision stage. It should not terminate the whole workflow unless the author chooses that.
 
 ### `ask(...)`
 
-Human/operator gates remain first-class.
+`ask(...)` is the general typed human/external-feedback primitive. The product surface is the Review Queue; approval is one schema/preset over the same request model.
 
 ```python
 decision = await ask("Choose an angle", key="choose_angle", artifact=angles, output=SelectedAngle)
@@ -392,11 +392,12 @@ outline_review = await ask("Review outline", key="review_outline", artifact=outl
 
 Required semantics:
 
-- Approval is a public step completed by a human/operator approval surface.
-- Raw approval signals and waits stay private.
-- Provenance is recorded: actor, channel, message/event handle, timestamp, idempotency key.
-- `ask` loops until approved, with feedback available to the revision stage.
-- Approval attempts are lifecycle/provenance of one public approval step unless there is a good reason to split them.
+- Human-input requests and approval gates appear in one Review Queue: what needs attention.
+- The requested schema drives the input surface: `ReviewDecision` renders explicit approve/reject/edit/rerun controls; structured outputs render forms or structured-entry fallbacks.
+- Raw approval/signal/wait plumbing stays private.
+- Provenance is recorded: actor, channel/source, message/event handle, timestamp, idempotency key, and submitted value.
+- `ask(...)` composes inside `parallel(...)` and `pipeline(...)`: all ready cards emit before waiting, each with its own key/artifact/schema/provenance.
+- Approval attempts are lifecycle/provenance of one public review step unless there is a good reason to split them.
 
 Grill questions:
 
