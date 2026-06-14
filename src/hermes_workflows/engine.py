@@ -3583,9 +3583,7 @@ def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:
         module, name = normalized.rsplit(":", 1)
     else:
         module, name = "", normalized
-    if name == "ReviewDecision":
-        kind = "review_decision"
-    elif normalized in {"json", "dict", "builtins:dict"}:
+    if normalized in {"json", "dict", "builtins:dict"}:
         kind = "json_object"
     elif normalized in {"str", "builtins:str"}:
         kind = "text"
@@ -3599,22 +3597,26 @@ def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:
 
 def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
     descriptor = schema if isinstance(schema, dict) else _review_request_schema_descriptor(schema)
-    fields = descriptor.get("fields") if isinstance(descriptor.get("fields"), list) else []
+    raw_fields = descriptor.get("fields")
+    fields = raw_fields if isinstance(raw_fields, list) else []
     action_field = next((field for field in fields if isinstance(field, dict) and field.get("name") == "action" and field.get("kind") == "choice"), None)
+    feedback_field = next(
+        (
+            field
+            for field in fields
+            if isinstance(field, dict)
+            and field.get("name") in {"feedback", "comment", "comments", "reason", "note", "notes"}
+            and field.get("kind") in {"text", "object"}
+        ),
+        None,
+    )
     action_options = action_field.get("options") or [] if isinstance(action_field, dict) else []
     if action_field:
-        actions = [_review_action_descriptor(option) for option in action_options]
-        return {
-            "kind": "review_decision",
-            "actions": actions,
-            "feedback": {"kind": "text", "optional": True, "placeholder": "What should change?"},
-        }
-    if descriptor["kind"] == "review_decision":
-        return {
-            "kind": "review_decision",
-            "actions": [_review_action_descriptor(action) for action in ["approve", "request_changes"]],
-            "feedback": {"kind": "text", "optional": True},
-        }
+        actions = [_review_action_descriptor(option, has_feedback=feedback_field is not None) for option in action_options]
+        surface: dict[str, Any] = {"kind": "review_decision", "actions": actions}
+        if feedback_field is not None:
+            surface["feedback"] = {"kind": "text", "optional": True, "placeholder": "What should change?"}
+        return surface
     if descriptor["kind"] == "text":
         return {"kind": "textarea", "placeholder": "Enter feedback"}
     if descriptor["kind"] == "structured_object":
@@ -3622,11 +3624,11 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
     return {"kind": "json_object", "schema": descriptor}
 
 
-def _review_action_descriptor(action: Any) -> dict[str, Any]:
+def _review_action_descriptor(action: Any, *, has_feedback: bool = False) -> dict[str, Any]:
     value = str(action)
     label = value.replace("_", " ").strip().capitalize() or value
     item: dict[str, Any] = {"value": value, "label": label}
-    if value != "approve":
+    if has_feedback and value not in {"approve", "accept", "ship", "proceed", "continue", "yes"}:
         item["requires_feedback"] = True
     return item
 

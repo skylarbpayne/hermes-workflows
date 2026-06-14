@@ -6,6 +6,7 @@ import inspect
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+import ast
 from typing import Any, Callable, Generic, Literal, TypeVar, get_args, get_origin, get_type_hints
 
 from .approvals import ApprovalDecision
@@ -272,9 +273,6 @@ def agent(
     )
 
 
-_UNSET = object()
-
-
 def ask(
     prompt: str,
     *,
@@ -282,8 +280,6 @@ def ask(
     input: Any = None,
     context: Any = None,
     returns: Any = dict,
-    artifact: Any = _UNSET,
-    output: Any = _UNSET,
     approver: str = "human",
     timeout: str | None = None,
 ) -> AskCall[Any]:
@@ -291,13 +287,8 @@ def ask(
 
     `ask(...)` mirrors `agent(...)`: `input=` is the value/artifact to review,
     `context=` is extra context, and `returns=` is the typed response contract.
-    `artifact=` and `output=` are accepted as legacy aliases during the cutover.
     """
 
-    if artifact is not _UNSET:
-        input = artifact
-    if output is not _UNSET:
-        returns = output
     return AskCall(prompt, key=key, input=input, context=context, returns=returns, approver=approver, timeout=timeout)
 
 
@@ -437,7 +428,7 @@ def _return_schema_descriptor(returns: Any) -> dict[str, Any]:
     if returns in (int, float, bool):
         return {"id": schema_id, "name": returns.__name__, "kind": "scalar", "type": returns.__name__}
     if is_dataclass(returns) and isinstance(returns, type):
-        type_hints = get_type_hints(returns)
+        type_hints = _safe_dataclass_type_hints(returns)
         field_descriptors = [_field_schema_descriptor(field, annotation=type_hints.get(field.name, field.type)) for field in fields(returns)]
         return {
             "id": schema_id,
@@ -449,24 +440,62 @@ def _return_schema_descriptor(returns: Any) -> dict[str, Any]:
     return {"id": schema_id, "name": str(returns), "kind": "structured_object"}
 
 
+def _safe_dataclass_type_hints(dataclass_type: type[Any]) -> dict[str, Any]:
+    """Return best-effort field annotations without making Python 3.9 choke.
+
+    Test-local dataclasses often use postponed annotations. On Python 3.9,
+    `str | None` cannot be evaluated by `get_type_hints`, but the Review Queue
+    still needs enough schema information to render `Literal[...]` actions.
+    """
+
+    try:
+        return get_type_hints(dataclass_type)
+    except Exception:
+        return {}
+
+
 def _field_schema_descriptor(field: Any, *, annotation: Any) -> dict[str, Any]:
     origin = get_origin(annotation)
     args = get_args(annotation)
     required = field.default is MISSING and field.default_factory is MISSING
     descriptor: dict[str, Any] = {"name": field.name, "kind": "scalar", "required": required}
-    if origin is Literal:
+    literal_options = _literal_options(annotation)
+    if origin is Literal or literal_options:
         descriptor["kind"] = "choice"
-        descriptor["options"] = list(args)
+        descriptor["options"] = list(args) if args else literal_options
         return descriptor
-    if annotation is str:
+    if _is_text_annotation(annotation):
         descriptor["kind"] = "text"
-    elif annotation is bool:
+    elif annotation is bool or annotation == "bool":
         descriptor["kind"] = "boolean"
-    elif annotation in (int, float):
+    elif annotation in (int, float) or annotation in ("int", "float"):
         descriptor["kind"] = "number"
     else:
         descriptor["kind"] = "object"
     return descriptor
+
+
+def _literal_options(annotation: Any) -> list[Any]:
+    if not isinstance(annotation, str):
+        return []
+    text = annotation.strip()
+    if not (text.startswith("Literal[") or text.startswith("typing.Literal[")):
+        return []
+    inner = text[text.index("[") + 1 : -1]
+    try:
+        parsed = ast.literal_eval(f"({inner},)")
+    except Exception:
+        return []
+    return list(parsed)
+
+
+def _is_text_annotation(annotation: Any) -> bool:
+    if annotation is str:
+        return True
+    if not isinstance(annotation, str):
+        return False
+    normalized = annotation.replace("typing.", "").replace(" ", "")
+    return normalized in {"str", "str|None", "Optional[str]", "Union[str,None]", "Union[None,str]"}
 
 
 def _return_schema_id(returns: Any) -> str:

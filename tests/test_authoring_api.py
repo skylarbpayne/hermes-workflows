@@ -31,6 +31,12 @@ class ReviewDecision:
 
 
 @dataclass
+class PublishChoice:
+    action: Literal["ship", "revise"]
+    feedback: str | None = None
+
+
+@dataclass
 class AngleChoice:
     angle_id: str
     rationale: str
@@ -156,6 +162,13 @@ async def pipeline_with_ask_workflow(inputs):
 def test_agent_requires_prompt():
     with pytest.raises(TypeError, match="prompt"):
         agent("research")
+
+
+def test_ask_does_not_accept_legacy_artifact_or_output_names():
+    with pytest.raises(TypeError, match="artifact"):
+        ask("Review", key="review", artifact={"old": True})
+    with pytest.raises(TypeError, match="output"):
+        ask("Review", key="review", input={"new": True}, output=ReviewDecision)
 
 
 def test_agent_prompt_input_context_are_sent_to_runner_and_typed_output_replays(tmp_path):
@@ -394,6 +407,52 @@ def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
 
     assert result.status == "completed"
     assert result.result == ["approve", "request_changes"]
+
+
+def test_dataclass_action_literal_automatically_drives_review_actions(tmp_path):
+    @workflow
+    async def publish_choice_workflow(inputs):
+        decision = await ask(
+            prompt="Review publish choice",
+            key="review_publish_choice",
+            input={"draft": inputs["draft"]},
+            returns=PublishChoice,
+        )
+        assert isinstance(decision, PublishChoice)
+        return {"action": decision.action, "feedback": decision.feedback}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(publish_choice_workflow, {"draft": "hello"}, workflow_id="wf_publish_choice")
+
+    assert first.status == "waiting"
+    request = engine.workflow_status("wf_publish_choice")["review_requests"][0]
+    assert request["request_schema"]["name"] == "PublishChoice"
+    assert request["request_schema"]["fields"][0] == {
+        "name": "action",
+        "kind": "choice",
+        "options": ["ship", "revise"],
+        "required": True,
+    }
+    assert request["input_surface"] == {
+        "kind": "review_decision",
+        "actions": [
+            {"value": "ship", "label": "Ship"},
+            {"value": "revise", "label": "Revise", "requires_feedback": True},
+        ],
+        "feedback": {"kind": "text", "optional": True, "placeholder": "What should change?"},
+    }
+
+    engine.submit_operator_response(
+        workflow_id="wf_publish_choice",
+        key="review_publish_choice",
+        payload={"action": "revise", "feedback": "needs a sharper opener"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-publish"},
+    )
+    result = engine.drain("wf_publish_choice")
+
+    assert result.status == "completed"
+    assert result.result == {"action": "revise", "feedback": "needs a sharper opener"}
 
 
 def test_pipeline_ask_stage_fans_out_human_prompts(tmp_path):

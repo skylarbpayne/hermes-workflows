@@ -349,7 +349,9 @@ def test_dashboard_plugin_api_overview_includes_workflow_observability_and_redac
     assert workflow["approvals"][0]["key"] == "approve_plugin_test"
     assert workflow["approvals"][0]["artifact"]["secret_token"] == "[REDACTED]"
     assert workflow["pending_commands"][0]["payload"]["artifact"]["secret_token"] == "[REDACTED]"
-    assert workflow["command_history"][0]["payload_context"]["value"]["artifact"]["secret_token"] == "[REDACTED]"
+    command_payloads = [item["payload_context"].get("value", {}) for item in workflow["command_history"]]
+    notify_payload = next(item for item in command_payloads if isinstance(item, dict) and "artifact" in item)
+    assert notify_payload["artifact"]["secret_token"] == "[REDACTED]"
     assert workflow["pending_commands"][0]["type"] == "notify_approval"
     assert workflow["diagnostics"][0]["label"] == "active_wait"
 
