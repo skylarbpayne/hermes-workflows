@@ -210,7 +210,7 @@ def test_worker_cli_executes_agent_jobs_with_configured_provider_command(tmp_pat
     assert not any(row["type"] == "external_agent" and row["status"] == "pending" for row in outbox)
 
 
-def test_worker_service_cli_executes_agent_jobs_with_configured_provider_command(tmp_path):
+def test_worker_config_mode_executes_agent_jobs_with_configured_provider_command(tmp_path):
     (tmp_path / "agent_runner_wf.py").write_text(AGENT_RUNNER_WORKFLOW_MODULE)
     provider = tmp_path / "agent_provider.py"
     provider.write_text(AGENT_PROVIDER_MODULE)
@@ -237,7 +237,7 @@ def test_worker_service_cli_executes_agent_jobs_with_configured_provider_command
             "--id",
             "wf_agent_runner_service",
             "--input-json",
-            json.dumps({"topic": "service worker"}),
+            json.dumps({"topic": "resident worker"}),
         ).stdout
     )
     assert started["status"] == "running"
@@ -245,7 +245,7 @@ def test_worker_service_cli_executes_agent_jobs_with_configured_provider_command
     service = json.loads(
         run_cli(
             tmp_path,
-            "worker-service",
+            "worker",
             "--config",
             str(registry),
             "--db",
@@ -270,6 +270,21 @@ def test_worker_service_cli_executes_agent_jobs_with_configured_provider_command
     status = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_agent_runner_service").stdout)
     assert status["status"] == "completed"
     assert status["result"]["packet"] == {"summary": "agent ran from provider", "saw_request": True}
+
+
+def test_cli_help_exposes_one_public_worker_command(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "hermes_workflows", "--help"],
+        cwd=Path.cwd(),
+        env={**os.environ, "PYTHONPATH": f"{Path.cwd() / 'src'}:{tmp_path}:{os.environ.get('PYTHONPATH', '')}"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+
+    assert "worker" in result.stdout
+    assert "worker-service" not in result.stdout
 
 
 def start_to_waiting(tmp_path, workflow_ref, db, workflow_id, input_json, *, max_commands=3):
