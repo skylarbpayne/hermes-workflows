@@ -294,6 +294,12 @@ def test_ask_collects_typed_human_input_without_requiring_approval_action(tmp_pa
     assert step["step_type"] == "operator"
     assert step["request"]["artifact"] == {"options": ["inspectable", "resumable"]}
     assert step["request"]["schema"].endswith(":AngleChoice")
+    review_request = status["review_requests"][0]
+    assert review_request["kind"] == "human_input"
+    assert review_request["key"] == "choose_angle"
+    assert review_request["request_schema"]["id"].endswith(":AngleChoice")
+    assert review_request["input_surface"]["kind"] == "structured_form"
+    assert review_request["source"] is None
 
     receipt = engine.submit_operator_response(
         workflow_id="wf_ask_angle",
@@ -351,6 +357,10 @@ def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
         f"{ReviewDecision.__module__}:ReviewDecision",
         f"{ReviewDecision.__module__}:ReviewDecision",
     ]
+    review_requests = engine.workflow_status("wf_parallel_ask")["review_requests"]
+    assert [request["key"] for request in review_requests] == ["review_one", "review_two"]
+    assert [request["input_surface"]["kind"] for request in review_requests] == ["review_decision", "review_decision"]
+    assert review_requests[0]["input_surface"]["actions"] == ["approve", "reject", "edit", "rerun"]
 
     one = engine.signal(
         "wf_parallel_ask",
