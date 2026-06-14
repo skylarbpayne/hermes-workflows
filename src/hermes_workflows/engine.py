@@ -863,13 +863,21 @@ class WorkflowEngine:
         worker_id: str,
         lease_seconds: int = 30,
         command_type: Optional[str] = "run_step",
+        include_external_agent: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Claim one pending or lease-expired command for a worker."""
 
         self._ensure_writable("claim workflow commands")
 
         now = _now()
-        type_clause = "AND c.type = ?" if command_type is not None else "AND c.type IN ('run_workflow', 'run_step', 'start_child_workflow')"
+        if command_type is not None:
+            type_clause = "AND c.type = ?"
+        else:
+            runnable_types = ["run_workflow", "run_step", "start_child_workflow"]
+            if include_external_agent:
+                runnable_types.append("external_agent")
+            quoted_types = ", ".join(f"'{command_type}'" for command_type in runnable_types)
+            type_clause = f"AND c.type IN ({quoted_types})"
         params: list[Any] = [workflow_id]
         if command_type is not None:
             params.append(command_type)
@@ -1003,7 +1011,13 @@ class WorkflowEngine:
             thread.join(timeout=1.0)
 
     def worker_once(self, workflow_id: str, *, worker_id: str, lease_seconds: int = 30) -> RunResult:
-        command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds, command_type=None)
+        command = self.claim_command(
+            workflow_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            command_type=None,
+            include_external_agent=self.agent_runner is not None,
+        )
         if command is None:
             return self._result_from_instance(workflow_id)
         return self._execute_command(workflow_id, command)
@@ -1019,7 +1033,13 @@ class WorkflowEngine:
         result = self._result_from_instance(workflow_id)
         executed = 0
         while max_commands is None or executed < max_commands:
-            command = self.claim_command(workflow_id, worker_id=worker_id, lease_seconds=lease_seconds, command_type=None)
+            command = self.claim_command(
+                workflow_id,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                command_type=None,
+                include_external_agent=self.agent_runner is not None,
+            )
             if command is None:
                 return self._result_from_instance(workflow_id)
             result = self._execute_command(workflow_id, command)
@@ -1028,7 +1048,12 @@ class WorkflowEngine:
                 return result
         return result
 
-    def runnable_workflows(self, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def runnable_workflows(
+        self,
+        *,
+        limit: Optional[int] = None,
+        include_external_agent: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Return workflow instances with runnable worker-service commands.
 
         This intentionally spans all workflow instances in one DB. The per-workflow
@@ -1038,7 +1063,11 @@ class WorkflowEngine:
         """
 
         now = _now()
-        query = """
+        command_types = ["run_workflow", "run_step", "start_child_workflow"]
+        if include_external_agent:
+            command_types.append("external_agent")
+        quoted_types = ", ".join(f"'{type_name}'" for type_name in command_types)
+        query = f"""
             SELECT
               wi.id AS workflow_id,
               wi.workflow_name AS workflow_name,
@@ -1052,7 +1081,7 @@ class WorkflowEngine:
               c.lease_expires_at AS lease_expires_at
             FROM workflow_commands_outbox c
             JOIN workflow_instances wi ON wi.id = c.workflow_id
-            WHERE c.type IN ('run_workflow', 'run_step', 'start_child_workflow')
+            WHERE c.type IN ({quoted_types})
               AND wi.status NOT IN ('completed', 'failed', 'cancelled')
               AND (
                 c.status = 'pending'
@@ -2127,6 +2156,8 @@ class WorkflowEngine:
             return self._execute_run_step_command(workflow_id, command)
         if command_type == "start_child_workflow":
             return self._execute_start_child_workflow_command(workflow_id, command, payload)
+        if command_type == "external_agent":
+            return self._execute_external_agent_command(workflow_id, command, payload)
         raise ValueError(f"unknown workflow command type: {command_type}")
 
     def _execute_run_workflow_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
@@ -2312,6 +2343,118 @@ class WorkflowEngine:
 
         parent = self._instance(workflow_id)
         return self._result_from_row(parent)
+
+    def _fail_running_command(
+        self,
+        workflow_id: str,
+        command: Union[sqlite3.Row, Dict[str, Any]],
+        *,
+        key: str,
+        error: Dict[str, Any],
+    ) -> RunResult:
+        with self._connect() as con:
+            changed = con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'failed', last_error_json = ?, lease_expires_at = NULL, updated_at = ?
+                WHERE id = ?
+                  AND status = 'running'
+                  AND claimed_by = ?
+                  AND attempts = ?
+                """,
+                (JsonCodec.dumps(error), _now(), command["id"], command["claimed_by"], command["attempts"]),
+            ).rowcount
+            if changed == 0:
+                return self._result_from_instance(workflow_id)
+            self._append_event(
+                con,
+                workflow_id,
+                "StepFailed",
+                key=key,
+                payload={"error": error},
+                idempotency_key=f"failed:{key}:{command['id']}:{command['attempts']}",
+                ignore_duplicate=True,
+            )
+            con.execute(
+                """
+                UPDATE workflow_instances
+                SET status = 'failed', error_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (JsonCodec.dumps(error), _now(), workflow_id),
+            )
+        return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
+
+    def _execute_external_agent_command(
+        self,
+        workflow_id: str,
+        command: Union[sqlite3.Row, Dict[str, Any]],
+        payload: Dict[str, Any],
+    ) -> RunResult:
+        if self.agent_runner is None:
+            error = {"type": "AgentRunnerMissing", "message": "external_agent command requires WorkflowEngine.agent_runner"}
+            return self._fail_running_command(workflow_id, command, key=command["key"], error=error)
+
+        agent_key = str(payload.get("key") or str(command["key"]).removeprefix("agent:"))
+        request = payload.get("artifact")
+        if not isinstance(request, dict):
+            request = {
+                "kind": "agent.request.v1",
+                "name": payload.get("assignee") or "agent",
+                "prompt": payload.get("prompt") or "",
+                "rendered_prompt": payload.get("prompt") or "",
+                "returns": "json",
+                "input": None,
+                "context": [],
+                "step_key": agent_key,
+            }
+
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT c.id
+                FROM workflow_commands_outbox c
+                JOIN workflow_instances wi ON wi.id = c.workflow_id
+                WHERE c.id = ?
+                  AND c.status = 'running'
+                  AND c.claimed_by = ?
+                  AND c.attempts = ?
+                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
+                """,
+                (command["id"], command["claimed_by"], command["attempts"]),
+            ).fetchone()
+        if row is None:
+            return self._result_from_instance(workflow_id)
+
+        try:
+            from .prompts import _build_runner_request
+
+            runner_ctx = type("AgentRunnerContext", (), {"workflow_id": workflow_id, "step_key": agent_key})()
+            runner_request = _build_runner_request(runner_ctx, request)
+            with self._command_lease_heartbeat(workflow_id, command):
+                runner_response = _run_maybe_async(self.agent_runner(runner_request))
+            if isinstance(runner_response, dict) and "output" in runner_response:
+                output = runner_response["output"]
+                provenance = runner_response.get("provenance")
+            else:
+                output = runner_response
+                provenance = None
+            JsonCodec.dumps(output)
+        except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            return self._fail_running_command(workflow_id, command, key=agent_key, error=error)
+
+        source: Dict[str, Any] = {"kind": "agent", "id": str(command["claimed_by"] or "workflow-worker")}
+        if provenance is not None:
+            source["provenance"] = provenance
+        return self.signal(
+            workflow_id,
+            str(payload.get("signal_type") or "agent.completed"),
+            key=agent_key,
+            payload=output,
+            source=source,
+            idempotency_key=f"agent-runner:{command['id']}:{command['attempts']}:{agent_key}",
+        )
 
     def _execute_run_step_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         from .decorators import get_step_body
