@@ -675,6 +675,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
     edge_keys: set[tuple[str, str]] = set()
     frontier: set[str] = set()
     pending_requests: list[str] = []
+    pending_parents: dict[str, set[str]] = {}
+    completed_pending_frontier: set[str] = set()
     gather_children: set[str] = set()
 
     def add_edge(source: str, target: str) -> None:
@@ -721,7 +723,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         return node_id
 
     def flush_sequential_until(node_id: str | None = None) -> None:
-        nonlocal frontier
+        nonlocal completed_pending_frontier, frontier
         if not pending_requests:
             return
         keep: list[str] = []
@@ -729,19 +731,25 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
             if node_id is not None and request_id != node_id:
                 keep.append(request_id)
                 continue
-            for parent_id in frontier:
+            parents = pending_parents.pop(request_id, None) or frontier
+            for parent_id in parents:
                 add_edge(parent_id, request_id)
-            frontier = {request_id}
+            completed_pending_frontier.add(request_id)
             if node_id is not None:
                 keep.extend(item for item in pending_requests if item != request_id and item not in keep)
                 break
         pending_requests[:] = keep
+        if not pending_requests and completed_pending_frontier:
+            frontier = set(completed_pending_frontier)
+            completed_pending_frontier = set()
 
     for event in status.get("events") or status.get("recent_events") or []:
         event_type = str(event.get("type") or "")
         payload = event.get("payload") or {}
         node_id = add_node(event)
         if not node_id:
+            if event_type == "ParallelWaiting":
+                flush_sequential_until()
             continue
 
         if event_type == "WorkflowStarted":
@@ -749,6 +757,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         elif event_type in {"StepRequested", "ChildWorkflowRequested"}:
             if node_id not in pending_requests and node_id not in gather_children:
                 pending_requests.append(node_id)
+                pending_parents[node_id] = set(frontier or {"workflow:start"})
         elif event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
             pending = [str(item) for item in payload.get("pending") or []]
             parents = frontier or {"workflow:start"}
@@ -758,22 +767,28 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
                     add_edge(parent_id, child_id)
                 add_edge(child_id, node_id)
             pending_requests[:] = [item for item in pending_requests if item not in set(pending)]
+            for child_id in pending:
+                pending_parents.pop(child_id, None)
             frontier = {node_id}
         elif event_type in {"StepCompleted", "StepFailed", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
             if node_id not in gather_children:
                 flush_sequential_until(node_id)
         elif event_type in {"ApprovalRequested", "AgentRequested"}:
+            if node_id in pending_requests:
+                continue
             flush_sequential_until()
-            for parent_id in frontier:
-                add_edge(parent_id, node_id)
-            frontier = {node_id}
+            if node_id not in frontier or "StepRequested" not in nodes[node_id].get("event_types", []):
+                for parent_id in frontier:
+                    add_edge(parent_id, node_id)
+                frontier = {node_id}
         elif event_type == "WaitRequested":
             continue
         elif event_type == "SignalReceived":
             flush_sequential_until()
-            for parent_id in frontier:
-                add_edge(parent_id, node_id)
-            frontier = {node_id}
+            if node_id not in frontier or "StepRequested" not in nodes[node_id].get("event_types", []):
+                for parent_id in frontier:
+                    add_edge(parent_id, node_id)
+                frontier = {node_id}
         elif event_type in {"WorkflowCompleted", "WorkflowFailed", "WorkflowCancelled"}:
             flush_sequential_until()
             for parent_id in frontier:
