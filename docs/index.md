@@ -20,7 +20,7 @@ Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or externa
 <div class="doc-grid" markdown="1">
 
 - **[Setup guide](setup-for-agents.html)**
-  Install the package, create a registry, run a workflow, start the Workflow Worker, and reach the Review Queue.
+  Install from source, create a registry, run a workflow, start the Workflow Worker, and reach the Review Queue.
 
 - **[Hermes dashboard plugin](integrations/hermes-plugin.html)**
   Configure the Review Queue dashboard, DB aliases, workflow catalog entries, and trusted approval actions.

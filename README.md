@@ -12,7 +12,7 @@ Start there. Runtime internals such as `WorkflowEngine`, approval DTOs, worker i
 
 ## Quickstart
 
-Install from a source checkout or package:
+Install from a source checkout:
 
 ```bash
 python -m pip install .
