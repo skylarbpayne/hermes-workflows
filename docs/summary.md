@@ -1,23 +1,41 @@
 ---
 layout: page
-title: Documentation summary
+title: Launch readiness
 ---
 
-# Documentation summary
+# Launch readiness
 
-This branch refreshes the README and adds a lightweight docs site track.
+Hermes Workflows is ready to present as an alpha developer library for code-first durable agent workflows.
 
-## What changed
+## Current launch surface
 
-- Replaced the long launch/history README with a concise WHY -> quickstart -> toy workflow -> docs link structure.
-- Removed the Hack the Valley/hackathon walkthrough from the README. The existing blog, plan, output, and example artifacts remain in `docs/` and `examples/`.
-- Documented that the current tested command surface is `hermes-workflows` / `python -m hermes_workflows`; this repository does not currently implement a `hermes workflows` wrapper.
-- Added `docs/architecture/domain-model-and-seams.md` with runtime model, domain objects, extension seams, execution environments, failure modes, and Mermaid diagrams.
-- Added `docs/index.md` and `docs/_config.yml` so the `docs/` directory can be built as a lightweight GitHub Pages/Jekyll site.
-- Added `.github/workflows/docs.yml` for PR/push docs build validation and manual Pages deployment after Pages is enabled in repo settings.
+- **SDK:** `agent(...)`, `ask(...)`, `parallel(...)`, `pipeline(...)`, and `workflow` are the launch-facing authoring surface.
+- **Runtime:** `hermes-workflows run ...` records/replays workflow state; `hermes-workflows worker --config ...` owns continuation.
+- **Review:** Review Queue requests and approval gates are typed, durable, and provenance-stamped.
+- **Dashboard:** the Hermes plugin reads configured DB aliases/catalog entries and avoids arbitrary SQLite path routing.
+- **Docs:** the README and docs site teach install → registry → run → Workflow Worker → Review Queue.
 
-## CI status notes
+## Public docs URLs
 
-- Existing `.github/workflows/test.yml` already runs on `pull_request` to `main`, so PRs are covered by the Python test workflow.
-- The new docs workflow also runs on `pull_request` and `push` to `main`; Pages deployment is manual until GitHub Pages is enabled for the repository.
-- Local validation for this branch is recorded in the commit/task summary rather than generated into this file.
+- [Project page](../)
+- [Docs home](./)
+- [Setup guide](setup-for-agents.html)
+- [Hermes dashboard/plugin guide](integrations/hermes-plugin.html)
+- [Architecture](architecture/domain-model-and-seams.html)
+- [Inspectability cookbook](operations/inspectability-cookbook.html)
+
+## Launch checks before/after a public flip
+
+Before calling a public launch complete, verify:
+
+1. GitHub Actions tests pass on `main`.
+2. GitHub Pages/docs build succeeds on `main`.
+3. A public docs crawl finds no broken internal links.
+4. Package metadata includes repository, homepage, documentation, and issue URLs.
+5. Repo metadata includes homepage, description, and useful topics.
+6. Tracked-file scans do not expose credentials, private paths, or obsolete generated run packets.
+7. The repo visibility is public and the public docs URLs are reachable without private GitHub access.
+
+## Known alpha boundaries
+
+Hermes Workflows is intentionally shipping as alpha infrastructure. Some deeper design records remain available under the design archive, and several roadmap issues remain open for future ergonomics such as triggers, richer artifact rendering, conversational steps, and edit/retry flows. Those are not launch blockers for the current alpha library surface.

@@ -1,39 +1,70 @@
 ---
 layout: page
-title: hermes-workflows docs
+title: Hermes Workflows documentation
 ---
 
-# hermes-workflows docs
+# Hermes Workflows
 
-`hermes-workflows` is a durable Python workflow runtime for trusted agent and automation projects. It records what happened, what is waiting, who reviewed it, and how the resident Workflow Worker continues after process exits or human review. The normal operator path is `hermes-workflows run <name-or-path>` plus `hermes-workflows worker --config ...` against the same configured workflow DB.
+Code-first durable workflows for agent work that should not disappear into chat history. Hermes Workflows gives Python projects persistent workflow state, typed agent work, typed human review, a resident **Workflow Worker**, and inspectable receipts for restarts, approvals, retries, and handoffs.
+
+The launch-facing SDK is intentionally small:
+
+```python
+from hermes_workflows import agent, ask, parallel, pipeline, workflow
+```
+
+Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or external review, and `parallel(...)` / `pipeline(...)` to compose them without exposing runtime bookkeeping in normal workflow code.
 
 ## Start here
 
 <div class="doc-grid" markdown="1">
 
+- **[Setup guide](setup-for-agents.html)**
+  Install the package, create a registry, run a workflow, start the Workflow Worker, and reach the Review Queue.
+
+- **[Hermes dashboard plugin](integrations/hermes-plugin.html)**
+  Configure the Review Queue dashboard, DB aliases, workflow catalog entries, and trusted approval actions.
+
 - **[Architecture](architecture/domain-model-and-seams.html)**
   Domain model, runtime loop, extension seams, execution environments, and failure modes.
 
-- **[Setup guide](setup-for-agents.html)**
-  Install the package, run examples, and configure a trusted local workspace.
+- **[Inspectability cookbook](operations/inspectability-cookbook.html)**
+  Commands for status, event history, outbox, approvals, failed commands, and recovery.
 
 - **[Runtime boundary](architecture/runtime-vs-skills-subagents.html)**
   What belongs in durable workflow state versus prompts, skills, subagents, and operators.
 
-- **[Inspectability cookbook](operations/inspectability-cookbook.html)**
-  Commands for status, event history, outbox, approvals, and failed commands.
-
-- **[Approval adapters](architecture/approval-adapters-and-hermes-plugin.html)**
-  How human decisions are recorded with provenance and replayed safely.
-
-- **[Integration guide](integrations/hermes-plugin.html)**
-  Example plugin/adapter configuration and Review Queue surfaces.
+- **[Launch readiness](summary.html)**
+  Public-launch status, docs/accessibility notes, and verification expectations.
 
 </div>
 
-## Internal design notes
+## Runtime model in one pass
 
-These are implementation/design records, not the launch quickstart.
+```text
+operator starts/replays workflow
+  hermes-workflows run <alias-or-ref> --config .hermes/workflows.registry.json --id <id>
+    -> durable workflow activation is recorded
+    -> missing workflow/step/agent/child work is queued
+    -> command exits after current durable state is stored
+
+resident Workflow Worker
+  hermes-workflows worker --config .hermes/workflows.registry.json
+    -> leases queued commands from configured DBs
+    -> executes step/agent/child work through configured runners
+    -> replays the workflow against the same DB/run id
+    -> stops at Review Queue requests, approvals, or terminal state
+
+review surface
+    -> dashboard/chat/CLI records typed human input or approval with provenance
+    -> the worker observes the durable transition and continues
+```
+
+The CLI, worker, and dashboard must point at the same configured workflow DB. If they do not, the dashboard may look empty while work is waiting somewhere else.
+
+## Design archive
+
+These implementation/design records are useful for contributors, but they are not required for the launch quickstart.
 
 - [Agent / parallel / pipeline API grill](architecture/agent-parallel-pipeline-api-grill.html)
 - [Agent / parallel / pipeline API visual plan](plans/2026-06-12-agent-parallel-pipeline-api-visual-plan.html)
@@ -45,4 +76,4 @@ These are implementation/design records, not the launch quickstart.
 
 ## Site build
 
-This documentation is intentionally lightweight. GitHub Pages builds the repository with Jekyll from `main`; the committed layout adds navigation and client-side Mermaid rendering for architecture diagrams.
+GitHub Pages builds the repository with Jekyll from `main`. The committed layout adds navigation and client-side Mermaid rendering for architecture diagrams.

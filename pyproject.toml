@@ -1,7 +1,7 @@
 [project]
 name = "hermes-workflows"
 version = "0.0.1"
-description = "Code-first durable workflows with agent steps, generated child workflows, approval gates, and receipts."
+description = "Code-first durable workflows for agent work, typed Review Queues, Workflow Workers, and receipts."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -21,6 +21,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
+Homepage = "https://skylarbpayne.com/hermes-workflows/"
+Documentation = "https://skylarbpayne.com/hermes-workflows/docs/"
 Repository = "https://github.com/skylarbpayne/hermes-workflows"
 Issues = "https://github.com/skylarbpayne/hermes-workflows/issues"
 

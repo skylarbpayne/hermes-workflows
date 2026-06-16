@@ -1,5 +1,5 @@
-title: hermes-workflows
-description: Durable workflow runtime for Hermes-operated agent workspaces.
+title: Hermes Workflows
+description: Code-first durable workflow runtime for agent work, Review Queues, Workflow Workers, and receipts.
 theme: minima
 markdown: kramdown
 plugins: []

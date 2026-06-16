@@ -8,7 +8,7 @@ The public authoring surface is intentionally small:
 from hermes_workflows import agent, ask, parallel, pipeline, workflow
 ```
 
-Start there. Runtime internals such as `WorkflowEngine`, approval DTOs, worker services, `step`, and low-level `approve` helpers still exist in submodules for adapters and advanced integrations, but they are not the launch-facing SDK.
+Start there. Runtime internals such as `WorkflowEngine`, approval DTOs, worker internals, `step`, and low-level `approve` helpers still exist in submodules for adapters and advanced integrations, but they are not the launch-facing SDK.
 
 ## Quickstart
 
@@ -149,6 +149,7 @@ Do not split the CLI, worker, and dashboard across different SQLite files. If th
 
 ## Documentation
 
+- [Live docs site](https://skylarbpayne.com/hermes-workflows/docs/)
 - [Docs site index](docs/index.md)
 - [Hermes/operator setup guide](docs/setup-for-agents.md)
 - [Hermes dashboard/plugin setup](docs/integrations/hermes-plugin.md)
