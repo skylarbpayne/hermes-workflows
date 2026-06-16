@@ -24,7 +24,7 @@ The workflow DB is durable state, not an execution sandbox. The dashboard presen
 
 ## agent(...) execution and failure modes
 
-`agent(...)(...)` builds an `agent.request.v1` durable step request. On first execution:
+`await agent(...)` builds an `agent.request.v1` durable step request. On first execution:
 
 1. The request is persisted as a normal durable step request.
 2. If `WorkflowEngine(agent_runner=...)` is configured and `mock_output` is not supplied, the runner receives `agent.runner_request.v1` with the rendered prompt, input, workflow id, and step key.

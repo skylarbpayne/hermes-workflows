@@ -30,4 +30,6 @@ The Hack the Valley real-run path uses local snapshots and private `/tmp/...` ou
 
 ## Reporting issues
 
-Before public launch, report issues directly to the repository owner. After the repo is public, replace this section with the preferred security contact and disclosure process.
+Please report suspected vulnerabilities through GitHub Private Vulnerability Reporting / Security Advisories for this repository when available. If that route is unavailable, open a minimal GitHub issue asking for a private security contact and do **not** include exploit details, secrets, participant data, workflow databases, or private run artifacts in the public issue.
+
+Include enough non-sensitive detail to reproduce the issue safely: package version or commit, affected command/API, expected behavior, actual behavior, and whether external side effects or generated workflow execution are involved.

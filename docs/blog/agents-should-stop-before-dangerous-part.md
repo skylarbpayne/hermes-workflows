@@ -183,7 +183,9 @@ The runner can call a deterministic script, Hermes, Claude Code, Codex, OpenAI, 
 ## Minimal shape
 
 ```python
-from hermes_workflows import agent(...), SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+from hermes_workflows import Workflow, agent, ask, workflow
+from hermes_workflows.engine import WorkflowEngine
+from hermes_workflows.runners import SubprocessAgentRunner
 
 runner = SubprocessAgentRunner([
     "hermes-workflows-agent-cli-adapter",
@@ -192,32 +194,30 @@ runner = SubprocessAgentRunner([
 
 @workflow
 async def production_shaped_agent_workflow(ctx, inputs):
-    generated = await agent(...)(
+    generated = await agent(
         "workflow_architect",
         prompt="Write a child workflow for {{operation_name}}.",
         input={"operation_name": inputs["operation_name"]},
         returns=Workflow,
-    )(ctx)
+    )
 
-    await ctx.approval.request(
-        "Approve generated workflow execution?",
-        key="generated_workflow_execution",
-        artifact={
+    await ask(
+        prompt="Approve generated workflow execution?",
+        key="review_generated_workflow_execution",
+        input={
             "symbol": generated.symbol,
             "source_sha256": generated.source_sha256,
         },
-        approver="human:operator",
-        allowed=["approve", "reject"],
+        returns=dict,
     )
 
-    packet = await generated(ctx, inputs)
+    packet = await generated(inputs)
 
-    await ctx.approval.request(
-        "Approve the side-effect packet?",
-        key="human_side_effect_approval",
-        artifact=packet,
-        approver="human:operator",
-        allowed=["approve", "reject"],
+    await ask(
+        prompt="Approve the side-effect packet?",
+        key="review_human_side_effect_packet",
+        input=packet,
+        returns=dict,
     )
 
     return {
@@ -228,7 +228,7 @@ async def production_shaped_agent_workflow(ctx, inputs):
 engine = WorkflowEngine("workflow.sqlite", agent_runner=runner)
 ```
 
-The side-effect step should come after this, under its own approval key. Draft approval and send approval are different decisions.
+The example uses `ask(...)` for review so the request appears in the Review Queue. Generated workflow execution still needs a specific approval boundary; draft approval and send approval are different decisions.
 
 ## What this buys you
 

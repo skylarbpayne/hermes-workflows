@@ -35,22 +35,23 @@ That keeps the magic where it belongs: `agent(...)` returns a value. One possibl
 ## Authoring surface
 
 ```python
-from hermes_workflows import agent(...), Workflow, workflow
+from hermes_workflows import Workflow, agent, workflow
 
 
 @workflow
 async def dynamic_pipeline(ctx, inputs):
-    items = await agent(...)(
+    items = await agent(
         "produce_items",
         prompt="Return items to process.",
+        input=inputs,
         returns=list,
-    )(ctx)
+    )
 
-    processor = await agent(...)(
+    processor = await agent(
         "build_processor",
         prompt="Write Python defining @workflow async def process_item(ctx, item).",
         returns=Workflow,
-    )(ctx)
+    )
 
     return await ctx.map_workflow(
         processor,
@@ -63,12 +64,12 @@ async def dynamic_pipeline(ctx, inputs):
 Examples/tests can still use `mock_output` for deterministic generated Python without configuring a live agent runner:
 
 ```python
-processor = await agent(...)(
+processor = await agent(
     "build_processor",
     prompt="Write Python defining @workflow async def process_item(ctx, item).",
     returns=Workflow,
     mock_output={"source": generated_python, "symbol": "process_item"},
-)(ctx)
+)
 ```
 
 For live execution, pass an `agent_runner` to `WorkflowEngine`. The runner receives a JSON-safe request packet with the prompt, rendered prompt, input, return type, workflow id, and step key. Its exact response and provenance are persisted as `StepCompleted.metadata`.
@@ -109,7 +110,7 @@ The subprocess boundary still receives an `agent.runner_request.v1` JSON object 
 
 Default tests and examples use `examples/runners/fake_json_cli_agent.py`, so they require no network, credentials, Hermes/Codex install, provider auth, or config mutation. Real local provider smoke is opt-in only via `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` and a caller-supplied `HERMES_WORKFLOWS_AGENT_COMMAND`; otherwise it is skipped.
 
-If a live `agent(...)(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(ctx, item)`, or `ctx.map_workflow(...)` first records an `ApprovalRequested` event and waits for `approval.decision`. No generated module is imported and no child workflow is requested until that approval is accepted.
+If a live `agent(..., returns=Workflow)` returns generated Python, the resulting `Workflow` is marked `approval_required=True`. Calling it with `ctx.start_child(...)`, `await processor(item, key=...)`, or `ctx.map_workflow(...)` first records an approval request and waits for a human decision. No generated module is imported and no child workflow is requested until that approval is accepted.
 
 ## Replay rule
 

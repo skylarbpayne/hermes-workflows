@@ -312,17 +312,7 @@ Each pending approval row renders:
 - Modify: `src/hermes_workflows/cli.py`
 - Test: `tests/test_cli.py`
 
-**Command:**
-
-```bash
-hermes-workflows approval-inbox \
-  --db /tmp/workflow.sqlite \
-  --serve \
-  --host 127.0.0.1 \
-  --port 8765
-```
-
-This can be an alias/wrapper around `serve-dashboard` but should use approval-language in the UX.
+**Current landing:** the Review Queue lives in the Hermes dashboard plugin and local `serve-dashboard` approval server rather than a separate inbox command.
 
 ---
 
@@ -402,13 +392,13 @@ version: "0.1.0"
 description: "Hermes Agent adapter for hermes-workflows human approvals"
 kind: standalone
 provides_tools:
-  - workflow_approvals_list
+  - workflow_review_requests_list
   - workflow_approval_decide
 provides_hooks:
   - pre_gateway_dispatch
 ```
 
-### Task 3.2: Register `workflow_approvals_list`
+### Task 3.2: Register `workflow_review_requests_list`
 
 **Objective:** Let Hermes inspect pending approvals from configured DBs.
 
@@ -580,11 +570,11 @@ hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
   --id wf_approval_smoke \
   --input-json '{"destination":"NYC","approver":"human:operator"}'
 
-hermes-workflows approval-inbox \
+hermes-workflows serve-dashboard hermes_workflows.examples.trip:trip_planning_workflow \
   --db /tmp/hermes-workflows-approval-smoke.sqlite \
-  --serve \
   --host 127.0.0.1 \
-  --port 8765
+  --port 8765 \
+  --enable-approval-actions
 ```
 
 Expected receipt after approval:
@@ -605,7 +595,7 @@ Expected receipt after approval:
 Plugin smoke later:
 
 ```text
-workflow_approvals_list -> shows pending approval
+workflow_review_requests_list -> shows pending approval
 workflow_approval_decide(resume=false) -> records decision without running next step
 hermes-workflows resume ... -> completes exact approved payload
 Kanban task comment -> includes approval receipt

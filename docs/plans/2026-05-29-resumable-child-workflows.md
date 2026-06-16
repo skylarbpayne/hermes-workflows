@@ -47,13 +47,13 @@ Given this parent:
 ```python
 @workflow
 async def parent(ctx, inputs):
-    processor = await agent(...)(
+    processor = await agent(
         "build_waiting_child",
         prompt="Write a Python workflow that waits for a signal.",
         returns=Workflow,
         mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
-    )(ctx)
-    return await processor(ctx, inputs["item"], key=inputs["item"]["id"])
+    )
+    return await processor(inputs["item"], key=inputs["item"]["id"])
 ```
 
 And this generated child:

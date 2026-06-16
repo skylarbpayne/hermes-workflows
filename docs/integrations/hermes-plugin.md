@@ -1,11 +1,6 @@
-# Hermes Agent approval plugin
+# Hermes Agent Review Queue plugin
 
-`hermes-workflows` ships a thin Hermes Agent plugin adapter for human approval gates. The plugin does **not** turn Hermes into the workflow runtime; it lists and records approval decisions through the core runtime-agnostic adapter API:
-
-- `WorkflowEngine.list_approvals(...)`
-- `WorkflowEngine.get_approval(...)`
-- `WorkflowEngine.submit_approval_decision(...)`
-- `ApprovalDecisionInput`
+`hermes-workflows` ships a thin Hermes Agent plugin for workflow review surfaces. The plugin does not make Hermes the workflow runtime. It lists Review Queue requests and records human responses/approval decisions against configured workflow DB aliases; the resident Workflow Worker owns continuation.
 
 The core package does not import Hermes. Hermes discovers the adapter through the `hermes_agent.plugins` Python entry point:
 
@@ -25,9 +20,9 @@ pip install -e '.[dev]'
 
 Hermes will discover the plugin when that environment is on the active Hermes Python path. In local development, the simplest path is running Hermes from the same venv where `hermes-workflows` is installed.
 
-## Configure workflow DBs
+## Configure workflow DBs and catalog
 
-The plugin can use an explicit SQLite path per tool call, but aliases are cleaner.
+The plugin can use an explicit SQLite path for low-level tool calls, but dashboard routes should use aliases and catalog entries. The CLI, resident worker, and dashboard must point at the same DB; otherwise the dashboard will show an empty Review Queue while work is waiting elsewhere.
 
 Hermes config shape:
 
@@ -39,23 +34,32 @@ plugins:
     hermes-workflows-approvals:
       workflow_dbs:
         - name: default
-          path: /tmp/hermes-workflows-approval-smoke.sqlite
-      # Required only if using the dashboard tab's approve/reject buttons.
-      # The browser cannot assert human identity; the server stamps this id.
+          path: /absolute/path/to/workspace/.hermes/workflows.sqlite
+      workflow_catalog:
+        - name: trip
+          workflow_ref: hermes_workflows.examples.trip:trip_planning_workflow
+          db: default
+          project_root: /absolute/path/to/workspace
+          python_paths:
+            - /absolute/path/to/hermes-workflows/src
+      # Required for dashboard Review Queue action buttons.
+      # The browser does not choose identity; the server stamps this id.
       dashboard_approver_id: operator
 ```
 
 Environment fallback for tests/scripts:
 
 ```bash
-export HERMES_WORKFLOWS_DB=/tmp/hermes-workflows-approval-smoke.sqlite
-export HERMES_WORKFLOWS_DBS='{"default":"/tmp/hermes-workflows-approval-smoke.sqlite"}'
+export HERMES_WORKFLOWS_DBS='{"default":"/absolute/path/to/workspace/.hermes/workflows.sqlite"}'
+export HERMES_WORKFLOWS_CATALOG='[{"name":"trip","workflow_ref":"hermes_workflows.examples.trip:trip_planning_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
 export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=operator
 ```
 
+`workflow_catalog` gives dashboard run/source/resume routes enough import context to resolve workflow code without asking operators to pass local persistence paths. Include `project_root`, `python_paths`, `repo_path`, or `cwd` when the workflow source is not importable from the Hermes process by default.
+
 ## Hermes dashboard plugin
 
-The same plugin directory also ships a Hermes dashboard extension under `plugins/hermes-workflows-approvals/dashboard/`:
+The dashboard extension lives under `plugins/hermes-workflows-approvals/dashboard/`:
 
 ```text
 plugins/hermes-workflows-approvals/
@@ -76,30 +80,26 @@ cp -R plugins/hermes-workflows-approvals ~/.hermes/profiles/<profile>/plugins/
 hermes -p <profile> plugins enable hermes-workflows-approvals
 ```
 
-Dashboard discovery is runtime-only: Hermes scans `$HERMES_HOME/plugins/<name>/dashboard/manifest.json`, serves the JS/CSS bundle, and mounts `plugin_api.py` under `/api/plugins/hermes-workflows-approvals`. No dashboard source fork or npm build is required.
-
-Runtime/API semantics are documented in [`docs/architecture/dashboard-runtime-semantics-agentstep-approvals.md`](../architecture/dashboard-runtime-semantics-agentstep-approvals.md). In short: the dashboard shows the resolved configured workflow state source read-only, dashboard approval buttons are record-only (`resume=false`), and local/private artifact file paths are redacted rather than served.
+Dashboard discovery is runtime-only: Hermes scans `$HERMES_HOME/plugins/<name>/dashboard/manifest.json`, serves the JS/CSS bundle, and mounts `plugin_api.py` under `/api/plugins/hermes-workflows-approvals`. No dashboard source fork or npm build is required for normal installation.
 
 The dashboard tab at `/workflows` shows:
 
-- active workflow state source alias and existence status
-- status counts
+- active configured workflow source alias and existence status
+- Review Queue requests from `ask(...)` and approval gates
 - workflow waiting/running/completed state
-- recent events
-- pending and historical commands
-- diagnostics
-- approval artifacts with secret-looking fields redacted
-- record-only approve/reject decisions (`resume=false` always from the dashboard API)
+- recent events and command diagnostics
+- redacted artifacts and request schemas
+- trusted review/approval actions that stamp human provenance and resume through the configured workflow source
 
-Dashboard HTTP APIs are intentionally alias-only. They reject explicit SQLite paths, even though the lower-level CLI/tool adapter can accept paths, because dashboard routes run inside the Hermes process and must not become arbitrary local file readers/writers.
+Dashboard HTTP APIs are intentionally alias-only. They reject arbitrary SQLite paths because dashboard routes run inside the Hermes process and must not become local file readers/writers.
 
-Dashboard approve/reject buttons are disabled unless `dashboard_approver_id` (or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID`) is configured server-side. The browser does not send `by`, `channel`, or message provenance; the backend stamps `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision without resuming the workflow.
+Dashboard buttons are disabled unless `dashboard_approver_id` or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID` is configured server-side. The backend stamps provenance like `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision/response. In the bundled trusted local dashboard, those actions use `resume=true` so the configured workflow source can enqueue or run the next continuation immediately. For remote/gateway adapters, keep `resume=false` unless that adapter is explicitly allowed to execute local workflow code.
 
-## Tools
+## Public plugin tools
 
-### `workflow_approvals_list`
+### `workflow_review_requests_list`
 
-Lists bounded, redacted approval cards from a configured DB alias or explicit SQLite path.
+Lists bounded, redacted Review Queue cards from a configured DB alias or explicit SQLite path.
 
 Input:
 
@@ -111,32 +111,32 @@ Input:
 }
 ```
 
-Output includes `ApprovalView` fields plus exact decision tokens:
+Output includes request metadata, schema, input surface descriptors, redacted artifacts, and exact workflow/key handles for responding.
+
+### `workflow_review_respond`
+
+Records a typed response for an `ask(...)` Review Queue request with human provenance.
+
+Input:
 
 ```json
 {
-  "success": true,
-  "db": "/tmp/hermes-workflows-approval-smoke.sqlite",
-  "count": 1,
-  "approvals": [
-    {
-      "workflow_id": "wf_trip",
-      "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow",
-      "key": "approve_trip_plan",
-      "prompt": "Approve this trip plan?",
-      "allowed": ["approve", "reject"],
-      "decision_token_approve": "hwf-approval:v1:approve:...",
-      "decision_token_reject": "hwf-approval:v1:reject:..."
-    }
-  ]
+  "db": "default",
+  "workflow_id": "wf_blog",
+  "key": "review_outline",
+  "payload": {"action": "request_changes", "feedback": "Make the spine less generic."},
+  "by": "operator",
+  "channel": "discord",
+  "message_id": "...",
+  "resume": false
 }
 ```
 
-Secret-looking artifact keys are redacted before leaving the plugin (`token`, `secret`, `password`, `api_key`, etc.). This is a guardrail, not a replacement for avoiding secrets in approval artifacts.
+`resume` defaults to `false` for gateway/plugin safety. The worker, not the chat callback, should perform continuation.
 
 ### `workflow_approval_decide`
 
-Records an approve/reject decision with human provenance.
+Records an approve/reject decision for an approval gate with human provenance.
 
 Input:
 
@@ -153,26 +153,9 @@ Input:
 }
 ```
 
-`resume` defaults to `false`. This is intentional: a Hermes gateway/tool callback should record the decision, not accidentally run downstream workflow steps in the chat process. The returned receipt tells the operator what needs to resume.
+`resume` defaults to `false`. Set `resume=true` only from a trusted local/operator context that is allowed to run workflow code immediately.
 
-Receipt shape:
-
-```json
-{
-  "success": true,
-  "receipt": {
-    "workflow_id": "wf_trip",
-    "key": "approve_trip_plan",
-    "action": "approve",
-    "status": "decision_recorded",
-    "resume_requested": false,
-    "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow"
-  },
-  "next_step": "Run or queue a trusted workflow resumer for workflow_ref hermes_workflows.examples.trip:trip_planning_workflow."
-}
-```
-
-Set `resume=true` only from a trusted local/operator context that is allowed to run workflow code immediately.
+The product surface is the Review Queue plus `workflow_review_requests_list`, `workflow_review_respond`, and `workflow_approval_decide`.
 
 ## Gateway hook
 
@@ -194,7 +177,7 @@ approve it
 sure
 ```
 
-On exact token match, the hook records the decision with provenance from the gateway event and returns:
+On exact token match, the hook records the decision with gateway provenance and returns:
 
 ```json
 {
@@ -213,11 +196,16 @@ hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
   --id wf_approval_smoke \
   --input-json '{"destination":"NYC","approver":"human:operator"}'
 
-python - <<'PY'
-import json
-from hermes_workflows.hermes_plugin_approvals import _handle_workflow_approvals_list, _handle_workflow_approval_decide
+# Drain queued step/workflow commands until the approval exists.
+hermes-workflows worker hermes_workflows.examples.trip:trip_planning_workflow \
+  --db /tmp/hermes-workflows-approval-smoke.sqlite \
+  --id wf_approval_smoke \
+  --max-commands 5
 
-print(_handle_workflow_approvals_list({"db":"/tmp/hermes-workflows-approval-smoke.sqlite"}))
+python - <<'PY'
+from hermes_workflows.hermes_plugin_approvals import _handle_workflow_approval_decide, _handle_workflow_review_requests_list
+
+print(_handle_workflow_review_requests_list({"db":"/tmp/hermes-workflows-approval-smoke.sqlite"}))
 print(_handle_workflow_approval_decide({
     "db":"/tmp/hermes-workflows-approval-smoke.sqlite",
     "workflow_id":"wf_approval_smoke",
@@ -231,12 +219,13 @@ print(_handle_workflow_approval_decide({
 PY
 ```
 
-Expected: approval decision recorded, workflow remains waiting until a trusted resumer continues it.
+Expected: the Review Queue lists the waiting approval, the approval decision is recorded, and the workflow remains waiting/runnable until a trusted worker continues it.
 
 ## Boundaries
 
 - No Hermes imports in `hermes-workflows` core runtime.
 - No fuzzy chat parsing.
-- No public mutation or sends.
-- No downstream workflow execution from gateway callbacks by default.
-- Chat/buttons are convenience surfaces over the canonical workflow approval record, not the source of truth.
+- No public mutation, sends, publishing, deploys, or payments.
+- No downstream workflow execution from gateway/dashboard callbacks by default.
+- Review Queue cards/buttons are convenience surfaces over the canonical workflow state, not a separate source of truth.
+- CLI, worker, dashboard, and Review Queue must share the same configured DB alias for a given run.

@@ -5,277 +5,228 @@ title: Set up hermes-workflows for an agent
 
 # Set up `hermes-workflows` for an agent
 
-`hermes-workflows` is a small durable runtime you put underneath an agent when the work needs memory, approval gates, generated child workflows, and receipts.
+`hermes-workflows` is a durable runtime you put underneath an agent when work needs state, review gates, external worker execution, and receipts. The normal production-ish shape is one workspace registry, one shared workflow DB per source, and one resident Workflow Worker that drains work from that registry.
 
-Use it when the agent should prepare work and stop before side effects.
+## 1. Install in the operator workspace
 
-## Install locally inside a Hermes workspace
-
-Use a trusted Hermes workspace (or another local operator workspace) to own the source checkout, virtualenv, workflow DBs, and registry files. This repository does **not** currently implement a `hermes workflows` subcommand; use the tested CLI entry point `hermes-workflows` or `python -m hermes_workflows`.
+Use a trusted Hermes workspace or another local operator workspace to own the checkout, venv, registry, workflow DB, dashboard config, and worker supervisor.
 
 ```bash
 git clone https://github.com/<owner>/hermes-workflows.git
 cd hermes-workflows
-
-# Runtime/user install. Do not require dev extras for user setup.
 python -m pip install .
 
+hermes-workflows --help
 hermes-workflows doctor \
-  --db /tmp/hermes-workflows-doctor.sqlite \
+  --db .hermes/workflows.sqlite \
   --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
 ```
 
-For contributor work, install development extras separately and run tests:
+For contributor work, install dev extras and run tests:
 
 ```bash
 python -m pip install -e '.[dev]'
 pytest -q
 ```
 
-Run the CLI:
+This package exposes the `hermes-workflows` CLI and `python -m hermes_workflows`. It does not currently install a `hermes workflows` subcommand.
 
-```bash
-hermes-workflows --help
-python -m hermes_workflows --help
-```
+## 2. Create a registry
 
-Render a local read-only dashboard for any existing workflow DB:
-
-```bash
-hermes-workflows dashboard --db /tmp/workflow.sqlite --out /tmp/workflows-dashboard.html
-```
-
-Or run a local dashboard server. By default this is read-only and does not import the workflow or mutate the workflow DB:
-
-```bash
-hermes-workflows serve-dashboard my_package.workflow:main \
-  --db /tmp/workflow.sqlite \
-  --host 127.0.0.1 \
-  --port 8765
-```
-
-To expose local approval POST buttons, opt in explicitly:
-
-```bash
-hermes-workflows serve-dashboard my_package.workflow:main \
-  --db /tmp/workflow.sqlite \
-  --host 127.0.0.1 \
-  --port 8765 \
-  --enable-approval-actions
-```
-
-That local server is intentionally boring: it is not an agent runtime, and it does not invent a second approval model. When `--enable-approval-actions` is present, it only captures human provenance and calls the same engine signal API that Discord, Telegram, a Hermes plugin, or another runtime adapter should call.
-
-## Agent/operator bridge
-
-For recurring agent-owned workflows, keep aliases in `.hermes/workflows.registry.json` and invoke them with the product-shaped runner:
+Put workflow aliases and DB aliases in `.hermes/workflows.registry.json`:
 
 ```json
 {
-  "dbs": {"agent": "/tmp/agent-workflows.sqlite"},
+  "dbs": {
+    "default": "workflows.sqlite"
+  },
   "workflows": {
-    "demo": {
+    "trip": {
       "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow",
-      "db": "agent",
-      "trusted_resume": true
+      "db": "default",
+      "default_input": {"approver": "human:operator"}
     }
   }
 }
 ```
 
-```bash
-hermes-workflows run demo \
-  --config .hermes/workflows.registry.json \
-  --id wf_demo \
-  --input-json '{"destination":"NYC","approver":"human:operator"}'
-```
+Relative DB paths are resolved from the registry file, so `workflows.sqlite` means `.hermes/workflows.sqlite` when the registry lives under `.hermes/`. Use absolute paths if the DB is shared by multiple workspaces or services.
 
-`run` resolves registry aliases, module refs, and workflow file paths, then re-invokes through `uv`. If no DB is configured or passed, it uses `<project-root>/.hermes/workflows.sqlite` so a runner, worker, and later resume do not accidentally split state across multiple SQLite files. For direct `uv run workflow.py`, the workflow project's uv environment must be able to import `hermes_workflows`.
-
-For adapter surfaces that need redacted receipts and source metadata, use the bridge invocation command:
+Validate aliases before wiring a resident worker:
 
 ```bash
-hermes-workflows invoke demo \
-  --config .hermes/workflows.registry.json \
-  --id wf_demo \
-  --input-json '{"destination":"NYC","approver":"human:operator"}' \
-  --source-json '{"kind":"operator","channel":"kanban","task_id":"t_..."}' \
-  --receipt-json /tmp/wf-demo-invoke.json
+hermes-workflows registry doctor --config .hermes/workflows.registry.json
 ```
 
-If a Hermes plugin/gateway decision records the approval with `resume=false`, do not run workflow code in the gateway process. Use a trusted local operator or cron path instead:
+## 3. Start workflow runs
+
+Start or replay a workflow instance through the registry:
 
 ```bash
-hermes-workflows resume-trusted demo \
+hermes-workflows run trip \
   --config .hermes/workflows.registry.json \
-  --id wf_demo \
-  --receipt-json /tmp/wf-demo-resume.json
-
-hermes-workflows resume-pending \
-  --config .hermes/workflows.registry.json \
-  --registry-name demo \
-  --limit 5
+  --id wf_trip_demo \
+  --input-json '{"destination":"NYC"}'
 ```
 
-`resume-pending` fails closed unless the registry entry has `trusted_resume: true`. Receipts are redacted JSON that can be pasted into Kanban comments or attached to dashboard artifacts.
+`run` records the workflow activation and queues missing work. It is not the always-on continuation loop. A run can return `running` before the Review Queue request exists because a worker still needs to execute queued steps and replay the workflow to the next wait.
 
-For autonomous workflow execution, run the resident Workflow Worker from the same registry instead of manually targeting one workflow id:
+## 4. Run the resident Workflow Worker
+
+For recurring agent-owned workflows, run one resident worker from the same registry:
 
 ```bash
 hermes-workflows worker \
   --config .hermes/workflows.registry.json \
-  --worker-id workflows-local-worker
+  --worker-id workflows-local-worker \
+  --agent-command <provider-command> \
+  --agent-arg <arg-if-needed>
 ```
 
-`worker --config` leases pending or lease-expired `run_workflow`, `run_step`, agent, and child-workflow commands across configured DB sources, loads each workflow instance's stored `workflow_ref`, executes the command, and keeps looping until the run reaches the next durable wait or terminal state. The stored `workflow_ref` must match a workflow entry in the registry for that DB; DB-only sources are rejected so a poisoned SQLite row cannot make the resident worker import arbitrary local Python. Omit `--idle-exit-after` for an always-on supervisor/launchd process; use `--once` or `--max-commands` for tests and smoke runs. Scoped `worker <workflow_ref> --db ... --id ...` remains a narrow manual drain for one known workflow.
+The worker leases runnable or lease-expired `run_workflow`, `run_step`, `external_agent`, and child-workflow commands from configured DBs. It loads each instance's stored `workflow_ref` through the registry, executes the command, records durable output, and replays the workflow until it reaches a Review Queue request, another durable wait, or a terminal state.
 
-## The mental model
+Use bounded flags only for tests, smoke checks, and recovery:
 
-A workflow function is a decider. It replays from the top on every run, resolves completed steps from SQLite history, and exits cleanly whenever it needs a step, signal, or approval. Workers do not resume a suspended Python stack; they publish durable outputs/signals. The runner or supervisor re-runs the same entrypoint against the same DB/run id, and memoized values let control flow advance.
+```bash
+# Execute one command and exit.
+hermes-workflows worker --config .hermes/workflows.registry.json --once
 
-```text
-operator runs `hermes-workflows run <name-or-path>` or `uv run workflow.py`
-  -> workflow emits missing commands and exits when waiting
-resident `hermes-workflows worker --config ...` leases runnable step commands
-  -> step outputs are recorded and the decider is replayed to the next wait/terminal state
-adapters publish signals or approval decisions
-  -> `resume-trusted`/`resume-pending` or another trusted runner re-invokes the entrypoint
-  -> completed calls replay from SQLite, then the decider reaches the next wait or terminal result
+# Drain a small smoke run, then exit after becoming idle.
+hermes-workflows worker \
+  --config .hermes/workflows.registry.json \
+  --max-commands 10 \
+  --idle-exit-after 1
 ```
 
-## Minimal workflow
+For production-ish use, supervise the worker with launchd, systemd, s6, tmux, or another process manager and omit `--idle-exit-after`.
+
+Environment fallback for agent runners:
+
+```bash
+export HERMES_WORKFLOWS_AGENT_COMMAND=<provider-command>
+export HERMES_WORKFLOWS_AGENT_ARGS_JSON='["--some-arg"]'
+```
+
+## 5. Author workflows with the public facade
+
+Launch-facing workflow authors should import the small facade:
 
 ```python
-from hermes_workflows import step, workflow
+from dataclasses import dataclass
+from typing import Literal
 
-@step
-async def draft_packet(ctx, inputs):
-    return {"draft": "prepared"}
+from hermes_workflows import agent, ask, parallel, pipeline, workflow
+
+
+@dataclass
+class ReviewDecision:
+    action: Literal["approve", "request_changes"]
+    feedback: str | None = None
+
 
 @workflow
-async def approval_gated_workflow(ctx, inputs):
-    packet = await draft_packet(ctx, inputs)
-    decision = await ctx.approval.request(
-        "Approve this prepared packet?",
-        key="approve_packet",
-        artifact=packet,
-        approver="human:operator",
-        allowed=["approve", "reject"],
+async def reviewable_draft_workflow(inputs):
+    draft = await agent(
+        "writer",
+        prompt="Draft a concise packet for the requested topic.",
+        input={"topic": inputs["topic"]},
+        returns=dict,
     )
-    return {"packet": packet, "decision": decision, "side_effects": {"sent": 0}}
+    decision = await ask(
+        prompt="Review this packet.",
+        key="review_packet",
+        input=draft,
+        returns=ReviewDecision,
+    )
+    return {"draft": draft, "decision": decision.action, "side_effects": {"sent": 0}}
+
 
 if __name__ == "__main__":
-    raise SystemExit(approval_gated_workflow.run())
+    raise SystemExit(reviewable_draft_workflow.run())
 ```
 
-Run it as a normal uv script or through the CLI:
+Use `parallel([...])` for fan-out/fan-in and `pipeline(items, stage_a, stage_b, ...)` for staged item work. Avoid teaching new users `WorkflowEngine`, low-level `ctx.approval.request`, `step`, or manual command draining unless you are writing an adapter, migration, or advanced test.
+
+## 6. Record human decisions
+
+For CLI approval gates in existing workflows:
 
 ```bash
-uv run workflows/approval_gated.py --id wf_demo --input-json '{"topic":"demo"}'
-hermes-workflows run workflows/approval_gated.py --id wf_demo --input-json '{"topic":"demo"}'
-```
-
-When the approval is ready, submit a typed decision. This is the adapter seam for CLIs, dashboards, Hermes plugins, Discord, Telegram, or any other runtime:
-
-```bash
-hermes-workflows approve workflows/approval_gated.py \
+hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
   --db .hermes/workflows.sqlite \
-  --id wf_demo \
-  --key approve_packet \
+  --id wf_trip_demo \
+  --key approve_trip_plan \
   --by operator \
-  --channel review-ui \
+  --channel cli \
   --message-id approval-message-1
 ```
 
-Use `resume=False` in embedding/plugin callbacks that should record the approval but leave downstream work to a separate worker/resumer.
+For typed `ask(...)` review requests, respond through the Review Queue adapter or the lower-level runtime API used by that adapter. The response payload must match the request schema and include human provenance. Dashboard and gateway callbacks should normally record the response or approval and leave continuation to the resident worker.
 
-## Add an agent step
+## 7. Configure the Hermes dashboard/plugin
 
-Agent steps call a runner through JSON. The included `agent_cli_adapter` wraps a provider CLI so the workflow runtime sees a strict, sanitized response.
+The Hermes plugin should point at the same DB aliases and workflow catalog that the CLI and worker use. A mismatched dashboard DB is the fastest way to make real approvals look missing.
 
-```python
-from hermes_workflows import agent(...), SubprocessAgentRunner, Workflow, WorkflowEngine, workflow
+Hermes profile config shape:
 
-runner = SubprocessAgentRunner([
-    "hermes-workflows-agent-cli-adapter",
-    "--agent-command", "python",
-    "--agent-arg", "examples/runners/workflows_demo_agent.py",
-])
-
-@workflow
-async def agent_workflow(ctx, inputs):
-    generated = await agent(...)(
-        "workflow_architect",
-        prompt="Write a child workflow for {{event_name}} participant follow-up.",
-        input={"event_name": inputs["event_name"]},
-        returns=Workflow,
-    )(ctx)
-
-    decision = await ctx.approval.request(
-        "Approve generated workflow execution?",
-        key="generated_workflow_execution",
-        artifact={"symbol": generated.symbol, "source_sha256": generated.source_sha256},
-        approver="human:operator",
-        allowed=["approve", "reject"],
-    )
-
-    return {"generated": generated.symbol, "decision": decision}
-
-engine = WorkflowEngine("workflow.sqlite", agent_runner=runner)
+```yaml
+plugins:
+  enabled:
+    - hermes-workflows-approvals
+  entries:
+    hermes-workflows-approvals:
+      workflow_dbs:
+        - name: default
+          path: /absolute/path/to/workspace/.hermes/workflows.sqlite
+      workflow_catalog:
+        - name: trip
+          workflow_ref: hermes_workflows.examples.trip:trip_planning_workflow
+          db: default
+          project_root: /absolute/path/to/workspace
+          python_paths:
+            - /absolute/path/to/hermes-workflows/src
+      dashboard_approver_id: operator
 ```
 
-The default test/demo runner is deterministic and credential-free. A real-provider smoke is opt-in only: set `HERMES_WORKFLOWS_REAL_AGENT_ADAPTER=1` and provide `HERMES_WORKFLOWS_AGENT_COMMAND` in the caller's environment. Do not report real-provider support as verified unless that explicit smoke was run; the boundary is the same either way: JSON request in, structured response and provenance out.
+The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Approval/review buttons are record-only in the dashboard by default; the Workflow Worker performs continuation.
 
-## Run the Hack the Valley demo
-
-Synthetic public demo:
+Environment fallback for local smokes:
 
 ```bash
-PYTHONPATH=src:. pytest tests/test_workflows_demo_2026_06_05.py -q
-PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
-  --db /tmp/workflows-demo-2026-06-05.sqlite \
-  --id wf_workflows_demo_2026_06_05 \
-  --artifact dist/workflows-demo-2026-06-05/index.html
+export HERMES_WORKFLOWS_DBS='{"default":"/absolute/path/to/workspace/.hermes/workflows.sqlite"}'
+export HERMES_WORKFLOWS_CATALOG='[{"name":"trip","workflow_ref":"hermes_workflows.examples.trip:trip_planning_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
+export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=operator
 ```
 
-Private real-data dry run:
+Dashboard routes intentionally use configured aliases instead of arbitrary DB paths. That keeps the Hermes process from becoming a local SQLite file browser.
+
+## 8. Inspect state
 
 ```bash
-PYTHONPATH=src:. python examples/build_hackathon_email_snapshot.py \
-  --registration-csv /path/to/private-registration-export.csv \
-  --submissions-json /path/to/private-submissions-export.json \
-  --prizes-json /path/to/reviewed-prizes.json \
-  --out /tmp/workflows-real-run/snapshot.json
-
-HERMES_WORKFLOWS_HACKATHON_SNAPSHOT=/tmp/workflows-real-run/snapshot.json \
-PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
-  --db /tmp/workflows-real-run/workflow.sqlite \
-  --id wf_htv_real_snapshot_dry_run \
-  --artifact /tmp/workflows-real-run/review-packet/index.html \
-  --receipt-json /tmp/workflows-real-run/receipt.json
+hermes-workflows status --db .hermes/workflows.sqlite --id wf_trip_demo --commands recent
+hermes-workflows events --db .hermes/workflows.sqlite --id wf_trip_demo --limit 20
+hermes-workflows outbox --db .hermes/workflows.sqlite --id wf_trip_demo
+hermes-workflows list --db .hermes/workflows.sqlite
 ```
 
-Then render a public-safe output packet:
+If `status` shows queued commands but nothing changes, the worker is not running, is pointed at the wrong registry/DB, lacks an agent runner, or is failing command execution. Fix that instead of manually poking resume commands.
 
-```bash
-PYTHONPATH=src:. python examples/redact_hackathon_review_packet.py \
-  --receipt /tmp/workflows-real-run/receipt.json \
-  --snapshot /tmp/workflows-real-run/snapshot.json \
-  --out-dir dist/workflows-real-run-output
-cp dist/workflows-real-run-output/packet.json examples/outputs/hackathon-real-dry-run.redacted.json
+## Advanced / legacy commands
+
+`invoke`, `resume-trusted`, `resume-pending`, scoped `worker <workflow_ref> --db ... --id ...`, and direct `WorkflowEngine` embedding are advanced adapter/recovery surfaces. They remain useful for tests, migrations, and controlled repairs, but they should not be the default setup path for new agents. The default path is:
+
+```text
+registry -> hermes-workflows run -> resident hermes-workflows worker --config -> Review Queue -> worker continuation
 ```
 
 ## Safety defaults
 
+- Keep CLI, worker, dashboard, and Review Queue on the same configured DB.
+- Keep workflow source import roots in the registry/catalog; do not make operators pass raw persistence paths in normal use.
+- Do not run downstream workflow code inside a chat/gateway callback.
 - Generated workflow code is inspectable, not silently trusted.
-- Approval decisions are accepted only after the matching approval request exists.
-- Invalid approval decisions fail closed before they are appended to workflow history or used to complete approval notification commands.
-- Approval to execute generated code is separate from approval to create drafts or send email.
-- The static dashboard is read-only; `serve-dashboard` can approve, but only through `submit_approval_decision()` / canonical `approval.decision` validation with human provenance.
-- Hermes Agent integration lives behind the `hermes-workflows-approvals` plugin entry point; see `docs/integrations/hermes-plugin.md`. Plugin/gateway approvals default to `resume=false` so chat callbacks record decisions without running downstream workflow code.
-- The CLI prints redacted summaries by default.
-- Public packets omit raw draft bodies, raw event payloads, private file paths, participant names/emails, project text, and URLs.
-- Raw snapshots, receipts, workflow DBs, and real review packets stay private.
-- Side effects should be their own explicit workflow step with its own approval key.
+- Approval to execute generated code is separate from approval to create drafts or send/publish/deploy.
+- Public packets omit raw private data, secret-looking fields, raw local file paths, and real participant exports.
+- Side effects should be explicit workflow steps with their own review/approval keys.
 
-If your agent cannot explain what it read, what it generated, who approved it, and what it did not do, it is not ready to touch production systems.
+If your agent cannot explain what it read, what it generated, who reviewed it, which DB/source owns the run, and what it did not do, it is not ready to touch production systems.

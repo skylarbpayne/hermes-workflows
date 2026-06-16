@@ -150,7 +150,7 @@ SignalReceived.payload.signal_type=approval.decision
 Created waiting trip workflow in an explicit DB, then used the live Hermes plugin tools available to operator agent:
 
 ```text
-workflow_approvals_list(db=/tmp/hermes-workflows-plugin-audit.XXXXXX.sqlite, status=waiting)
+workflow_review_requests_list(db=/tmp/hermes-workflows-plugin-audit.XXXXXX.sqlite, status=waiting)
   -> success=true, count=1, key=approve_trip_plan, workflow_id=wf_trip_plugin_audit
 
 workflow_approval_decide(

@@ -1,38 +1,65 @@
 # hermes-workflows
 
-`hermes-workflows` makes long-running agent work reviewable instead of ephemeral. It gives a Hermes-operated workspace durable workflow state, memoized steps, explicit human approval gates, and receipts that survive process exits, model handoffs, and restarts. The goal is not to replace Hermes Agent with a smarter orchestrator; it is to give Hermes a small, auditable runtime for work that must stop, wait, resume, and prove what happened.
+`hermes-workflows` makes long-running agent work reviewable instead of ephemeral. It gives trusted Python workflow projects durable state, typed agent work, typed human review, a resident Workflow Worker, and receipts that survive process exits, review pauses, and restarts.
+
+The public authoring surface is intentionally small:
+
+```python
+from hermes_workflows import agent, ask, parallel, pipeline, workflow
+```
+
+Start there. Runtime internals such as `WorkflowEngine`, approval DTOs, worker services, `step`, and low-level `approve` helpers still exist in submodules for adapters and advanced integrations, but they are not the launch-facing SDK.
 
 ## Quickstart
 
-Use the `hermes-workflows` CLI from inside a Hermes workspace or another trusted local operator workspace. This repository does **not** currently install a `hermes workflows` subcommand; until such a wrapper exists and is tested, use `hermes-workflows` or `python -m hermes_workflows`.
+Install from a source checkout or package:
 
 ```bash
-# From a source checkout. This installs runtime/user dependencies only, not dev extras.
 python -m pip install .
+hermes-workflows --help
+```
 
-hermes-workflows doctor \
-  --db /tmp/hermes-workflows-doctor.sqlite \
-  --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
+Create a registry in the workspace that will own workflow state:
 
-hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
+```bash
+mkdir -p .hermes
+cat > .hermes/workflows.registry.json <<'JSON'
+{
+  "dbs": {
+    "default": "workflows.sqlite"
+  },
+  "workflows": {
+    "trip": {
+      "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow",
+      "db": "default"
+    }
+  }
+}
+JSON
+```
+
+Run the installed demo and then let the Workflow Worker drain runnable commands until the workflow reaches the human review gate:
+
+```bash
+hermes-workflows run trip \
+  --config .hermes/workflows.registry.json \
   --id wf_trip_quickstart \
   --input-json '{"destination":"NYC","approver":"human:operator"}'
+
+hermes-workflows worker \
+  --config .hermes/workflows.registry.json \
+  --worker-id quickstart-worker \
+  --max-commands 5 \
+  --idle-exit-after 0.1
 
 hermes-workflows status \
   --db .hermes/workflows.sqlite \
   --id wf_trip_quickstart
 ```
 
-`hermes-workflows run <name-or-path>` is the default operator command. It re-invokes itself through `uv`, resolves registry names, `module:function` refs, or workflow files, and stores state in `<project-root>/.hermes/workflows.sqlite` unless `--db` is explicitly supplied. A workflow file can also opt into the same behavior directly:
+`run` records or replays the workflow instance. It does not pretend the current process is a forever worker. The resident `hermes-workflows worker --config ...` command owns continuation: it leases queued workflow/step/agent/child-workflow commands, records outputs, and re-enters the workflow until it is waiting for review or terminal.
 
-```python
-if __name__ == "__main__":
-    trip_planning_workflow.run()
-```
-
-Then `uv run workflow.py --id wf_demo --input-json '{...}'` uses the same memoized runtime without embedding engine plumbing in the workflow definition. The workflow project's uv environment must be able to import `hermes_workflows` — add this package as a dependency or run from a source checkout with `PYTHONPATH=src` during development.
-
-The quickstart stops at `approve_trip_plan`. That is intentional: a workflow can do deterministic local work, persist the wait state, and exit cleanly before a human-authorized side effect. To resume it from the CLI, record a human-sourced approval:
+Approve the review gate with human provenance, then let the same worker continue:
 
 ```bash
 hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
@@ -41,95 +68,99 @@ hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
   --key approve_trip_plan \
   --by operator \
   --channel cli \
-  --message-id manual-approval-1
+  --message-id quickstart-approval-1
+
+hermes-workflows worker \
+  --config .hermes/workflows.registry.json \
+  --worker-id quickstart-worker \
+  --max-commands 5 \
+  --idle-exit-after 0.1
 ```
 
-## Toy workflow
+A real always-on setup runs the worker under launchd, systemd, s6, tmux, or another supervisor without `--idle-exit-after`.
 
-Workflow code is ordinary Python, but `@step` calls are durable awaits. Completed steps replay from SQLite history; missing steps, signals, or approvals are recorded and the decider exits.
+## Minimal authoring example
+
+Workflow code is ordinary Python. `agent(...)` asks a configured worker/runner for typed work. `ask(...)` creates a typed Review Queue request for a human or external reviewer. `parallel(...)` and `pipeline(...)` compose those calls without exposing runtime bookkeeping in the workflow body.
 
 ```python
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step, workflow
+from dataclasses import dataclass
+from typing import Literal
+
+from hermes_workflows import agent, ask, workflow
 
 
-@step
-async def draft_release_note(ctx, inputs):
-    return {
-        "title": f"Release note for {inputs['feature']}",
-        "body": "This is a toy artifact for human review.",
-    }
+@dataclass
+class Draft:
+    text: str
+
+
+@dataclass
+class ReviewDecision:
+    action: Literal["approve", "request_changes"]
+    feedback: str | None = None
 
 
 @workflow
-async def release_note_workflow(ctx, inputs):
-    note = await draft_release_note(ctx, inputs)
-    decision = await ctx.approval.request(
-        "Approve publishing this release note?",
-        key="approve_release_note",
-        artifact=note,
-        approver="human:operator",
-        allowed=["approve", "reject"],
-        authority=["publish_release_note"],
+async def release_note_workflow(inputs):
+    draft = await agent(
+        "writer",
+        prompt="Draft a release note for the supplied change.",
+        input={"change": inputs["change"]},
+        returns=Draft,
     )
-    return {"note": note, "approval": decision, "published": False}
+    decision = await ask(
+        prompt="Review this release note.",
+        key="review_release_note",
+        input=draft,
+        returns=ReviewDecision,
+    )
+    return {"draft": draft.text, "decision": decision.action, "side_effects": {"published": False}}
 
 
-engine = WorkflowEngine(".hermes/workflows.sqlite")
-print(engine.run_until_idle(
-    release_note_workflow,
-    {"feature": "durable approvals"},
-    workflow_id="wf_release_note_demo",
-))
-
-receipt = engine.submit_approval_decision(
-    ApprovalDecisionInput(
-        workflow_id="wf_release_note_demo",
-        key="approve_release_note",
-        action="approve",
-        by="operator",
-        source={
-            "kind": "human",
-            "id": "operator",
-            "channel": "cli",
-            "message_id": "manual-approval-1",
-        },
-        idempotency_key="manual-approval-1",
-    ),
-    resume=True,
-)
-print(receipt.status)
+if __name__ == "__main__":
+    raise SystemExit(release_note_workflow.run())
 ```
+
+The Review Queue schema comes from the `returns=` type. A dataclass with `action: Literal[...]` produces explicit action buttons instead of a raw JSON box.
 
 ## Runtime model in one screen
 
 ```text
-operator runs `hermes-workflows run <name-or-path>` or `uv run workflow.py`
-  -> the same workflow entrypoint opens the same SQLite DB/run id
-  -> completed steps/signals/approvals replay as memoized values
-  -> missing work is emitted as durable commands and the process can exit
-workers/adapters
-  -> publish step outputs, signals, and approval decisions durably
-runner/supervisor
-  -> re-invokes the same entrypoint/DB/run (`hermes-workflows run --watch` when desired)
-  -> control flow advances until the workflow is waiting again or terminal
+operator starts/replays workflow
+  hermes-workflows run <alias-or-ref> --config .hermes/workflows.registry.json --id <id>
+    -> durable workflow activation is recorded
+    -> missing workflow/step/agent/child work is queued
+    -> command exits after current durable state is recorded
+
+resident Workflow Worker
+  hermes-workflows worker --config .hermes/workflows.registry.json
+    -> leases queued commands from configured DBs
+    -> executes step/agent/child work through configured runners
+    -> replays the workflow against the same DB/run id
+    -> stops at Review Queue requests, approvals, or terminal state
+
+review surface
+    -> dashboard/chat/CLI records human input or approval with provenance
+    -> the worker observes the durable transition and continues
 ```
 
-Workflow code runs in the Python process that imports it: the CLI, a worker, a trusted resumer, or an embedding Hermes adapter. Agent steps are not magic in-process model calls; they execute through configured runner seams such as `SubprocessAgentRunner`, which sends bounded JSON to a trusted local command and fails closed on timeout, invalid JSON, non-zero exit, or oversized output.
+Do not split the CLI, worker, and dashboard across different SQLite files. If the worker drains one DB and the dashboard reads another, approvals will look missing even though the runtime is doing exactly what you configured.
 
 ## Documentation
 
 - [Docs site index](docs/index.md)
-- [Architecture, domain model, seams, execution environments, and failure modes](docs/architecture/domain-model-and-seams.md)
 - [Hermes/operator setup guide](docs/setup-for-agents.md)
+- [Hermes dashboard/plugin setup](docs/integrations/hermes-plugin.md)
+- [Architecture, domain model, seams, execution environments, and failure modes](docs/architecture/domain-model-and-seams.md)
 - [Runtime vs skills/subagents boundary](docs/architecture/runtime-vs-skills-subagents.md)
-- [Approval adapters and Hermes plugin](docs/architecture/approval-adapters-and-hermes-plugin.md)
+- [Approval adapters and Review Queue](docs/architecture/approval-adapters-and-hermes-plugin.md)
 - [Inspectability cookbook](docs/operations/inspectability-cookbook.md)
-- [Documentation summary and CI notes](docs/summary.md)
 
 ## Examples directories
 
-- `examples/` contains runnable repository/demo workflows, deterministic test runners, scripts, prompts, and larger scenario assets. These are for contributors and operators working from the source tree.
-- `src/hermes_workflows/examples/` contains small installed examples that can be imported after package installation, such as `hermes_workflows.examples.trip:trip_planning_workflow`. Quickstarts should prefer these installed examples.
+- `src/hermes_workflows/examples/` contains small installed examples that work after package installation, such as `hermes_workflows.examples.trip:trip_planning_workflow`.
+- `examples/` contains contributor demos, deterministic runners, scripts, prompts, and larger scenario assets for source-tree development.
 
 ## Development checks
 
