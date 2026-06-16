@@ -870,6 +870,34 @@ def test_dashboard_run_dag_derives_dynamic_fanout_topology_from_run_events(tmp_p
     assert ("step:dashboard_dynamic_left:0", "step:dashboard_dynamic_right:0") not in edges
 
 
+def test_dashboard_run_dag_does_not_chain_out_of_order_parallel_steps():
+    api = load_dashboard_api()
+    status = {
+        "workflow_id": "wf_parallel_out_of_order",
+        "events": [
+            {"seq": 1, "type": "WorkflowStarted", "payload": {}},
+            {"seq": 2, "type": "StepRequested", "payload": {"key": "step:a", "step_name": "a"}},
+            {"seq": 3, "type": "StepRequested", "payload": {"key": "step:b", "step_name": "b"}},
+            {"seq": 4, "type": "StepCompleted", "payload": {"key": "step:b", "output": "B"}},
+            {"seq": 5, "type": "StepCompleted", "payload": {"key": "step:a", "output": "A"}},
+            {"seq": 6, "type": "StepRequested", "payload": {"key": "step:c", "step_name": "c"}},
+            {"seq": 7, "type": "StepCompleted", "payload": {"key": "step:c", "output": "C"}},
+            {"seq": 8, "type": "WorkflowCompleted", "payload": {"result": "done"}},
+        ],
+    }
+
+    dag = api._run_dag_payload(status, [])
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+
+    assert ("workflow:start", "step:a") in edges
+    assert ("workflow:start", "step:b") in edges
+    assert ("step:a", "step:c") in edges
+    assert ("step:b", "step:c") in edges
+    assert ("step:c", "workflow:completed") in edges
+    assert ("step:a", "step:b") not in edges
+    assert ("step:b", "step:a") not in edges
+
+
 def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     artifact = {
