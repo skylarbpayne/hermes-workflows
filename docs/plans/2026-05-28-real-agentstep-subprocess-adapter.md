@@ -34,7 +34,7 @@ Not approved by this plan:
 - `src/hermes_workflows/runners.py` already provides `SubprocessAgentRunner(command, timeout_seconds, cwd, env, max_stdout_bytes)`.
 - `src/hermes_workflows/prompts.py` builds `agent.runner_request.v1` with `name`, `prompt`, hashes, `rendered_prompt`, `input`, `returns`, `workflow_id`, and `step_key`.
 - Live agent(...) metadata already persists the runner request, response, and provenance in `StepCompleted.metadata`.
-- `agent(...)(..., returns=Workflow)` already marks live generated workflow output as `approval_required=True` and waits for `approval.decision` before import/execution.
+- `agent(..., returns=Workflow)` already marks live generated workflow output as `approval_required=True` and waits for `approval.decision` before import/execution.
 - `examples/runners/static_json_agent.py` is only a deterministic fixture; it is not a real agent/provider adapter.
 
 ## Proposed public usage
@@ -45,16 +45,18 @@ Default fake/local example:
 from pathlib import Path
 import sys
 
-from hermes_workflows import agent(...), SubprocessAgentRunner, WorkflowEngine, workflow
+from hermes_workflows import agent, workflow
+from hermes_workflows.engine import WorkflowEngine
+from hermes_workflows.runners import SubprocessAgentRunner
 
 
 @workflow
 async def summarize_with_cli_agent(ctx, inputs):
-    return await agent(...)(
+    return await agent(
         "summarize_item",
         prompt="Summarize this item as JSON: {{item}}",
         input={"item": inputs["item"]},
-    )(ctx)
+    )
 
 
 repo_root = Path(__file__).resolve().parent.parent
@@ -336,7 +338,7 @@ Expected: JSON object containing `output` and fake provenance.
 
 7. `test_agent_cli_adapter_generated_workflow_still_waits_for_approval`
    - Use `WorkflowEngine(..., agent_runner=SubprocessAgentRunner(adapter argv))`.
-   - Run an `agent(...)(..., returns=Workflow)` pipeline.
+   - Run an `agent(..., returns=Workflow)` pipeline.
    - Assert workflow status is `waiting` on generated-workflow approval.
    - Assert no `ChildWorkflowRequested` occurred before approval.
    - Assert approval artifact includes adapter provenance.
@@ -404,16 +406,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from hermes_workflows import agent(...), SubprocessAgentRunner, WorkflowEngine, workflow
+from hermes_workflows import agent, workflow
+from hermes_workflows.engine import WorkflowEngine
+from hermes_workflows.runners import SubprocessAgentRunner
 
 
 @workflow
 async def cli_agent_adapter_example(ctx, inputs):
-    return await agent(...)(
+    return await agent(
         "summarize_item",
         prompt="Summarize {{item}} as JSON.",
         input={"item": inputs["item"]},
-    )(ctx)
+    )
 
 
 def main() -> int:

@@ -87,7 +87,7 @@ Workflow modules are imported and executed in the Python process that calls the 
 - `hermes-workflows run ...`
 - `hermes-workflows start ...`
 - `hermes-workflows worker ...`
-- `hermes-workflows resume-trusted ...`
+- `hermes-workflows worker --config ...` for resident continuation
 - an embedding Hermes plugin/adapter that calls `WorkflowEngine`
 
 There is no implemented `hermes workflows` wrapper in this repository at the time of this documentation. Use `hermes-workflows` or `python -m hermes_workflows` from a trusted Hermes workspace unless/until a Hermes wrapper lands and is tested.
@@ -113,7 +113,7 @@ Provider credentials are owned by the provider CLI or the Hermes/operator enviro
 
 ### Approval decisions
 
-Approval adapters record human provenance. A chat gateway or Hermes plugin can choose record-only behavior (`resume=false`) so workflow code does not run inside the gateway. A trusted local resumer can later call `resume-trusted` or `resume-pending` for allowlisted registry entries.
+Approval adapters record human provenance. A chat gateway or Hermes plugin should usually choose record-only behavior (`resume=false`) so workflow code does not run inside the gateway. The resident `hermes-workflows worker --config ...` process should observe the durable response/decision and continue the workflow from the same registry/DB.
 
 ## Seams and extension points
 

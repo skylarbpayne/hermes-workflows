@@ -18,7 +18,7 @@ def sha256_text(value: str) -> str:
 class Workflow:
     """Durable reference to generated Python workflow code.
 
-    `agent(...)(..., returns=Workflow)` returns this normal value. Calling it from
+    `agent(..., returns=Workflow)` returns this normal value. Calling it from
     a workflow starts a durable child workflow instance.
     """
 

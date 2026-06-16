@@ -375,7 +375,7 @@ class WorkflowEngine:
         return approvals
 
     def list_operator_steps(self, *, status: str | None = "waiting") -> list[dict[str, Any]]:
-        """Return human/operator steps across workflows.
+        """Return typed human-input steps across workflows.
 
         Approval remains as a compatibility/policy preset. Typed human input
         and future human checkpoints should appear here, not as approval cards.

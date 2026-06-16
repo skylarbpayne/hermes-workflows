@@ -7,7 +7,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from . import ApprovalDecisionInput, WorkflowEngine
+from .approvals import ApprovalDecisionInput
+from .engine import WorkflowEngine
 from .receipts import redact_secrets
 
 PLUGIN_NAME = "hermes-workflows-approvals"
@@ -239,7 +240,7 @@ def review_request_to_dict(request: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def operator_step_to_dict(step: dict[str, Any]) -> dict[str, Any]:
+def human_input_step_to_dict(step: dict[str, Any]) -> dict[str, Any]:
     payload = dict(step)
     if "artifact" in payload:
         payload["artifact"] = _redact(payload.get("artifact"))
@@ -252,19 +253,6 @@ def operator_step_to_dict(step: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _handle_workflow_approvals_list(args: dict[str, Any], **_: Any) -> str:
-    try:
-        db_path = resolve_db(args.get("db"))
-        status = args.get("status", "waiting")
-        limit = _coerce_limit(args.get("limit"))
-        engine = WorkflowEngine(db_path, read_only=True)
-        approvals = engine.list_approvals(status=status)
-        payload = [approval_view_to_dict(approval) for approval in approvals[:limit]]
-        return _json_result({"success": True, "db": db_path, "count": len(payload), "approvals": payload})
-    except Exception as exc:
-        return _tool_error(f"workflow_approvals_list failed: {type(exc).__name__}: {exc}")
-
-
 def _handle_workflow_review_requests_list(args: dict[str, Any], **_: Any) -> str:
     try:
         db_path = resolve_db(args.get("db"))
@@ -273,7 +261,7 @@ def _handle_workflow_review_requests_list(args: dict[str, Any], **_: Any) -> str
         engine = WorkflowEngine(db_path, read_only=True)
         approvals = [approval_view_to_dict(approval) for approval in engine.list_approvals(status=status)[:limit]]
         remaining = max(0, limit - len(approvals))
-        human_inputs = [operator_step_to_dict(step) for step in engine.list_operator_steps(status=status)[:remaining]]
+        human_inputs = [human_input_step_to_dict(step) for step in engine.list_operator_steps(status=status)[:remaining]]
         review_requests: list[dict[str, Any]] = []
         for approval in approvals:
             item = dict(approval)
@@ -289,17 +277,6 @@ def _handle_workflow_review_requests_list(args: dict[str, Any], **_: Any) -> str
     except Exception as exc:
         return _tool_error(f"workflow_review_requests_list failed: {type(exc).__name__}: {exc}")
 
-
-def _handle_workflow_operator_steps_list(args: dict[str, Any], **_: Any) -> str:
-    try:
-        db_path = resolve_db(args.get("db"))
-        status = args.get("status", "waiting")
-        limit = _coerce_limit(args.get("limit"))
-        engine = WorkflowEngine(db_path, read_only=True)
-        steps = [operator_step_to_dict(step) for step in engine.list_operator_steps(status=status)[:limit]]
-        return _json_result({"success": True, "db": db_path, "count": len(steps), "operator_steps": steps})
-    except Exception as exc:
-        return _tool_error(f"workflow_operator_steps_list failed: {type(exc).__name__}: {exc}")
 
 
 def _source_from_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -409,9 +386,6 @@ def _handle_workflow_review_respond(args: dict[str, Any], **kwargs: Any) -> str:
         return _tool_error(f"workflow_review_respond failed: {type(exc).__name__}: {exc}")
 
 
-def _handle_workflow_operator_respond(args: dict[str, Any], **kwargs: Any) -> str:
-    return _handle_workflow_review_respond(args, **kwargs)
-
 
 def _event_message_id(event: Any, source: Any) -> str | None:
     for obj in (event, source):
@@ -472,19 +446,6 @@ def _handle_gateway_message(*, event: Any, gateway: Any = None, session_store: A
     }
 
 
-WORKFLOW_APPROVALS_LIST_SCHEMA = {
-    "name": "workflow_approvals_list",
-    "description": "List pending hermes-workflows approval requests from a configured workflow SQLite DB or explicit DB path.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "db": {"type": "string", "description": "Configured DB alias or SQLite path."},
-            "status": {"type": "string", "default": "waiting", "description": "Approval status filter."},
-            "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50},
-        },
-    },
-}
-
 WORKFLOW_REVIEW_REQUESTS_LIST_SCHEMA = {
     "name": "workflow_review_requests_list",
     "description": "List pending hermes-workflows Review Queue requests from a configured workflow SQLite DB or explicit DB path.",
@@ -498,19 +459,6 @@ WORKFLOW_REVIEW_REQUESTS_LIST_SCHEMA = {
     },
 }
 
-
-WORKFLOW_OPERATOR_STEPS_LIST_SCHEMA = {
-    "name": "workflow_operator_steps_list",
-    "description": "List pending hermes-workflows human/operator steps from a configured workflow SQLite DB or explicit DB path.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "db": {"type": "string", "description": "Configured DB alias or SQLite path."},
-            "status": {"type": "string", "default": "waiting", "description": "Operator step status filter."},
-            "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50},
-        },
-    },
-}
 
 
 WORKFLOW_APPROVAL_DECIDE_SCHEMA = {
@@ -559,28 +507,6 @@ WORKFLOW_REVIEW_RESPOND_SCHEMA = {
     },
 }
 
-
-WORKFLOW_OPERATOR_RESPOND_SCHEMA = {
-    "name": "workflow_operator_respond",
-    "description": "Record a typed human/operator response for a hermes-workflows operator step. Defaults to resume=false for gateway/plugin safety.",
-    "parameters": {
-        "type": "object",
-        "required": ["db", "workflow_id", "key", "payload", "by"],
-        "properties": {
-            "db": {"type": "string", "description": "Configured DB alias or SQLite path."},
-            "workflow_id": {"type": "string"},
-            "key": {"type": "string"},
-            "payload": {"type": "object", "description": "Typed operator response payload."},
-            "by": {"type": "string", "description": "Human/operator id/name."},
-            "channel": {"type": "string", "default": "hermes-plugin"},
-            "message_id": {"type": "string"},
-            "message_url": {"type": "string"},
-            "event_id": {"type": "string"},
-            "idempotency_key": {"type": "string"},
-            "resume": {"type": "boolean", "default": False},
-        },
-    },
-}
 
 
 def register(ctx) -> None:

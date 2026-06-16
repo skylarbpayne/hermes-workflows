@@ -1,16 +1,20 @@
-# Approval adapters and Hermes plugin path
+# Approval adapters, Review Queue, and Hermes plugin path
 
-`hermes-workflows` core should stay runtime-agnostic. The approval capability is useful only if humans can approve from the surface they already use, but the core library should not become Discord-specific, Telegram-specific, or Hermes-specific.
+`hermes-workflows` core stays runtime-agnostic. Human review is useful only if people can answer from the surfaces they already use, but the runtime should not become Discord-specific, Telegram-specific, or Hermes-specific.
+
+The product surface is the Review Queue: one place for typed `ask(...)` requests and approve/reject approval gates.
 
 ## Stable core contract
 
 Core owns:
 
 - workflow status/read APIs
-- `ApprovalRequested` events
-- canonical `approval.decision` signals
-- validation: prior request, allowed action, approver match, human source, external provenance, duplicate/conflict rejection
+- Review Queue request views
+- approval request events
+- typed human-input responses for `ask(...)`
+- canonical approval decision validation
 - receipts/events/status packets
+- durable state transitions that wake the resident Workflow Worker
 
 Core should not own:
 
@@ -20,126 +24,90 @@ Core should not own:
 - Hermes profile config
 - chat-specific buttons or callbacks
 - credential storage
+- resident process supervision
 
 ## Adapter shape
 
-Every approval surface should do the same thing:
+Every review surface should do the same thing:
 
 ```text
 waiting workflow
-  -> adapter calls engine.list_approvals() or engine.get_approval(workflow_id, key)
-  -> adapter displays ApprovalView as an approval card
-  -> human clicks/types approve or reject
+  -> adapter lists Review Queue requests from configured DB aliases
+  -> adapter displays the prompt, schema/actions, and redacted artifact
+  -> human submits an approve/reject decision or typed response
   -> adapter captures provenance
-  -> adapter calls engine.submit_approval_decision(ApprovalDecisionInput(...), resume=True|False)
-  -> adapter posts ApprovalReceipt/status
+  -> adapter records the response/decision with resume=false by default
+  -> resident Workflow Worker continues from the durable state transition
 ```
 
-The canonical adapter API is intentionally boring:
-
-```python
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
-
-engine = WorkflowEngine("/tmp/workflow.sqlite")
-approvals = engine.list_approvals(status="waiting")
-
-receipt = engine.submit_approval_decision(
-    ApprovalDecisionInput(
-        workflow_id="wf_trip",
-        key="approve_trip_plan",
-        action="approve",
-        by="operator",
-        source={"kind": "human", "id": "operator", "channel": "discord", "message_id": "150828..."},
-        idempotency_key="discord:150828:approve_trip_plan:approve",
-    ),
-    # Use False for chat callbacks that should record the decision but hand resume to a worker.
-    resume=True,
-)
-```
-
-Under the hood this still records the same validated `approval.decision` event; adapters should use the typed API so they do not accidentally invent a parallel approval path.
-
-The underlying signal payload remains boring for lower-level integrations:
-
-```json
-{
-  "payload": {"action": "approve", "by": "operator"},
-  "source": {
-    "kind": "human",
-    "id": "operator",
-    "channel": "discord",
-    "message_id": "150828..."
-  },
-  "idempotency_key": "discord:150828...:approve_trip_plan"
-}
-```
+For `ask(...)`, adapters record typed responses matching the request schema. For approval gates, adapters record approve/reject decisions. They should not invent a parallel review path or run workflow code inside a chat/gateway callback.
 
 ## Current adapters
 
-- CLI: `hermes-workflows approve|reject`.
-- Static dashboard: `hermes-workflows dashboard` renders status and approval shortcut commands.
-- Local approval server: `hermes-workflows serve-dashboard` exposes a small local form and posts through `submit_approval_decision(...)`.
-- Hermes Agent plugin: discovered via the `hermes_agent.plugins` entry point and exposes `workflow_approvals_list` / `workflow_approval_decide`.
+- CLI: `hermes-workflows approve|reject` for approval gates; lower-level runtime APIs can respond to typed `ask(...)` requests.
+- Static dashboard: `hermes-workflows dashboard` renders read-only status and review information.
+- Local dashboard server: `hermes-workflows serve-dashboard` exposes explicit local approval forms when opted in.
+- Hermes Agent plugin/dashboard: discovered via the `hermes_agent.plugins` entry point and exposes Review Queue tools plus `/workflows` dashboard UI.
 
 See [`../integrations/hermes-plugin.md`](../integrations/hermes-plugin.md) for install/config details.
 
 ## Hermes plugin MVP
 
-The plugin MVP adds profile-aware workflow approval operations without changing core:
+The plugin adds profile-aware Review Queue operations without changing core:
 
-- configure one or more workflow DBs per Hermes profile
-- list waiting approvals
-- send approval cards to Discord/Telegram/Home
+- configure one or more workflow DB aliases per Hermes profile
+- configure workflow catalog/import roots for dashboard source/run/DAG routes
+- list waiting Review Queue requests
+- render review cards in Hermes chat/dashboard
 - capture human/channel/message provenance automatically
-- call the core approval signal path
-- post a workflow receipt after resume
-- optionally register/update a Workspaces/Artifact dashboard Thing
+- record typed review responses and approval decisions
+- leave continuation to the resident Workflow Worker by default
 
-Implemented tool names:
+Implemented public tool names:
 
 ```text
-workflow_approvals_list(db?: string, status?: string, limit?: int)
+workflow_review_requests_list(db?: string, status?: string, limit?: int)
+workflow_review_respond(db, workflow_id, key, payload, by, channel?, message_id?, resume?=false)
 workflow_approval_decide(db, workflow_id, key, action, by, channel?, message_id?, resume?=false)
 ```
 
-Exact-token gateway hook format:
+Legacy compatibility handlers may remain internally, but public docs and UI should say Review Queue, Human Input, review request, and approval gate. Do not make users choose between separate review/approval/operator concepts.
+
+Exact-token gateway hook format for approval gates:
 
 ```text
 hwf-approval:v1:approve:<structured-token>
 hwf-approval:v1:reject:<structured-token>
 ```
 
-The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, or workflow execution. `resume=false` is the safe default for plugin/gateway calls.
+The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, workflow execution, or worker lifecycle. `resume=false` is the safe default for plugin/gateway/dashboard calls.
 
-## Trusted local resume bridge
+## Continuation after review
 
-When an adapter records a decision with `resume=false`, the workflow intentionally remains waiting. The safe follow-up path is a registry-aware local operator command, not gateway-side workflow execution:
-
-```bash
-hermes-workflows resume-trusted <workflow-alias-or-ref> \
-  --config .hermes/workflows.registry.json \
-  --id <workflow-id> \
-  --receipt-json /tmp/workflow-resume-receipt.json
-```
-
-For cron/manual drainers, use:
+After an adapter records a response or approval with `resume=false`, the workflow may remain waiting/runnable until the trusted local worker sees the durable transition. The normal follow-up path is not `resume-trusted` or a gateway-side engine call. It is the resident worker for the same registry/DB:
 
 ```bash
-hermes-workflows resume-pending \
-  --config .hermes/workflows.registry.json \
-  --registry-name <trusted-workflow-alias> \
-  --limit 5
+hermes-workflows worker --config .hermes/workflows.registry.json
 ```
 
-`resume-pending` only runs registry entries with `trusted_resume: true`; this keeps bulk resume from accidentally draining old experiments. Receipts should be written back to Kanban/dashboard/artifact surfaces by the adapter or operator script, not by the workflow runtime itself.
+For smokes and controlled repairs, bound the worker:
+
+```bash
+hermes-workflows worker \
+  --config .hermes/workflows.registry.json \
+  --max-commands 10 \
+  --idle-exit-after 1
+```
+
+`invoke`, `resume-trusted`, `resume-pending`, scoped workers, and direct engine calls are advanced adapter/recovery surfaces, not the default operator setup.
 
 ## Other agent/runtime adapters
 
 The same contract should support:
 
-- a LangGraph node that pauses on `ApprovalRequested`
-- a Temporal activity that records the decision signal
-- a custom web app that posts approval decisions
-- a Claude/Codex/OpenCode agent wrapper that waits for human approval before executing high-blast-radius steps
+- a LangGraph node that pauses on a Review Queue request
+- a Temporal activity that records the decision/response
+- a custom web app that posts review responses
+- a Claude/Codex/OpenCode agent wrapper that waits for human approval before high-blast-radius steps
 
-If an adapter cannot provide durable provenance, it should be allowed to show status but not approve.
+If an adapter cannot provide durable provenance, it may show status but should not record review decisions.
