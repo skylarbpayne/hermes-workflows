@@ -669,6 +669,24 @@ def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
     return str(key)
 
 
+def _payload_contains_value(container: Any, value: Any) -> bool:
+    """Return true when a request payload concretely carries a prior output.
+
+    Pipeline stages feed each item output into the next stage request. When the
+    run history shows that exact value inside a later request payload, the DAG
+    can keep that lane's edge narrow instead of connecting every previous
+    parallel item to every next-stage item.
+    """
+
+    if container == value:
+        return True
+    if isinstance(container, dict):
+        return any(_payload_contains_value(item, value) for item in container.values())
+    if isinstance(container, (list, tuple)):
+        return any(_payload_contains_value(item, value) for item in container)
+    return False
+
+
 def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
@@ -678,6 +696,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
     pending_parents: dict[str, set[str]] = {}
     completed_pending_frontier: set[str] = set()
     gather_children: set[str] = set()
+    completed_outputs: dict[str, Any] = {}
 
     def add_edge(source: str, target: str) -> None:
         if not source or not target or source == target:
@@ -743,6 +762,17 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
             frontier = set(completed_pending_frontier)
             completed_pending_frontier = set()
 
+    def parents_for_request(request_payload: dict[str, Any]) -> set[str]:
+        parents = set(frontier or {"workflow:start"})
+        if len(parents) <= 1:
+            return parents
+        matching_parents = {
+            parent_id
+            for parent_id in parents
+            if parent_id in completed_outputs and _payload_contains_value(request_payload, completed_outputs[parent_id])
+        }
+        return matching_parents if len(matching_parents) == 1 else parents
+
     for event in status.get("events") or status.get("recent_events") or []:
         event_type = str(event.get("type") or "")
         payload = event.get("payload") or {}
@@ -757,7 +787,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         elif event_type in {"StepRequested", "ChildWorkflowRequested"}:
             if node_id not in pending_requests and node_id not in gather_children:
                 pending_requests.append(node_id)
-                pending_parents[node_id] = set(frontier or {"workflow:start"})
+                pending_parents[node_id] = parents_for_request(payload)
         elif event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
             pending = [str(item) for item in payload.get("pending") or []]
             parents = frontier or {"workflow:start"}
@@ -771,6 +801,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
                 pending_parents.pop(child_id, None)
             frontier = {node_id}
         elif event_type in {"StepCompleted", "StepFailed", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
+            if event_type in {"StepCompleted", "ChildWorkflowCompleted"} and "output" in payload:
+                completed_outputs[node_id] = payload.get("output")
             if node_id not in gather_children:
                 flush_sequential_until(node_id)
         elif event_type in {"ApprovalRequested", "AgentRequested"}:

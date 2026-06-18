@@ -11,7 +11,7 @@ from types import ModuleType
 
 import pytest
 
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step, workflow
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, pipeline, step, workflow
 from hermes_workflows.workflows.coding import coding_workflow
 from tests.test_hermes_plugin_approvals import create_pending_approval
 
@@ -81,6 +81,25 @@ async def dashboard_dynamic_topology_workflow(ctx, inputs):
     )
     joined = await dashboard_dynamic_join(ctx, left, right)
     return {"joined": joined}
+
+
+@step
+async def dashboard_pipeline_draft(ctx, section):
+    return {"section": section, "draft": f"draft:{section}"}
+
+
+@step
+async def dashboard_pipeline_humanize(ctx, draft):
+    return {"section": draft["section"], "humanized": f"humanized:{draft['draft']}"}
+
+
+@workflow
+async def dashboard_pipeline_lane_workflow(ctx, inputs):
+    return await pipeline(
+        inputs["sections"],
+        lambda section: dashboard_pipeline_draft(ctx, section),
+        lambda draft: dashboard_pipeline_humanize(ctx, draft),
+    )
 
 
 def load_dashboard_api():
@@ -868,6 +887,31 @@ def test_dashboard_run_dag_derives_dynamic_fanout_topology_from_run_events(tmp_p
     assert ("step:dashboard_dynamic_right:0", "gather:0") in edges
     assert ("gather:0", "step:dashboard_dynamic_join:0") in edges
     assert ("step:dashboard_dynamic_left:0", "step:dashboard_dynamic_right:0") not in edges
+
+
+def test_dashboard_run_dag_preserves_pipeline_item_lanes(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_pipeline_lane_workflow,
+        {"sections": ["a", "b"]},
+        workflow_id="wf_pipeline_lanes",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_pipeline_lane_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    dag = run(api.run_dag("wf_pipeline_lanes", db="runtime-smoke"))
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+
+    draft_a = "step:dashboard_pipeline_draft:0"
+    draft_b = "step:dashboard_pipeline_draft:1"
+    humanize_a = "step:dashboard_pipeline_humanize:0"
+    humanize_b = "step:dashboard_pipeline_humanize:1"
+
+    assert (draft_a, humanize_a) in edges
+    assert (draft_b, humanize_b) in edges
+    assert (draft_a, humanize_b) not in edges
+    assert (draft_b, humanize_a) not in edges
 
 
 def test_dashboard_run_dag_does_not_chain_out_of_order_parallel_steps():
