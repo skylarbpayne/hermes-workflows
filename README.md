@@ -5,7 +5,7 @@
 The public authoring surface is intentionally small:
 
 ```python
-from hermes_workflows import agent, ask, parallel, pipeline, workflow
+from hermes_workflows import agent, ask, bash, parallel, pipeline, workflow
 ```
 
 Start there. Runtime internals such as `WorkflowEngine`, approval DTOs, worker internals, `step`, and low-level `approve` helpers still exist in submodules for adapters and advanced integrations, but they are not the launch-facing SDK.
@@ -81,7 +81,7 @@ A real always-on setup runs the worker under launchd, systemd, s6, tmux, or anot
 
 ## Minimal authoring example
 
-Workflow code is ordinary Python. `agent(...)` asks a configured worker/runner for typed work. `ask(...)` creates a typed Review Queue request for a human or external reviewer. `parallel(...)` and `pipeline(...)` compose those calls without exposing runtime bookkeeping in the workflow body.
+Workflow code is ordinary Python. `agent(...)` asks a configured worker/runner for typed work. `bash(...)` runs deterministic shell commands as durable worker steps with captured stdout/stderr, exit status, timing, timeouts, and optional redaction. `ask(...)` creates a typed Review Queue request for a human or external reviewer. `parallel(...)` and `pipeline(...)` compose those calls without exposing runtime bookkeeping in the workflow body.
 
 ```python
 from dataclasses import dataclass

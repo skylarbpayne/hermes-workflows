@@ -1,10 +1,11 @@
 """Public authoring facade for ``hermes-workflows``.
 
 The launch-facing SDK is intentionally small: workflow authors should start
-with ``workflow``, ``agent(...)``, ``ask(...)``, ``parallel(...)``, and
-``pipeline(...)``. Runtime services, approval adapter DTOs, low-level steps,
-and direct engine control remain available from their submodules for advanced
-integrations, but they are not part of the default top-level teaching surface.
+with ``workflow``, ``agent(...)``, ``ask(...)``, ``bash(...)``,
+``goal(...)``, ``parallel(...)``, and ``pipeline(...)``. Runtime services,
+approval adapter DTOs, low-level steps, and direct engine control remain
+available from their submodules for advanced integrations, but they are not
+part of the default top-level teaching surface.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .authoring import ContextBundle, agent, ask, goal, parallel, pipeline
+from .bash import bash
 from .decorators import workflow
 from .workflow_values import Workflow
 
@@ -24,6 +26,7 @@ __all__ = [
     "Workflow",
     "agent",
     "ask",
+    "bash",
     "goal",
     "parallel",
     "pipeline",

@@ -418,9 +418,13 @@ async def approve(
 
 
 async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:
+    from .bash import BashCall
+
     if isinstance(call, AgentCall):
         return await call._run_with_context(ctx, block=block)
     if isinstance(call, AskCall):
+        return await call._run_with_context(ctx, block=block)
+    if isinstance(call, BashCall):
         return await call._run_with_context(ctx, block=block)
     if getattr(call, "__durable_step_call__", False):
         return await ctx.run_step(
@@ -432,7 +436,7 @@ async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:
         )
     if inspect.isawaitable(call):
         if not block:
-            raise TypeError("parallel(...) only supports agent(...) and @step calls for non-blocking fan-out")
+            raise TypeError("parallel(...) only supports agent(...), bash(...), and @step calls for non-blocking fan-out")
         return await call
     return call
 
