@@ -1598,7 +1598,20 @@ class WorkflowEngine:
                 step = ensure(step_id, first_seq=seq)
                 mode = payload.get("completion_mode")
                 step["status"] = "waiting" if mode in {"approval", "operator", "worker", "agent"} else "requested"
-                step["label"] = payload.get("step_name") or payload.get("label") or step.get("label") or step_id
+                label = (
+                    payload.get("public_label")
+                    or payload.get("public_name")
+                    or _agent_request_public_label(payload)
+                    or payload.get("step_name")
+                    or payload.get("label")
+                    or step.get("label")
+                    or step_id
+                )
+                step["label"] = label
+                for field in ("public_name", "public_label", "name_source"):
+                    value = payload.get(field) or _agent_request_public_field(payload, field)
+                    if value is not None:
+                        step[field] = value
                 if mode:
                     step["completion_mode"] = mode
                 if payload.get("step_type"):
@@ -1634,12 +1647,15 @@ class WorkflowEngine:
                 step.update(
                     {
                         "status": "completed" if step.get("status") == "completed" else "waiting",
-                        "label": payload.get("prompt") or step.get("label") or step_id,
+                        "label": payload.get("public_label") or payload.get("public_name") or payload.get("key") or event.get("key") or step.get("label") or step_id,
                         "completion_mode": "agent",
                         "step_type": "agent",
                         "requested_seq": seq,
                     }
                 )
+                for field in ("public_name", "public_label", "name_source"):
+                    if payload.get(field) is not None:
+                        step[field] = payload.get(field)
                 if payload.get("assignee"):
                     step["assignee"] = payload.get("assignee")
                 step["last_seq"] = seq
@@ -1743,6 +1759,9 @@ class WorkflowEngine:
         }
         if payload is not None:
             step_payload["request"] = payload
+            for field in ("public_name", "public_label", "name_source"):
+                if payload.get(field) is not None:
+                    step_payload[field] = payload.get(field)
         self._append_event(
             con,
             workflow_id,
@@ -3190,6 +3209,9 @@ class WorkflowContext:
         instructions: str | None = None,
         authority: Optional[List[str]] = None,
         block: bool = True,
+        public_name: str | None = None,
+        public_label: str | None = None,
+        name_source: str | None = None,
     ) -> Any:
         """Private substrate for agent(...): record durable agent work and wait for completion."""
 
@@ -3209,6 +3231,9 @@ class WorkflowContext:
             "instructions": instructions,
             "authority": authority or [],
             "signal_type": signal_type,
+            "public_name": public_name or assignee or agent_key,
+            "public_label": public_label or public_name or assignee or agent_key,
+            "name_source": name_source or "explicit",
         }
         if self._last_event("AgentRequested", event_key) is None:
             with self.engine._connect() as con:
@@ -3220,7 +3245,7 @@ class WorkflowContext:
                     agent_key,
                     completion_mode="agent",
                     step_type="agent",
-                    label=prompt,
+                    label=public_label or public_name or assignee or prompt,
                     payload=payload,
                 )
                 inserted = self.engine._append_event(
@@ -3636,6 +3661,25 @@ def _command_matches_current_wait(command: Dict[str, Any], waiting_on: str, expe
     if not waiting_on.startswith(multi_prefix):
         return False
     return approval_key in {part for part in waiting_on[len(multi_prefix) :].split(",") if part}
+
+
+def _agent_request_public_field(payload: Dict[str, Any], field: str) -> Any:
+    if payload.get(field) is not None:
+        return payload.get(field)
+    args = payload.get("args")
+    if isinstance(args, list) and args and isinstance(args[0], dict):
+        return args[0].get(field)
+    request = payload.get("request")
+    if isinstance(request, dict):
+        return request.get(field)
+    artifact = payload.get("artifact")
+    if isinstance(artifact, dict):
+        return artifact.get(field)
+    return None
+
+
+def _agent_request_public_label(payload: Dict[str, Any]) -> Any:
+    return _agent_request_public_field(payload, "public_label") or _agent_request_public_field(payload, "public_name")
 
 
 def _expected_wait_for_command(command: Dict[str, Any]) -> str:

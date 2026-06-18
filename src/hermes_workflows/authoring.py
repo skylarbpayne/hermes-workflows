@@ -15,6 +15,10 @@ from .engine import PendingStep
 T = TypeVar("T")
 _MISSING = object()
 _CURRENT_CONTEXT: contextvars.ContextVar[Any] = contextvars.ContextVar("hermes_workflow_context")
+_NAME_HINT_STACK: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "hermes_workflow_public_name_hints",
+    default=(),
+)
 
 
 @dataclass(frozen=True)
@@ -52,10 +56,15 @@ class AgentCall(Generic[T]):
     timeout: int | None = None
     budget: float | None = None
     mock_output: Any = None
+    public_name: str | None = None
+    public_label: str | None = None
+    name_source: str = "explicit"
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt, str) or not self.prompt.strip():
             raise TypeError("agent(...) requires a non-empty prompt")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise TypeError("agent(...) could not infer a non-empty public name; pass agent('name', prompt=...)")
 
     def __await__(self):
         return self._run(block=True).__await__()
@@ -76,6 +85,9 @@ class AgentCall(Generic[T]):
                 assignee=self.name,
                 instructions="Complete this agent(...) request, then signal agent.completed with the JSON output payload.",
                 block=block,
+                public_name=self.effective_public_name,
+                public_label=self.effective_public_label,
+                name_source=self.name_source,
             )
         else:
             result = await ctx.run_step(
@@ -122,7 +134,18 @@ class AgentCall(Generic[T]):
             timeout=self.timeout,
             budget=self.budget,
             mock_output=self.mock_output,
+            public_name=self.public_name,
+            public_label=self.public_label,
+            name_source=self.name_source,
         )
+
+    @property
+    def effective_public_name(self) -> str:
+        return self.public_name or self.name
+
+    @property
+    def effective_public_label(self) -> str:
+        return self.public_label or _public_label(self.effective_public_name)
 
     def _payload(self, key: str) -> dict[str, Any]:
         safe_input = _jsonable(self.input)
@@ -131,6 +154,9 @@ class AgentCall(Generic[T]):
         request = {
             "kind": "agent.request.v1",
             "name": self.name,
+            "public_name": self.effective_public_name,
+            "public_label": self.effective_public_label,
+            "name_source": self.name_source,
             "prompt": self.prompt,
             "prompt_sha256": _sha256_text(self.prompt),
             "rendered_prompt": rendered_prompt,
@@ -165,7 +191,14 @@ class AgentCall(Generic[T]):
                 "isolation": request["isolation"],
             }
         )
-        return {"step_name": "agent", "args": [request], "kwargs": {}}
+        return {
+            "step_name": "agent",
+            "args": [request],
+            "kwargs": {},
+            "public_name": self.effective_public_name,
+            "public_label": self.effective_public_label,
+            "name_source": self.name_source,
+        }
 
 
 @dataclass(frozen=True)
@@ -235,7 +268,7 @@ def current_context() -> Any:
 
 
 def agent(
-    name: str,
+    name: str | None = None,
     *,
     prompt: str,
     input: Any = None,
@@ -253,8 +286,15 @@ def agent(
     budget: float | None = None,
     mock_output: Any = None,
 ) -> AgentCall[Any]:
+    if name is None:
+        frame = inspect.currentframe()
+        caller = frame.f_back if frame is not None else None
+        public_name, name_source = _infer_public_name(caller)
+    else:
+        public_name = str(name).strip()
+        name_source = "explicit"
     return AgentCall(
-        name,
+        public_name,
         prompt=prompt,
         input=input,
         context=context,
@@ -270,6 +310,9 @@ def agent(
         timeout=timeout,
         budget=budget,
         mock_output=mock_output,
+        public_name=public_name,
+        public_label=_public_label(public_name),
+        name_source=name_source,
     )
 
 
@@ -322,6 +365,36 @@ async def pipeline(items: Iterable[Any], *stages: Any, limit: int | None = None)
     return current
 
 
+async def goal(
+    do_fn: Callable[..., Any],
+    check_fn: Callable[..., Any],
+    *,
+    max_iters: int = 20,
+    initial: Any = _MISSING,
+) -> Any:
+    """Run ``do_fn`` until ``check_fn`` accepts the result.
+
+    Both callables may return plain values, awaitables, ``agent(...)``/``ask(...)``
+    call objects, or durable step calls. Public step names inferred inside those
+    callables prefer the callable names so authors can write inference-first
+    loops without exposing runtime context plumbing.
+    """
+
+    if max_iters < 1:
+        raise ValueError("goal(..., max_iters=...) must be at least 1")
+    value = None if initial is _MISSING else initial
+    have_value = initial is not _MISSING
+    for _index in range(max_iters):
+        candidate = _call_with_optional_value(do_fn, value, have_value=have_value)
+        value = await _resolve_goal_value(candidate, hint=_callable_public_name(do_fn, fallback="do"))
+        have_value = True
+        verdict = _call_with_optional_value(check_fn, value, have_value=True)
+        accepted = await _resolve_goal_value(verdict, hint=_callable_public_name(check_fn, fallback="check"))
+        if bool(accepted):
+            return value
+    return value
+
+
 async def approve(
     prompt: str,
     *,
@@ -368,8 +441,152 @@ def _stage_call(stage: Any, item: Any, *, stage_index: int, item_index: int) -> 
     if isinstance(stage, AgentCall):
         return stage.with_input(item, key_by=_default_item_key(item) or f"{stage_index}-{item_index}")
     if callable(stage):
-        return stage(item)
+        with _public_name_hint(_callable_public_name(stage, fallback=f"stage_{stage_index}")):
+            return stage(item)
     raise TypeError(f"unsupported pipeline stage: {type(stage).__name__}")
+
+
+async def _resolve_goal_value(value: Any, *, hint: str) -> Any:
+    with _public_name_hint(hint):
+        if isinstance(value, (AgentCall, AskCall)):
+            return await value
+        if getattr(value, "__durable_step_call__", False):
+            return await value
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+
+def _call_with_optional_value(fn: Callable[..., Any], value: Any, *, have_value: bool) -> Any:
+    with _public_name_hint(_callable_public_name(fn, fallback="step")):
+        if not have_value:
+            return fn()
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn(value)
+        positional = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_varargs = any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in signature.parameters.values())
+        if accepts_varargs or positional:
+            return fn(value)
+        return fn()
+
+
+class _public_name_hint:
+    def __init__(self, hint: str | None):
+        self.hint = hint
+        self.token: contextvars.Token[tuple[str, ...]] | None = None
+
+    def __enter__(self) -> None:
+        if not self.hint:
+            return
+        stack = _NAME_HINT_STACK.get()
+        self.token = _NAME_HINT_STACK.set((*stack, self.hint))
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self.token is not None:
+            _NAME_HINT_STACK.reset(self.token)
+
+
+def _infer_public_name(frame: Any) -> tuple[str, str]:
+    assignment_name = _infer_assignment_name(frame)
+    if assignment_name:
+        return assignment_name, "assignment"
+    hints = _NAME_HINT_STACK.get()
+    if hints:
+        return hints[-1], "callable"
+    callable_name = _frame_callable_name(frame)
+    if callable_name:
+        return callable_name, "callable"
+    return "agent", "fallback"
+
+
+def _infer_assignment_name(frame: Any) -> str | None:
+    if frame is None:
+        return None
+    try:
+        info = inspect.getframeinfo(frame, context=0)
+        lines, start_line = inspect.getsourcelines(frame.f_code)
+    except (OSError, TypeError):
+        return None
+    try:
+        tree = ast.parse("".join(lines))
+    except SyntaxError:
+        return None
+    relative_line = info.lineno - start_line + 1
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    candidates: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node, "lineno", relative_line) > relative_line:
+            continue
+        end_lineno = getattr(node, "end_lineno", getattr(node, "lineno", relative_line))
+        if end_lineno < relative_line:
+            continue
+        func = node.func
+        is_agent = isinstance(func, ast.Name) and func.id == "agent"
+        is_attr_agent = isinstance(func, ast.Attribute) and func.attr == "agent"
+        if is_agent or is_attr_agent:
+            candidates.append(node)
+    if not candidates:
+        return None
+    call = max(candidates, key=lambda item: (getattr(item, "lineno", 0), getattr(item, "col_offset", 0)))
+    node: ast.AST = call
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.Assign):
+            return _target_public_name(node.targets[0])
+        if isinstance(node, ast.AnnAssign):
+            return _target_public_name(node.target)
+        if isinstance(node, ast.NamedExpr):
+            return _target_public_name(node.target)
+        if isinstance(node, ast.Return):
+            break
+    return None
+
+
+def _target_public_name(target: ast.AST) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    if isinstance(target, (ast.Tuple, ast.List)) and target.elts:
+        return _target_public_name(target.elts[0])
+    return None
+
+
+def _frame_callable_name(frame: Any) -> str | None:
+    if frame is None:
+        return None
+    name = frame.f_code.co_name
+    if name and not name.startswith("<"):
+        return name
+    return None
+
+
+def _callable_public_name(fn: Callable[..., Any], *, fallback: str) -> str:
+    name = getattr(fn, "__name__", "") or ""
+    if name and not name.startswith("<"):
+        return name
+    qualname = getattr(fn, "__qualname__", "") or ""
+    parts = [part for part in qualname.split(".") if part and not part.startswith("<")]
+    if parts:
+        return parts[-1]
+    return fallback
+
+
+def _public_label(name: str) -> str:
+    text = str(name).strip().replace("_", " ").replace("-", " ")
+    return " ".join(part for part in text.split()) or str(name)
 
 
 def _context_manifest(context: Any) -> list[dict[str, Any]]:

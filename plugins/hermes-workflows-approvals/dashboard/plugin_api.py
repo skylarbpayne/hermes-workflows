@@ -648,6 +648,9 @@ def _dag_completion_mode(event_type: str, payload: dict[str, Any]) -> str | None
 
 
 def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, Any]) -> str:
+    public_label = _public_dag_label(payload)
+    if public_label:
+        return public_label
     if event_type == "ApprovalRequested":
         return str(payload.get("prompt") or payload.get("key") or event.get("key") or "Operator step")
     if event_type == "AgentRequested":
@@ -655,6 +658,32 @@ def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, A
     if event_type == "SignalReceived":
         return str(payload.get("key") or event.get("key") or "Step output")
     return str(payload.get("step_name") or event.get("key") or event_type)
+
+
+def _public_dag_label(payload: dict[str, Any]) -> str | None:
+    for field in ("public_label", "public_name"):
+        value = payload.get(field)
+        if value:
+            return str(value)
+    args = payload.get("args")
+    if isinstance(args, list) and args and isinstance(args[0], dict):
+        for field in ("public_label", "public_name"):
+            value = args[0].get(field)
+            if value:
+                return str(value)
+    request = payload.get("request")
+    if isinstance(request, dict):
+        for field in ("public_label", "public_name"):
+            value = request.get(field)
+            if value:
+                return str(value)
+    artifact = payload.get("artifact")
+    if isinstance(artifact, dict):
+        for field in ("public_label", "public_name"):
+            value = artifact.get(field)
+            if value:
+                return str(value)
+    return None
 
 
 def _artifact_node_id(artifact: dict[str, Any]) -> str | None:

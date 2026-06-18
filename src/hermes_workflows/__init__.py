@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .authoring import ContextBundle, agent, ask, parallel, pipeline
+from .authoring import ContextBundle, agent, ask, goal, parallel, pipeline
 from .decorators import workflow
 from .workflow_values import Workflow
 
@@ -24,6 +24,7 @@ __all__ = [
     "Workflow",
     "agent",
     "ask",
+    "goal",
     "parallel",
     "pipeline",
     "workflow",

@@ -100,6 +100,9 @@ def _build_runner_request(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
         "isolation",
         "timeout",
         "budget",
+        "public_name",
+        "public_label",
+        "name_source",
     ):
         if key in request:
             runner_request[key] = request[key]
