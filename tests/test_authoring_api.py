@@ -5,7 +5,7 @@ from typing import Literal
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, parallel, pipeline, workflow
+from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, workflow
 
 
 @dataclass
@@ -486,3 +486,97 @@ def test_pipeline_ask_stage_fans_out_human_prompts(tmp_path):
 
     assert result.status == "completed"
     assert result.result == ["ship a", "ship b"]
+
+
+@workflow
+async def inferred_agent_names_workflow(inputs):
+    research = await agent(prompt="Research inferred names", input=inputs, returns=ResearchPacket)
+    repeat = await agent(prompt="Repeat inferred name once", input=inputs, returns=ResearchPacket)
+    repeat = await agent(prompt="Repeat inferred name twice", input=inputs, returns=ResearchPacket)
+    explicit = await agent("explicit_writer", prompt="Explicit name still wins", key="writer-key", returns=DraftPacket)
+    return {
+        "research": research.summary,
+        "repeat": repeat.summary,
+        "explicit": explicit.text,
+    }
+
+
+def draft_answer(previous=None):
+    return agent(prompt="Draft until accepted", input={"previous": getattr(previous, "text", None)}, returns=DraftPacket)
+
+
+def score_draft(draft):
+    return agent(prompt="Score draft", input={"draft": draft.text}, returns=bool)
+
+
+@workflow
+async def goal_inferred_names_workflow(inputs):
+    draft = await goal(draft_answer, score_draft, max_iters=2)
+    return draft.text
+
+
+def test_agent_infers_public_names_and_repeated_keys_are_deterministic(tmp_path):
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        if request["returns"].endswith(":ResearchPacket"):
+            return {"output": {"summary": request["public_name"], "sources": [request["step_key"]]}}
+        return {"output": {"text": request["public_name"]}}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+    result = engine.run_until_idle(inferred_agent_names_workflow, {"topic": "names"}, workflow_id="wf_inferred_names")
+
+    assert result.status == "completed"
+    assert result.result == {"research": "research", "repeat": "repeat", "explicit": "explicit_writer"}
+    assert [call["name"] for call in calls] == ["research", "repeat", "repeat", "explicit_writer"]
+    assert [call["public_name"] for call in calls] == ["research", "repeat", "repeat", "explicit_writer"]
+    assert [call["name_source"] for call in calls] == ["assignment", "assignment", "assignment", "explicit"]
+    assert [call["step_key"] for call in calls] == [
+        "agent:research:0",
+        "agent:repeat:0",
+        "agent:repeat:1",
+        "writer-key",
+    ]
+
+    status = engine.workflow_status("wf_inferred_names")
+    agent_steps = [step for step in status["steps"] if step.get("step_type") != "operator"]
+    assert [step["label"] for step in agent_steps] == ["research", "repeat", "repeat", "explicit writer"]
+    assert [step["public_name"] for step in agent_steps] == ["research", "repeat", "repeat", "explicit_writer"]
+
+    replay_calls = []
+    replay = WorkflowEngine(db, agent_runner=lambda request: replay_calls.append(request) or {"output": "wrong"})
+    replayed = replay.run_until_idle(inferred_agent_names_workflow, {"topic": "names"}, workflow_id="wf_inferred_names")
+    assert replayed.status == "completed"
+    assert replayed.result == result.result
+    assert replay_calls == []
+
+
+def test_goal_infers_callable_names_for_agent_steps(tmp_path):
+    score_attempts = 0
+    calls = []
+
+    def runner(request):
+        nonlocal score_attempts
+        calls.append(request)
+        if request["public_name"] == "score_draft":
+            score_attempts += 1
+            return {"output": score_attempts >= 2}
+        return {"output": {"text": f"draft-{score_attempts + 1}"}}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+    result = engine.run_until_idle(goal_inferred_names_workflow, {}, workflow_id="wf_goal_names")
+
+    assert result.status == "completed"
+    assert result.result == "draft-2"
+    assert [call["public_name"] for call in calls] == ["draft_answer", "score_draft", "draft_answer", "score_draft"]
+    assert [call["step_key"] for call in calls] == [
+        "agent:draft_answer:0",
+        "agent:score_draft:0",
+        "agent:draft_answer:1",
+        "agent:score_draft:1",
+    ]
+    status = engine.workflow_status("wf_goal_names")
+    assert [step["label"] for step in status["steps"]] == ["draft answer", "score draft", "draft answer", "score draft"]

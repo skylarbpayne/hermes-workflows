@@ -9,6 +9,7 @@ def test_top_level_public_facade_teaches_authoring_primitives_only() -> None:
         "Workflow",
         "agent",
         "ask",
+        "goal",
         "parallel",
         "pipeline",
         "workflow",
