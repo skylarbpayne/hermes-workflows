@@ -2016,7 +2016,7 @@ class WorkflowEngine:
                     return self._result_from_row(row)
             return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=waiting.waiting_on)
         except Exception as exc:  # v0/v1: fail closed and keep the error inspectable.
-            error = {"type": type(exc).__name__, "message": str(exc)}
+            error = _error_from_exception(exc)
             with self._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
                 row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
@@ -2460,7 +2460,7 @@ class WorkflowEngine:
                 provenance = None
             JsonCodec.dumps(output)
         except Exception as exc:
-            error = {"type": type(exc).__name__, "message": str(exc)}
+            error = _error_from_exception(exc)
             return self._fail_running_command(workflow_id, command, key=agent_key, error=error)
 
         source: Dict[str, Any] = {"kind": "agent", "id": str(command["claimed_by"] or "workflow-worker")}
@@ -2506,7 +2506,7 @@ class WorkflowEngine:
             with self._command_lease_heartbeat(workflow_id, command):
                 output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
         except Exception as exc:
-            error = {"type": type(exc).__name__, "message": str(exc)}
+            error = _error_from_exception(exc)
             with self._connect() as con:
                 changed = con.execute(
                     """
@@ -2550,7 +2550,7 @@ class WorkflowEngine:
         try:
             JsonCodec.dumps(completion_payload)
         except Exception as exc:
-            error = {"type": type(exc).__name__, "message": str(exc)}
+            error = _error_from_exception(exc)
             with self._connect() as con:
                 changed = con.execute(
                     """
@@ -3890,6 +3890,14 @@ def _hash_text(value: str) -> str:
     import hashlib
 
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _error_from_exception(exc: Exception) -> Dict[str, Any]:
+    error: Dict[str, Any] = {"type": type(exc).__name__, "message": str(exc)}
+    details = getattr(exc, "details", None)
+    if details is not None:
+        error["details"] = details
+    return error
 
 
 def _format_error(error: Any) -> Optional[str]:

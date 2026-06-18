@@ -9,6 +9,7 @@ def test_top_level_public_facade_teaches_authoring_primitives_only() -> None:
         "Workflow",
         "agent",
         "ask",
+        "bash",
         "goal",
         "parallel",
         "pipeline",
@@ -35,14 +36,16 @@ def test_top_level_dir_hides_advanced_compatibility_shims() -> None:
 
 
 def test_advanced_top_level_imports_remain_compatibility_shims() -> None:
-    from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step
+    from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, bash, step
     from hermes_workflows.approvals import ApprovalDecisionInput as SubmoduleApprovalDecisionInput
+    from hermes_workflows.bash import bash as submodule_bash
     from hermes_workflows.decorators import step as submodule_step
     from hermes_workflows.engine import WorkflowEngine as SubmoduleWorkflowEngine
 
     assert WorkflowEngine is SubmoduleWorkflowEngine
     assert ApprovalDecisionInput is SubmoduleApprovalDecisionInput
     assert step is submodule_step
+    assert bash is submodule_bash
 
 
 def test_all_advanced_compatibility_shims_resolve() -> None:
