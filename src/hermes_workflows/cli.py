@@ -46,28 +46,70 @@ def positive_int(value: str) -> int:
 def add_agent_runner_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent-command", help="Provider command for agent(...) jobs; also reads HERMES_WORKFLOWS_AGENT_COMMAND")
     parser.add_argument("--agent-arg", action="append", default=[], help="Argument passed to --agent-command; repeat for multiple args")
+    parser.add_argument(
+        "--agent-model-arg",
+        action="append",
+        default=[],
+        help=(
+            "Argument template appended to --agent-command only when agent(..., model=...) is set; "
+            "repeat for multiple args, using {model} as the placeholder. Also reads "
+            "HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON."
+        ),
+    )
     parser.add_argument("--agent-timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--agent-request-stdin",
+        choices=["prompt", "json"],
+        default=None,
+        help="What the worker's configured agent command receives on stdin: rendered prompt (default) or raw agent.runner_request.v1 JSON.",
+    )
     parser.add_argument("--max-agent-stdout-bytes", type=positive_int, default=1_000_000)
     parser.add_argument("--max-agent-stderr-bytes", type=positive_int, default=4096)
+
+
+def _load_string_list_env(name: str) -> list[str]:
+    loaded = json.loads(os.environ[name])
+    if not isinstance(loaded, list) or not all(isinstance(item, str) for item in loaded):
+        raise SystemExit(f"{name} must be a JSON array of strings")
+    return loaded
 
 
 def agent_runner_from_args(args: argparse.Namespace):
     command = getattr(args, "agent_command", None) or os.environ.get("HERMES_WORKFLOWS_AGENT_COMMAND")
     agent_args = list(getattr(args, "agent_arg", []) or [])
     if not agent_args and os.environ.get("HERMES_WORKFLOWS_AGENT_ARGS_JSON"):
-        loaded = json.loads(os.environ["HERMES_WORKFLOWS_AGENT_ARGS_JSON"])
-        if not isinstance(loaded, list) or not all(isinstance(item, str) for item in loaded):
-            raise SystemExit("HERMES_WORKFLOWS_AGENT_ARGS_JSON must be a JSON array of strings")
-        agent_args = loaded
+        agent_args = _load_string_list_env("HERMES_WORKFLOWS_AGENT_ARGS_JSON")
+    agent_model_args = list(getattr(args, "agent_model_arg", []) or [])
+    if not agent_model_args and os.environ.get("HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON"):
+        agent_model_args = _load_string_list_env("HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON")
+    agent_request_stdin = getattr(args, "agent_request_stdin", None) or os.environ.get("HERMES_WORKFLOWS_AGENT_REQUEST_STDIN") or "prompt"
     if not command:
         return None
     return build_agent_runner(
         agent_command=command,
         agent_args=agent_args,
+        agent_model_args=agent_model_args,
+        agent_request_stdin=agent_request_stdin,
         timeout_seconds=float(getattr(args, "agent_timeout_seconds", 120.0)),
         max_stdout_bytes=int(getattr(args, "max_agent_stdout_bytes", 1_000_000)),
         max_stderr_bytes=int(getattr(args, "max_agent_stderr_bytes", 4096)),
     )
+
+
+def normalize_agent_value_options(argv: list[str]) -> list[str]:
+    """Allow provider argv values like `--model` after repeatable agent options."""
+
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        item = str(argv[index])
+        if item in {"--agent-arg", "--agent-model-arg"} and index + 1 < len(argv):
+            normalized.append(f"{item}={argv[index + 1]}")
+            index += 2
+            continue
+        normalized.append(item)
+        index += 1
+    return normalized
 
 
 def print_json(payload: Any) -> None:
@@ -284,6 +326,7 @@ def run_worker_registry_cli(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    argv = normalize_agent_value_options(raw_argv)
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     visible_commands = (
         "{registry,invoke,resume-trusted,resume-pending,start,run,worker,signal,"

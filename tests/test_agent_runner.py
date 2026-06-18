@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 from hermes_workflows import Workflow, WorkflowEngine, agent, workflow
+from hermes_workflows.agent_runner import build_agent_runner
 
 
 GENERATED_SOURCE = '''
@@ -28,6 +29,38 @@ async def harmless(ctx, item):
 async def dangerous(ctx, item):
     return {"symbol": "dangerous", "item": item}
 '''
+
+
+def _runner_request(**overrides):
+    request = {
+        "kind": "agent.runner_request.v1",
+        "name": "summarize_item",
+        "prompt": "Summarize alpha as JSON.",
+        "prompt_sha256": "prompt-sha",
+        "rendered_prompt": "Summarize alpha as JSON.",
+        "rendered_prompt_sha256": "rendered-sha",
+        "input": {"item": "alpha"},
+        "input_sha256": "input-sha",
+        "returns": "json",
+        "workflow_id": "wf_summary",
+        "step_key": "agent:summarize_item:0",
+    }
+    request.update(overrides)
+    return request
+
+
+def _argv_provider(tmp_path):
+    provider = tmp_path / "argv_provider.py"
+    provider.write_text(
+        """
+import json
+import sys
+
+sys.stdin.read()
+json.dump({"output": {"argv": sys.argv[1:]}, "provenance": {"runner": "argv-provider"}}, sys.stdout)
+"""
+    )
+    return provider
 
 
 @workflow
@@ -86,6 +119,41 @@ async def live_multi_symbol_same_group_pipeline(ctx, inputs):
     )
     second = await ctx.start_child(dangerous_workflow, inputs["item"], key="same", group="shared")
     return {"first": first, "second": second}
+
+
+def test_subprocess_worker_runner_does_not_append_model_args_when_request_model_is_none(tmp_path):
+    provider = _argv_provider(tmp_path)
+    runner = build_agent_runner(
+        agent_command=sys.executable,
+        agent_args=[str(provider), "--base"],
+        agent_model_args=["--provider-model", "{model}"],
+        timeout_seconds=5,
+    )
+
+    assert runner is not None
+    response = runner(_runner_request(model=None))
+
+    assert response["output"]["argv"] == ["--base"]
+
+
+def test_subprocess_worker_runner_appends_expanded_model_arg_templates(tmp_path):
+    provider = _argv_provider(tmp_path)
+    runner = build_agent_runner(
+        agent_command=sys.executable,
+        agent_args=[str(provider), "--base"],
+        agent_model_args=["--provider-model", "{model}", "literal-{model}"],
+        timeout_seconds=5,
+    )
+
+    assert runner is not None
+    response = runner(_runner_request(model="hermes-test-model"))
+
+    assert response["output"]["argv"] == [
+        "--base",
+        "--provider-model",
+        "hermes-test-model",
+        "literal-hermes-test-model",
+    ]
 
 
 def test_agent_dispatches_to_live_runner_and_replays_stored_result(tmp_path):

@@ -79,11 +79,49 @@ For recurring agent-owned workflows, run one resident worker from the same regis
 hermes-workflows worker \
   --config .hermes/workflows.registry.json \
   --worker-id workflows-local-worker \
-  --agent-command <provider-command> \
-  --agent-arg <arg-if-needed>
+  --agent-command python \
+  --agent-request-stdin json \
+  --agent-arg -m \
+  --agent-arg hermes_workflows.agent_cli_adapter \
+  --agent-arg --agent-command \
+  --agent-arg hermes \
+  --agent-arg --agent-model-arg \
+  --agent-arg --model \
+  --agent-arg --agent-model-arg \
+  --agent-arg '{model}' \
+  --agent-arg --agent-prompt-arg \
+  --agent-arg --oneshot
 ```
 
 The worker leases runnable or lease-expired `run_workflow`, `run_step`, `external_agent`, and child-workflow commands from configured DBs. It loads each instance's stored `workflow_ref` through the registry, executes the command, records durable output, and replays the workflow until it reaches a Review Queue request, another durable wait, or a terminal state.
+
+`agent(...)` already runs through the existing agent-step machinery: the workflow emits an `external_agent` command, the worker calls `WorkflowEngine.agent_runner`, and the standard `SubprocessAgentRunner` runs the configured adapter command. For Hermes CLI, keep using that path: `agent_cli_adapter` receives the durable runner request on stdin, expands `agent(..., model="...")` with `--agent-model-arg`, and passes the rendered prompt to Hermes as `--oneshot <prompt>` with `--agent-prompt-arg`.
+
+```text
+agent(..., model="openrouter/example")
+  -> durable external_agent command stores the agent request, including model
+  -> Workflow Worker leases the existing external_agent command
+  -> existing SubprocessAgentRunner invokes hermes_workflows.agent_cli_adapter
+  -> adapter invokes: hermes --model openrouter/example --oneshot <request prompt>
+  -> adapter returns strict JSON output to the existing agent step path
+```
+
+Provider CLIs do not agree on a standard model flag, so hermes-workflows only appends model argv when the operator configures one or more model argument templates. Each `--agent-model-arg` entry is appended only for requests with a non-empty model, with `{model}` replaced by the requested model. Examples:
+
+```bash
+# Provider uses one --model=<name> argv entry.
+hermes-workflows worker \
+  --config .hermes/workflows.registry.json \
+  --agent-command provider-cli \
+  --agent-model-arg '--model={model}'
+
+# Provider uses a flag/value pair.
+hermes-workflows worker \
+  --config .hermes/workflows.registry.json \
+  --agent-command provider-cli \
+  --agent-model-arg --model \
+  --agent-model-arg '{model}'
+```
 
 Use bounded flags only for tests, smoke checks, and recovery:
 
@@ -103,8 +141,15 @@ For production-ish use, supervise the worker with launchd, systemd, s6, tmux, or
 Environment fallback for agent runners:
 
 ```bash
+# Existing adapter path for Hermes CLI: model goes to --model; prompt goes to --oneshot.
+export HERMES_WORKFLOWS_AGENT_COMMAND=python
+export HERMES_WORKFLOWS_AGENT_REQUEST_STDIN=json
+export HERMES_WORKFLOWS_AGENT_ARGS_JSON='["-m","hermes_workflows.agent_cli_adapter","--agent-command","hermes","--agent-model-arg","--model","--agent-model-arg","{model}","--agent-prompt-arg","--oneshot"]'
+
+# Generic provider runner: configure provider argv and optional model templates.
 export HERMES_WORKFLOWS_AGENT_COMMAND=<provider-command>
 export HERMES_WORKFLOWS_AGENT_ARGS_JSON='["--some-arg"]'
+export HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON='["--model={model}"]'
 ```
 
 ## 5. Author workflows with the public facade

@@ -51,7 +51,14 @@ def _sha256_json(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _adapter_command(*agent_args: str, timeout_seconds: float = 5.0, max_stdout: int = 65_536, max_stderr: int = 4096) -> list[str]:
+def _adapter_command(
+    *agent_args: str,
+    agent_model_args: tuple[str, ...] = (),
+    agent_prompt_arg: str | None = None,
+    timeout_seconds: float = 5.0,
+    max_stdout: int = 65_536,
+    max_stderr: int = 4096,
+) -> list[str]:
     command = [
         sys.executable,
         "-m",
@@ -69,12 +76,22 @@ def _adapter_command(*agent_args: str, timeout_seconds: float = 5.0, max_stdout:
     ]
     for arg in agent_args:
         command.extend(["--agent-arg", arg])
+    for arg in agent_model_args:
+        command.extend(["--agent-model-arg", arg])
+    if agent_prompt_arg is not None:
+        command.extend(["--agent-prompt-arg", agent_prompt_arg])
     return command
 
 
-def _runner(*agent_args: str, env: dict[str, str] | None = None, timeout_seconds: float = 10.0, max_stdout: int = 65_536) -> SubprocessAgentRunner:
+def _runner(
+    *agent_args: str,
+    env: dict[str, str] | None = None,
+    agent_model_args: tuple[str, ...] = (),
+    timeout_seconds: float = 10.0,
+    max_stdout: int = 65_536,
+) -> SubprocessAgentRunner:
     return SubprocessAgentRunner(
-        _adapter_command(*agent_args, max_stdout=max_stdout),
+        _adapter_command(*agent_args, agent_model_args=agent_model_args, max_stdout=max_stdout),
         timeout_seconds=timeout_seconds,
         env=_subprocess_env(env),
         max_stdout_bytes=65_536,
@@ -107,6 +124,7 @@ def test_agent_cli_adapter_turns_agentstep_request_into_provider_prompt_and_reco
     assert provenance["adapter_version"] == 1
     assert provenance["request_kind"] == "agent.runner_request.v1"
     assert provenance["request_name"] == "summarize_item"
+    assert provenance["request_model"] is None
     assert provenance["request_sha256"] == _sha256_json(request)
     assert provenance["rendered_prompt_sha256"] == "rendered-sha"
     assert provenance["agent_command"]["argv0"] == Path(sys.executable).name
@@ -122,6 +140,75 @@ def test_agent_cli_adapter_turns_agentstep_request_into_provider_prompt_and_reco
     assert secret not in serialized
     assert request["prompt"] not in serialized
     assert request["rendered_prompt"] not in serialized
+
+
+def test_agent_cli_adapter_does_not_append_model_args_when_request_model_is_none():
+    response = _runner(agent_model_args=("--provenance-note={model}",))(_request(model=None))
+
+    argv = response["provenance"]["agent_command"]["argv"]
+    assert "--provenance-note={model}" not in argv
+    assert "notes" not in response["provenance"]["provider_provenance"]
+
+
+def test_agent_cli_adapter_appends_model_arg_templates_and_records_provenance():
+    response = _runner(agent_model_args=("--provenance-note={model}",))(_request(model="hermes-test-model"))
+
+    provenance = response["provenance"]
+    assert provenance["request_model"] == "hermes-test-model"
+    assert "--provenance-note=hermes-test-model" in provenance["agent_command"]["argv"]
+    assert provenance["provider_provenance"]["notes"] == "hermes-test-model"
+
+
+def test_agent_cli_adapter_can_pass_prompt_as_arg_for_hermes_oneshot_style_clis(tmp_path):
+    provider = tmp_path / "oneshot_provider.py"
+    provider.write_text(
+        """
+import json
+import sys
+
+stdin_text = sys.stdin.read()
+argv = sys.argv[1:]
+prompt = argv[argv.index("--oneshot") + 1]
+json.dump(
+    {
+        "output": {
+            "argv_prefix": argv[:3],
+            "prompt_in_argv": "agent.runner_request.v1" in prompt,
+            "stdin_empty": stdin_text == "",
+        },
+        "provenance": {"model": argv[argv.index("--model") + 1]},
+    },
+    sys.stdout,
+)
+"""
+    )
+    command = [
+        sys.executable,
+        "-m",
+        ADAPTER_MODULE,
+        "--agent-command",
+        sys.executable,
+        "--agent-arg",
+        str(provider),
+        "--agent-model-arg",
+        "--model",
+        "--agent-model-arg",
+        "{model}",
+        "--agent-prompt-arg",
+        "--oneshot",
+    ]
+    runner = SubprocessAgentRunner(command, timeout_seconds=10, env=_subprocess_env(), max_stdout_bytes=65_536)
+
+    response = runner(_request(model="hermes-test-model"))
+
+    assert response["output"] == {
+        "argv_prefix": ["--model", "hermes-test-model", "--oneshot"],
+        "prompt_in_argv": True,
+        "stdin_empty": True,
+    }
+    assert response["provenance"]["request_model"] == "hermes-test-model"
+    assert response["provenance"]["provider_provenance"]["model"] == "hermes-test-model"
+    assert "agent.runner_request.v1" not in json.dumps(response["provenance"]["agent_command"])
 
 
 def test_agent_cli_adapter_rejects_invalid_runner_request_json():
