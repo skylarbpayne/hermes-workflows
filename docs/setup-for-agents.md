@@ -12,15 +12,19 @@ title: Set up hermes-workflows for an agent
 Use a trusted Hermes workspace or another local operator workspace to own the checkout, venv, registry, workflow DB, dashboard config, and worker supervisor.
 
 ```bash
-git clone https://github.com/<owner>/hermes-workflows.git
+git clone https://github.com/skylarbpayne/hermes-workflows.git
 cd hermes-workflows
+python -m venv .venv
+. .venv/bin/activate
 python -m pip install .
 
 hermes-workflows --help
 hermes-workflows doctor \
   --db .hermes/workflows.sqlite \
-  --workflow-ref hermes_workflows.examples.trip:trip_planning_workflow
+  --workflow-ref hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow
 ```
+
+Until a package-index release is published, install from a trusted source checkout. Do not use `pip install hermes-workflows`, `uvx`, or `pipx` launch instructions yet.
 
 For contributor work, install dev extras and run tests:
 
@@ -41,8 +45,8 @@ Put workflow aliases and DB aliases in `.hermes/workflows.registry.json`:
     "default": "workflows.sqlite"
   },
   "workflows": {
-    "trip": {
-      "workflow_ref": "hermes_workflows.examples.trip:trip_planning_workflow",
+    "reviewable-draft": {
+      "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow",
       "db": "default",
       "default_input": {"approver": "human:operator"}
     }
@@ -63,10 +67,10 @@ hermes-workflows registry doctor --config .hermes/workflows.registry.json
 Start or replay a workflow instance through the registry:
 
 ```bash
-hermes-workflows run trip \
+hermes-workflows run reviewable-draft \
   --config .hermes/workflows.registry.json \
-  --id wf_trip_demo \
-  --input-json '{"destination":"NYC"}'
+  --id wf_reviewable_draft_demo \
+  --input-json '{"topic":"Hermes Workflows launch"}'
 ```
 
 `run` records the workflow activation and queues missing work. It is not the always-on continuation loop. A run can return `running` before the Review Queue request exists because a worker still needs to execute queued steps and replay the workflow to the next wait.
@@ -160,7 +164,7 @@ Launch-facing workflow authors should import the small facade:
 from dataclasses import dataclass
 from typing import Literal
 
-from hermes_workflows import agent, ask, parallel, pipeline, workflow
+from hermes_workflows import agent, ask, bash, goal, parallel, pipeline, workflow
 
 
 @dataclass
@@ -190,23 +194,27 @@ if __name__ == "__main__":
     raise SystemExit(reviewable_draft_workflow.run())
 ```
 
-Use `parallel([...])` for fan-out/fan-in and `pipeline(items, stage_a, stage_b, ...)` for staged item work. Avoid teaching new users `WorkflowEngine`, low-level `ctx.approval.request`, `step`, or manual command draining unless you are writing an adapter, migration, or advanced test.
+Use `parallel([...])` for fan-out/fan-in, `pipeline(items, stage_a, stage_b, ...)` for staged item work, `bash(...)` for deterministic shell checks, and `goal(do_fn, check_fn, max_iters=...)` for bounded improve-until-accepted loops. Avoid teaching new users `WorkflowEngine`, low-level `ctx.approval.request`, `step`, or manual command draining unless you are writing an adapter, migration, or advanced test. See [Author workflows](authoring.html) for the complete launch-facing SDK guide.
 
 ## 6. Record human decisions
 
-For CLI approval gates in existing workflows:
+For typed `ask(...)` review requests, respond through the Review Queue adapter or the lower-level runtime API used by that adapter. The response payload must match the request schema and include human provenance.
 
-```bash
-hermes-workflows approve hermes_workflows.examples.trip:trip_planning_workflow \
-  --db .hermes/workflows.sqlite \
-  --id wf_trip_demo \
-  --key approve_trip_plan \
-  --by operator \
-  --channel cli \
-  --message-id approval-message-1
+Hermes plugin/tool shape:
+
+```json
+{
+  "db": "default",
+  "workflow_id": "wf_reviewable_draft_demo",
+  "key": "review_draft_packet",
+  "payload": {"action": "approve", "feedback": null},
+  "by": "operator",
+  "channel": "dashboard",
+  "resume": false
+}
 ```
 
-For typed `ask(...)` review requests, respond through the Review Queue adapter or the lower-level runtime API used by that adapter. The response payload must match the request schema and include human provenance. Dashboard and gateway callbacks should normally record the response or approval and leave continuation to the resident worker.
+Use `resume=false` for untrusted remote/gateway adapters and let the resident Workflow Worker continue. The bundled trusted local dashboard currently records the response with `resume=true` so a single click can update the run immediately; that dashboard-specific convenience should not be generalized to every remote adapter.
 
 ## 7. Configure the Hermes dashboard/plugin
 
@@ -224,8 +232,8 @@ plugins:
         - name: default
           path: /absolute/path/to/workspace/.hermes/workflows.sqlite
       workflow_catalog:
-        - name: trip
-          workflow_ref: hermes_workflows.examples.trip:trip_planning_workflow
+        - name: reviewable-draft
+          workflow_ref: hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow
           db: default
           project_root: /absolute/path/to/workspace
           python_paths:
@@ -233,13 +241,13 @@ plugins:
       dashboard_approver_id: operator
 ```
 
-The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Approval/review buttons are record-only in the dashboard by default; the Workflow Worker performs continuation.
+The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. The trusted bundled local dashboard records Review Queue responses/approval decisions with `resume=true` for operator convenience. Remote/gateway/plugin tool adapters should default to record-only (`resume=false`) unless a trusted deployment explicitly opts into inline resume; a resident Workflow Worker remains the normal continuation path.
 
 Environment fallback for local smokes:
 
 ```bash
 export HERMES_WORKFLOWS_DBS='{"default":"/absolute/path/to/workspace/.hermes/workflows.sqlite"}'
-export HERMES_WORKFLOWS_CATALOG='[{"name":"trip","workflow_ref":"hermes_workflows.examples.trip:trip_planning_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
+export HERMES_WORKFLOWS_CATALOG='[{"name":"reviewable-draft","workflow_ref":"hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
 export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=operator
 ```
 
@@ -248,9 +256,9 @@ Dashboard routes intentionally use configured aliases instead of arbitrary DB pa
 ## 8. Inspect state
 
 ```bash
-hermes-workflows status --db .hermes/workflows.sqlite --id wf_trip_demo --commands recent
-hermes-workflows events --db .hermes/workflows.sqlite --id wf_trip_demo --limit 20
-hermes-workflows outbox --db .hermes/workflows.sqlite --id wf_trip_demo
+hermes-workflows status --db .hermes/workflows.sqlite --id wf_reviewable_draft_demo --commands recent
+hermes-workflows events --db .hermes/workflows.sqlite --id wf_reviewable_draft_demo --limit 20
+hermes-workflows outbox --db .hermes/workflows.sqlite --id wf_reviewable_draft_demo
 hermes-workflows list --db .hermes/workflows.sqlite
 ```
 

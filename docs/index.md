@@ -10,14 +10,17 @@ Code-first durable workflows for agent work that should not disappear into chat 
 The launch-facing SDK is intentionally small:
 
 ```python
-from hermes_workflows import agent, ask, parallel, pipeline, workflow
+from hermes_workflows import agent, ask, bash, goal, parallel, pipeline, workflow
 ```
 
-Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or external review, and `parallel(...)` / `pipeline(...)` to compose them without exposing runtime bookkeeping in normal workflow code.
+Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or external review, `bash(...)` for deterministic durable shell commands, `parallel(...)` / `pipeline(...)` for fan-out and staged item work, and `goal(...)` for bounded improve-until-accepted loops.
 
 ## Start here
 
 <div class="doc-grid" markdown="1">
+
+- **[Author workflows](authoring.html)**
+  Learn the public SDK: `workflow`, `agent`, `ask`, `bash`, `parallel`, `pipeline`, and `goal`.
 
 - **[Setup guide](setup-for-agents.html)**
   Install from source, create a registry, run a workflow, start the Workflow Worker, and reach the Review Queue.

@@ -182,7 +182,7 @@ The SQLite DB path is local operator state. Failures include unwritable parent d
 
 There are two examples locations by design:
 
-- `src/hermes_workflows/examples/` contains tiny installed/importable examples. These are safe for README quickstarts because `python -m pip install .` makes refs like `hermes_workflows.examples.trip:trip_planning_workflow` importable.
+- `src/hermes_workflows/examples/` contains tiny installed/importable examples. These are safe for README quickstarts because `python -m pip install .` makes refs like `hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow` importable.
 - `examples/` contains source-tree demos, deterministic fake runners, prompt files, generated-output helpers, repo-workflow experiments, and larger scenario material. These examples are useful for contributors and dogfooding, but many assume `PYTHONPATH=src:.` or a source checkout.
 
 Keep user-facing quickstarts on installed examples unless the reader is explicitly working as a contributor from the repository tree.

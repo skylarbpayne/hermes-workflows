@@ -1,5 +1,7 @@
 # Dynamic Python Workflow Returns
 
+> **Design archive / advanced internals.** This record is useful for contributors, but it is not the launch quickstart. It uses lower-level runtime vocabulary and compatibility APIs that new workflow authors should not learn first. Start with [Author workflows with the public SDK](../authoring.html).
+
 Status: implemented first slice
 Date: 2026-05-28
 

@@ -36,8 +36,8 @@ plugins:
         - name: default
           path: /absolute/path/to/workspace/.hermes/workflows.sqlite
       workflow_catalog:
-        - name: trip
-          workflow_ref: hermes_workflows.examples.trip:trip_planning_workflow
+        - name: reviewable-draft
+          workflow_ref: hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow
           db: default
           project_root: /absolute/path/to/workspace
           python_paths:
@@ -51,7 +51,7 @@ Environment fallback for tests/scripts:
 
 ```bash
 export HERMES_WORKFLOWS_DBS='{"default":"/absolute/path/to/workspace/.hermes/workflows.sqlite"}'
-export HERMES_WORKFLOWS_CATALOG='[{"name":"trip","workflow_ref":"hermes_workflows.examples.trip:trip_planning_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
+export HERMES_WORKFLOWS_CATALOG='[{"name":"reviewable-draft","workflow_ref":"hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
 export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=operator
 ```
 
@@ -143,8 +143,8 @@ Input:
 ```json
 {
   "db": "default",
-  "workflow_id": "wf_trip",
-  "key": "approve_trip_plan",
+  "workflow_id": "wf_publish_packet",
+  "key": "approve_publish_packet",
   "action": "approve",
   "by": "operator",
   "channel": "discord",
@@ -191,26 +191,42 @@ Otherwise it returns no-op so normal Hermes processing continues.
 ## Safe smoke
 
 ```bash
-hermes-workflows run hermes_workflows.examples.trip:trip_planning_workflow \
-  --db /tmp/hermes-workflows-approval-smoke.sqlite \
-  --id wf_approval_smoke \
-  --input-json '{"destination":"NYC","approver":"human:operator"}'
+SMOKE_DIR=$(mktemp -d)
+mkdir -p "$SMOKE_DIR/.hermes"
+cat > "$SMOKE_DIR/.hermes/workflows.registry.json" <<'JSON'
+{
+  "dbs": {"default": "workflows.sqlite"},
+  "workflows": {
+    "reviewable-draft": {
+      "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow",
+      "db": "default"
+    }
+  }
+}
+JSON
 
-# Drain queued step/workflow commands until the approval exists.
-hermes-workflows worker hermes_workflows.examples.trip:trip_planning_workflow \
-  --db /tmp/hermes-workflows-approval-smoke.sqlite \
-  --id wf_approval_smoke \
-  --max-commands 5
+hermes-workflows run reviewable-draft \
+  --config "$SMOKE_DIR/.hermes/workflows.registry.json" \
+  --id wf_review_smoke \
+  --input-json '{"topic":"Review Queue smoke","approver":"human:operator"}'
 
+# Drain queued workflow/agent work until the Review Queue request exists.
+hermes-workflows worker \
+  --config "$SMOKE_DIR/.hermes/workflows.registry.json" \
+  --worker-id review-smoke-worker \
+  --max-commands 5 \
+  --idle-exit-after 0.1
+
+export HERMES_WORKFLOWS_DBS="{\"default\":\"$SMOKE_DIR/.hermes/workflows.sqlite\"}"
 python - <<'PY'
-from hermes_workflows.hermes_plugin_approvals import _handle_workflow_approval_decide, _handle_workflow_review_requests_list
+from hermes_workflows.hermes_plugin_approvals import _handle_workflow_review_requests_list, _handle_workflow_review_respond
 
-print(_handle_workflow_review_requests_list({"db":"/tmp/hermes-workflows-approval-smoke.sqlite"}))
-print(_handle_workflow_approval_decide({
-    "db":"/tmp/hermes-workflows-approval-smoke.sqlite",
-    "workflow_id":"wf_approval_smoke",
-    "key":"approve_trip_plan",
-    "action":"approve",
+print(_handle_workflow_review_requests_list({"db":"default"}))
+print(_handle_workflow_review_respond({
+    "db":"default",
+    "workflow_id":"wf_review_smoke",
+    "key":"review_draft_packet",
+    "payload":{"action":"approve", "feedback": None},
     "by":"operator",
     "channel":"local-smoke",
     "message_id":"smoke-1",
@@ -219,7 +235,7 @@ print(_handle_workflow_approval_decide({
 PY
 ```
 
-Expected: the Review Queue lists the waiting approval, the approval decision is recorded, and the workflow remains waiting/runnable until a trusted worker continues it.
+Expected: the Review Queue lists the waiting typed review request, the response is recorded with provenance, and the workflow remains waiting/runnable until a trusted worker continues it.
 
 ## Boundaries
 

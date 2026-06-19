@@ -1,5 +1,7 @@
 # Dashboard runtime semantics, agent(...) naming, and approval artifacts
 
+> **Design archive / superseded detail.** This 2026-06-07 implementation guide preserves historical dashboard/runtime decisions. Current launch docs distinguish trusted bundled local dashboard actions, which may use `resume=true`, from remote/gateway/plugin tools, which default to `resume=false`. Start with [Setup](../setup-for-agents.html) and [Hermes dashboard plugin](../integrations/hermes-plugin.html).
+
 Status: accepted / implementation guide
 Date: 2026-06-07
 Scope: Hermes Workflows dashboard/API clarity without breaking existing workflow history or public imports.

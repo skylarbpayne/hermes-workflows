@@ -80,7 +80,7 @@ hwf-approval:v1:approve:<structured-token>
 hwf-approval:v1:reject:<structured-token>
 ```
 
-The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, workflow execution, or worker lifecycle. `resume=false` is the safe default for plugin/gateway/dashboard calls.
+The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, workflow execution, or worker lifecycle. `resume=false` is the safe default for remote/gateway/plugin tool calls. The bundled trusted local dashboard may opt into `resume=true` only when the deployment is explicitly allowed to run local workflow continuation.
 
 ## Continuation after review
 

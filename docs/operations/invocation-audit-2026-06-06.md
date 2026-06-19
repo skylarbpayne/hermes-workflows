@@ -1,5 +1,7 @@
 # hermes-workflows invocation audit receipt — 2026-06-06
 
+> **Historical audit receipt.** This document preserves the exact commands and results from a 2026-06-06 audit. It predates the launch-facing `reviewable-draft` quickstart and still references older trip/approval examples. Do not use it as setup guidance; start with [Setup](../setup-for-agents.html) and [Author workflows](../authoring.html).
+
 Generated: 2026-06-06 14:02 PDT
 Task: t_83bc39d0
 Repo HEAD at audit start: `1005f8cc9f15d9e52c745d812335fd36b8882431`

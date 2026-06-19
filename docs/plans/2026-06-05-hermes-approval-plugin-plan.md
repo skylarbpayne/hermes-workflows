@@ -1,5 +1,7 @@
 # Hermes Workflows Approval Plugin Implementation Plan
 
+> **Historical implementation plan / design archive.** This plan predates the launch-facing Review Queue docs and may reference older trip/approval smoke commands. Use current setup guidance in [Setup](../setup-for-agents.html) and [Hermes dashboard/plugin](../integrations/hermes-plugin.html) for operator instructions.
+
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** Give the maintainer a reliable way to approve `hermes-workflows` gates from a real operator surface now, while tracking cleanly toward a Hermes plugin and keeping the core runtime open for other agent runtimes.
