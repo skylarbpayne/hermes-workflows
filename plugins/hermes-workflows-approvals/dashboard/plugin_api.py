@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import mimetypes
@@ -12,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
+from hermes_workflows import ApprovalDecisionInput, Workflow, WorkflowEngine
 from hermes_workflows.hermes_plugin_approvals import (
     _configured_dbs,
     _next_step_for_receipt,
@@ -155,6 +156,80 @@ def _operator_approval_artifact(value: Any) -> Any:
     return value
 
 
+def _workflow_source_preview(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Workflow):
+        source = value.source
+        symbol = value.symbol
+        source_sha256 = value.source_sha256
+        provenance = value.provenance
+        module_name = value.module_name
+        approval_required = value.approval_required
+        approval_key = value.approval_key
+    elif isinstance(value, dict) and value.get("__hermes_type__") == "Workflow" and isinstance(value.get("source"), str):
+        source = value["source"]
+        symbol = str(value.get("symbol") or "workflow")
+        source_sha256 = str(value.get("source_sha256") or hashlib.sha256(source.encode("utf-8")).hexdigest())
+        provenance = value.get("provenance")
+        module_name = value.get("module_name")
+        approval_required = bool(value.get("approval_required", False))
+        approval_key = value.get("approval_key")
+    elif isinstance(value, dict) and value.get("kind") == "generated_workflow.approval.v1" and isinstance(value.get("source"), str):
+        source = value["source"]
+        symbol = str(value.get("symbol") or "workflow")
+        source_sha256 = str(value.get("source_sha256") or hashlib.sha256(source.encode("utf-8")).hexdigest())
+        provenance = {
+            "runner_provenance": value.get("runner_provenance"),
+            "agent_request": value.get("agent_request"),
+            "agent_response": value.get("agent_response"),
+        }
+        module_name = None
+        approval_required = True
+        approval_key = value.get("approval_key")
+    else:
+        return None
+    actual_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return {
+        "kind": "generated_workflow_source",
+        "language": "python",
+        "highlight_class": "language-python",
+        "source": source,
+        "symbol": symbol,
+        "source_sha256": source_sha256,
+        "source_hash_verified": actual_sha256 == source_sha256,
+        "workflow_name": str(value.get("workflow_name") or f"generated:{source_sha256}:{symbol}") if isinstance(value, dict) else f"generated:{source_sha256}:{symbol}",
+        "module_name": module_name,
+        "provenance": provenance,
+        "approval_required": approval_required,
+        "approval_key": approval_key,
+    }
+
+
+def _workflow_source_artifact(
+    value: Any,
+    *,
+    artifact_id: str,
+    workflow_id: str,
+    title: str,
+    source: dict[str, Any],
+    metadata: Any = None,
+) -> dict[str, Any] | None:
+    preview = _workflow_source_preview(value)
+    if preview is None:
+        return None
+    artifact: dict[str, Any] = {
+        "id": artifact_id,
+        "workflow_id": workflow_id,
+        "kind": "workflow_source",
+        "title": title,
+        "source": source,
+        "preview": _redact_artifact_local_refs(preview),
+        "artifact_render": _artifact_descriptor(value),
+    }
+    if metadata is not None:
+        artifact["metadata"] = metadata
+    return artifact
+
+
 def _artifact_kind_from_media_type(media_type: str | None) -> str | None:
     if not media_type:
         return None
@@ -187,6 +262,18 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
     }
     if artifact is None:
         return {**descriptor, "kind": "none", "render": "none"}
+    workflow_source = _workflow_source_preview(artifact)
+    if workflow_source is not None:
+        return {
+            **descriptor,
+            "kind": "workflow_source",
+            "render": "python-source",
+            "language": "python",
+            "highlight_class": "language-python",
+            "source_hash": workflow_source["source_sha256"],
+            "symbol": workflow_source["symbol"],
+            "hash_verified": workflow_source["source_hash_verified"],
+        }
     if isinstance(artifact, str):
         if artifact.startswith(("http://", "https://")):
             return {**descriptor, "kind": "link", "render": "external-link", "reference": {"type": "url", "href": artifact}}
@@ -1158,10 +1245,33 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     for event in status.get("events") or status.get("recent_events") or []:
+        if event.get("type") == "ChildWorkflowRequested":
+            payload = event.get("payload") or {}
+            workflow_artifact = _workflow_source_artifact(
+                payload.get("workflow"),
+                artifact_id=f"{workflow_id}:child-workflow-source:{event.get('key')}",
+                workflow_id=workflow_id,
+                title=f"Generated child workflow source: {payload.get('symbol') or event.get('key')}",
+                source={"event": "ChildWorkflowRequested", "key": event.get("key"), "seq": event.get("seq")},
+            )
+            if workflow_artifact is not None:
+                artifacts.append(workflow_artifact)
+            continue
         if event.get("type") != "StepCompleted":
             continue
         payload = event.get("payload") or {}
         if "output" in payload:
+            workflow_artifact = _workflow_source_artifact(
+                payload.get("output"),
+                artifact_id=f"{workflow_id}:workflow-source:{event.get('key')}",
+                workflow_id=workflow_id,
+                title=f"Generated workflow source: {event.get('key')}",
+                source={"event": "StepCompleted", "key": event.get("key"), "seq": event.get("seq")},
+                metadata=payload.get("metadata"),
+            )
+            if workflow_artifact is not None:
+                artifacts.append(workflow_artifact)
+                continue
             artifacts.append(
                 {
                     "id": f"{workflow_id}:step:{event.get('key')}",

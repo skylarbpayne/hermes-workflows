@@ -461,6 +461,28 @@
   line-height: 1.45;
 }
 
+.hwf-workflow-source-preview {
+  margin: 0.75rem 0;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: color-mix(in srgb, var(--hwf-surface), var(--color-primary) 3%);
+  padding: 0.75rem;
+}
+
+.hwf-workflow-source-preview summary,
+.hwf-source-provenance summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.hwf-workflow-source-preview .hwf-code-block {
+  margin-top: 0.75rem;
+}
+
+.hwf-source-provenance {
+  margin-top: 0.75rem;
+}
+
 .hwf-code-keyword {
   color: var(--hwf-code-keyword);
   font-weight: 600;
