@@ -113,7 +113,7 @@ Provider credentials are owned by the provider CLI or the Hermes/operator enviro
 
 ### Approval decisions
 
-Approval adapters record human provenance. A chat gateway or Hermes plugin should usually choose record-only behavior (`resume=false`) so workflow code does not run inside the gateway. The resident `hermes-workflows worker --config ...` process should observe the durable response/decision and continue the workflow from the same registry/DB.
+Approval adapters record human provenance. Review actions default to immediate continuation (`resume=true`) because operators expect the run to move after they respond. A remote or untrusted adapter can pass `resume=false` for record-only behavior, then the resident `hermes-workflows worker --config ...` process observes the durable response/decision and continues the workflow from the same registry/DB.
 
 ## Seams and extension points
 
@@ -172,7 +172,7 @@ Approval decisions can fail when:
 - the workflow is already terminal
 - a record-only adapter stores the approval but no trusted resumer runs afterward
 
-Use idempotency keys tied to the source message/event. For gateway integrations, prefer record-only decisions and a separate trusted resume path when downstream code execution should not happen in the gateway process.
+Use idempotency keys tied to the source message/event. If an adapter cannot safely run local continuation itself, pass `resume=false` and rely on the resident worker.
 
 ### SQLite and workspace failures
 

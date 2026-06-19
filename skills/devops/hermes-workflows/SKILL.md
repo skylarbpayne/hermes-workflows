@@ -154,7 +154,7 @@ These commands should inspect existing DBs, not create new empty DBs or mutate r
 4. Reading only the compact status packet when a workflow looks stuck. Add `--commands recent` or inspect `outbox` before touching SQLite.
 5. Claiming a dashboard button approved something without checking the receipt. The dashboard server is allowed to approve only by calling the same validated `approval.decision` signal path; verify `status`/events show human provenance and the expected approval key.
 
-6. Hermes plugin approvals are adapter decisions, not workflow execution. `workflow_approval_decide` defaults to `resume=false`; queue/run a trusted resumer separately unless you are in an explicit local operator context.
+6. Hermes plugin approval/review actions default to `resume=true` because that matches operator expectations. Pass `resume=false` only for remote/untrusted record-only adapters and rely on the resident worker for continuation.
 
 ## Verification Checklist
 

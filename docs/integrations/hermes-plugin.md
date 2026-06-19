@@ -93,7 +93,7 @@ The dashboard tab at `/workflows` shows:
 
 Dashboard HTTP APIs are intentionally alias-only. They reject arbitrary SQLite paths because dashboard routes run inside the Hermes process and must not become local file readers/writers.
 
-Dashboard buttons are disabled unless `dashboard_approver_id` or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID` is configured server-side. The backend stamps provenance like `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision/response. In the bundled trusted local dashboard, those actions use `resume=true` so the configured workflow source can enqueue or run the next continuation immediately. For remote/gateway adapters, keep `resume=false` unless that adapter is explicitly allowed to execute local workflow code.
+Dashboard buttons are disabled unless `dashboard_approver_id` or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID` is configured server-side. The backend stamps provenance like `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision/response. Review actions default to `resume=true` so the configured workflow source can enqueue or run the next continuation immediately. Remote or untrusted adapters can pass `resume=false` when they need record-only behavior.
 
 ## Public plugin tools
 
@@ -128,11 +128,11 @@ Input:
   "by": "operator",
   "channel": "discord",
   "message_id": "...",
-  "resume": false
+  "resume": true
 }
 ```
 
-`resume` defaults to `false` for gateway/plugin safety. The worker, not the chat callback, should perform continuation.
+`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters.
 
 ### `workflow_approval_decide`
 
@@ -149,11 +149,11 @@ Input:
   "by": "operator",
   "channel": "discord",
   "message_id": "...",
-  "resume": false
+  "resume": true
 }
 ```
 
-`resume` defaults to `false`. Set `resume=true` only from a trusted local/operator context that is allowed to run workflow code immediately.
+`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters.
 
 The product surface is the Review Queue plus `workflow_review_requests_list`, `workflow_review_respond`, and `workflow_approval_decide`.
 

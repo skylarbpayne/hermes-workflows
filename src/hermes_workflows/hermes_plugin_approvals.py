@@ -321,7 +321,7 @@ def _handle_workflow_approval_decide(args: dict[str, Any], **_: Any) -> str:
     try:
         db_path = resolve_db(args.get("db"))
         action = str(args.get("action") or "approve").strip().lower()
-        resume = _coerce_bool(args.get("resume"), default=False)
+        resume = _coerce_bool(args.get("resume"), default=True)
         by = str(args.get("by") or args.get("user") or "human").strip()
         if action not in {"approve", "reject"}:
             raise ValueError("action must be approve or reject")
@@ -356,7 +356,7 @@ def _handle_workflow_approval_decide(args: dict[str, Any], **_: Any) -> str:
 def _handle_workflow_review_respond(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         db_path = resolve_db(args.get("db"))
-        resume = _coerce_bool(args.get("resume"), default=False)
+        resume = _coerce_bool(args.get("resume"), default=True)
         payload = args.get("payload")
         if isinstance(payload, str):
             payload = json.loads(payload)
@@ -463,7 +463,7 @@ WORKFLOW_REVIEW_REQUESTS_LIST_SCHEMA = {
 
 WORKFLOW_APPROVAL_DECIDE_SCHEMA = {
     "name": "workflow_approval_decide",
-    "description": "Record an approve/reject decision for a hermes-workflows approval with human provenance. Defaults to resume=false for gateway/plugin safety.",
+    "description": "Record an approve/reject decision for a hermes-workflows approval with human provenance. Defaults to resume=true; pass resume=false for remote/untrusted record-only adapters.",
     "parameters": {
         "type": "object",
         "required": ["db", "workflow_id", "key", "action", "by"],
@@ -480,14 +480,14 @@ WORKFLOW_APPROVAL_DECIDE_SCHEMA = {
             "idempotency_key": {"type": "string"},
             "note": {"type": "string"},
             "reason": {"type": "string"},
-            "resume": {"type": "boolean", "default": False},
+            "resume": {"type": "boolean", "default": True},
         },
     },
 }
 
 WORKFLOW_REVIEW_RESPOND_SCHEMA = {
     "name": "workflow_review_respond",
-    "description": "Record a typed response for a hermes-workflows Review Queue request. Defaults to resume=false for gateway/plugin safety.",
+    "description": "Record a typed response for a hermes-workflows Review Queue request. Defaults to resume=true; pass resume=false for remote/untrusted record-only adapters.",
     "parameters": {
         "type": "object",
         "required": ["db", "workflow_id", "key", "payload", "by"],
@@ -502,7 +502,7 @@ WORKFLOW_REVIEW_RESPOND_SCHEMA = {
             "message_url": {"type": "string"},
             "event_id": {"type": "string"},
             "idempotency_key": {"type": "string"},
-            "resume": {"type": "boolean", "default": False},
+            "resume": {"type": "boolean", "default": True},
         },
     },
 }

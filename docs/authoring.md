@@ -11,19 +11,30 @@ The launch-facing authoring surface is deliberately small:
 from hermes_workflows import agent, ask, bash, goal, parallel, pipeline, workflow
 ```
 
-Use those first. `WorkflowEngine`, `@step`, direct `ctx.*` calls, raw signals, approval DTOs, and outbox internals are advanced integration surfaces.
+Use those first. `WorkflowEngine`, `@step`, direct `ctx.*` calls, raw signals, approval DTOs, and outbox internals are **not intended for direct use in normal workflows**. They are low-level integration/runtime surfaces for maintainers building adapters or the runtime itself.
 
 ## Workflow shape
 
-A normal workflow is an ordinary async Python function that takes one input mapping:
+A normal workflow is an ordinary async Python function with a typed input and a typed result:
 
 ```python
+from dataclasses import dataclass
 from hermes_workflows import workflow
 
 
+@dataclass
+class EchoInput:
+    message: str
+
+
+@dataclass
+class EchoResult:
+    received: str
+
+
 @workflow
-async def my_workflow(inputs):
-    return {"received": inputs}
+async def my_workflow(inputs: EchoInput) -> EchoResult:
+    return EchoResult(received=inputs.message)
 
 
 if __name__ == "__main__":
@@ -42,6 +53,12 @@ from hermes_workflows import agent
 
 
 @dataclass
+class Packet:
+    id: str
+    body: str
+
+
+@dataclass
 class Summary:
     headline: str
     risks: list[str]
@@ -50,23 +67,22 @@ class Summary:
 summary = await agent(
     "summarize_packet",
     prompt="Summarize this packet for a launch review.",
-    input={"packet": packet},
+    input=Packet(id="docs", body="..."),
     context={"audience": "maintainers"},
     returns=Summary,
     model="openrouter/example-model",
-    key_by=packet["id"],
+    key_by="docs",
 )
 ```
 
 Common arguments:
 
-- `prompt=`: instruction for the worker/agent.
-- `input=`: structured data to process.
-- `context=`: extra context that should not be confused with the primary input.
-- `returns=`: `dict`, dataclass, or another JSON-compatible typed contract.
+- `prompt=`: instruction for the worker/agent. This is included in the durable agent request and sent to the configured runner.
+- `input=`: the primary structured payload for the work. It is serialized into the durable request, sent to the runner, and used in the replay fingerprint.
+- `context=`: supporting material sent alongside the prompt/input. The runtime stores it as labeled context bundles with hashes, includes it in the runner request, and includes its hash in the replay fingerprint. Use it for background/reference material, not for the primary object being transformed.
+- `returns=`: dataclass, scalar, or another explicit JSON-compatible typed contract. Prefer real types over raw `dict` in public examples.
 - `key=` / `key_by=`: stable identity for replay and fan-out.
 - `model=`: requested model metadata. The resident worker maps this through configured runner/model argv templates.
-- `tools=`, `skills=`, `files=`: optional runner hints.
 - `mock_output=`: deterministic output for docs/tests/examples without provider credentials.
 
 ## `ask(...)`: typed Review Queue input
@@ -88,7 +104,7 @@ class ReviewDecision:
 decision = await ask(
     "Review this launch packet.",
     key="review_launch_packet",
-    input=packet,
+    input=summary,
     context={"risk": "public docs"},
     returns=ReviewDecision,
     approver="human:operator",
@@ -102,7 +118,15 @@ The Review Queue schema comes from `returns=`. A dataclass field like `action: L
 `bash(...)` runs a shell command as durable worker-executed work and captures stdout, stderr, exit code, timing, timeout state, and truncation flags.
 
 ```python
+from dataclasses import dataclass
 from hermes_workflows import bash
+
+
+@dataclass
+class CheckResult:
+    status: str
+    stderr_tail: str | None = None
+
 
 check = await bash(
     "python -m pytest -q",
@@ -112,7 +136,7 @@ check = await bash(
 )
 
 if check.exit_code != 0:
-    return {"status": "failed", "stderr": check.stderr[-4000:]}
+    return CheckResult(status="failed", stderr_tail=check.stderr[-4000:])
 ```
 
 Use it for deterministic local checks, not for unreviewed external side effects. Redact known secret values/patterns when command output may contain sensitive data.
@@ -122,16 +146,29 @@ Use it for deterministic local checks, not for unreviewed external side effects.
 `parallel(...)` starts independent durable calls before waiting for the group.
 
 ```python
+from dataclasses import dataclass
 from hermes_workflows import agent, parallel
 
-notes = await parallel(
+
+@dataclass
+class TopicReviewInput:
+    topic: str
+
+
+@dataclass
+class TopicReview:
+    topic: str
+    risk: str
+
+
+reviews = await parallel(
     [
         agent(
             "review_topic",
             prompt="Review this topic for launch risk.",
-            input={"topic": topic},
+            input=TopicReviewInput(topic=topic),
             key_by=topic,
-            returns=dict,
+            returns=TopicReview,
         )
         for topic in ["docs", "examples", "worker"]
     ],
@@ -146,15 +183,36 @@ Use stable keys for fan-out items so reordering an input list does not rewrite w
 `pipeline(items, stage_a, stage_b, ...)` applies each stage to each item, with each stage able to return `agent(...)`, `ask(...)`, `bash(...)`, another awaitable, or a plain value.
 
 ```python
+from dataclasses import dataclass
+from typing import Literal
 from hermes_workflows import agent, ask, pipeline
 
 
-def draft_section(section):
-    return agent("draft_section", prompt="Draft this section.", input=section, key_by=section["id"], returns=dict)
+@dataclass
+class Section:
+    id: str
+    title: str
 
 
-def review_section(draft):
-    return ask("Review this section.", key=f"review_{draft['id']}", input=draft, returns=dict)
+@dataclass
+class DraftedSection:
+    id: str
+    body: str
+
+
+@dataclass
+class SectionReview:
+    action: Literal["approve", "request_changes"]
+    feedback: str | None = None
+
+
+def draft_section(section: Section):
+    return agent("draft_section", prompt="Draft this section.", input=section, key_by=section.id, returns=DraftedSection)
+
+
+def review_section(draft: DraftedSection):
+    return ask("Review this section.", key=f"review_{draft.id}", input=draft, returns=SectionReview)
+
 
 reviews = await pipeline(sections, draft_section, review_section, limit=2)
 ```
@@ -166,15 +224,28 @@ Use it when each item should pass through the same durable stages.
 `goal(do_fn, check_fn, max_iters=N)` runs a durable do/check loop. Both functions can return ordinary values, awaitables, or authoring calls such as `agent(...)`.
 
 ```python
+from dataclasses import dataclass
 from hermes_workflows import agent, goal
 
 
-def revise(previous=None):
-    return agent("revise_draft", prompt="Improve the draft.", input={"previous": previous}, returns=dict)
+@dataclass
+class Draft:
+    body: str
+    ready: bool
 
 
-def good_enough(candidate):
-    return bool(candidate.get("ready"))
+@dataclass
+class RevisionInput:
+    previous: Draft | None = None
+
+
+def revise(previous: Draft | None = None):
+    return agent("revise_draft", prompt="Improve the draft.", input=RevisionInput(previous=previous), returns=Draft)
+
+
+def good_enough(candidate: Draft):
+    return candidate.ready
+
 
 final = await goal(revise, good_enough, max_iters=3)
 ```
@@ -220,13 +291,14 @@ agent(..., model="openrouter/example")
   -> strict JSON output completes the agent step
 ```
 
-## What to avoid in launch-facing workflows
+## Building a Review Queue adapter
 
-Avoid these in day-one examples unless the document is explicitly about runtime internals:
+A review adapter is just an input surface over durable workflow state. It should:
 
-- direct `WorkflowEngine(...)` construction;
-- low-level `ctx.approval.request(...)`;
-- raw `signal(...)` / `operator.response` instructions;
-- hand-draining command outboxes;
-- direct SQLite path routing in dashboard/operator instructions;
-- broad shell commands that perform external side effects without a review gate.
+1. Read `WorkflowEngine(db).workflow_status(workflow_id)["review_requests"]` or the equivalent configured-source plugin API.
+2. Render each request's `prompt`, `artifact`/`input`, `request_schema`, and action choices.
+3. Collect a payload that matches the request schema.
+4. Record it with `WorkflowEngine.submit_operator_response(...)` or the `workflow_review_respond` plugin tool, including `by`, `channel`, and `message_id`/`event_id` provenance.
+5. Let the default `resume=True` continue the run immediately when the adapter is trusted to run local workflow code. If the adapter is remote/untrusted, pass `resume=False` and rely on the resident Workflow Worker for continuation.
+
+Do not invent a second source of truth. The workflow DB stays canonical; the adapter only displays waiting requests and records typed responses with provenance.

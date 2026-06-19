@@ -214,7 +214,7 @@ Hermes plugin/tool shape:
 }
 ```
 
-Use `resume=false` for untrusted remote/gateway adapters and let the resident Workflow Worker continue. The bundled trusted local dashboard currently records the response with `resume=true` so a single click can update the run immediately; that dashboard-specific convenience should not be generalized to every remote adapter.
+By default, Review Queue responses resume the workflow immediately (`resume=true`), which matches operator expectations. If an adapter is remote/untrusted and should only record the decision, pass `resume=false` and let the resident Workflow Worker continue from the durable transition.
 
 ## 7. Configure the Hermes dashboard/plugin
 
@@ -241,7 +241,7 @@ plugins:
       dashboard_approver_id: operator
 ```
 
-The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. The trusted bundled local dashboard records Review Queue responses/approval decisions with `resume=true` for operator convenience. Remote/gateway/plugin tool adapters should default to record-only (`resume=false`) unless a trusted deployment explicitly opts into inline resume; a resident Workflow Worker remains the normal continuation path.
+The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Review Queue responses/approval decisions default to `resume=true` so a person can click/respond and see the run continue. Remote or untrusted adapters may pass `resume=false` for record-only behavior; a resident Workflow Worker remains the continuation path in that mode.
 
 Environment fallback for local smokes:
 

@@ -9,16 +9,6 @@ python -m pip install -e '.[dev]'
 PYTHONPATH=src:. pytest -q
 ```
 
-If you are touching the hackathon demo specifically:
-
-```bash
-PYTHONPATH=src:. pytest tests/test_workflows_demo_2026_06_05.py -q
-PYTHONPATH=src:. python examples/workflows_demo_2026_06_05.py \
-  --db /tmp/workflows-demo-2026-06-05.sqlite \
-  --id wf_workflows_demo_2026_06_05 \
-  --artifact dist/workflows-demo-2026-06-05/index.html
-```
-
 ## Design constraints
 
 - Keep workflows code-first. Python deciders beat YAML slop.

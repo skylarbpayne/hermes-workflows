@@ -1,6 +1,6 @@
 # Examples
 
-These examples are ordered as a launch curriculum. Start with the small facade-first files; keep the older direct-engine demos for advanced/runtime contributors.
+These examples are ordered as a launch curriculum. Start with the installed `reviewable-draft` workflow, then use the source-tree examples to see the larger composition primitives.
 
 ## Launch-facing examples
 
@@ -17,39 +17,33 @@ All launch-facing examples avoid direct `WorkflowEngine`, low-level `ctx.approva
 
 ## Registry snippet
 
-From a source checkout, a compact registry for the examples can look like this:
+From a source checkout, a compact registry for the examples can use one default DB and omit per-workflow `db` fields:
 
 ```json
 {
   "dbs": {"default": "workflows.sqlite"},
   "workflows": {
     "reviewable-draft": {
-      "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow",
-      "db": "default"
+      "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow"
     },
     "bash-repo-health": {
       "workflow_ref": "examples/bash_repo_health.py:bash_repo_health_workflow",
-      "db": "default",
       "project_root": "."
     },
     "parallel-research": {
       "workflow_ref": "examples/parallel_research.py:parallel_research_workflow",
-      "db": "default",
       "project_root": "."
     },
     "pipeline-section-review": {
       "workflow_ref": "examples/pipeline_section_review.py:pipeline_section_review_workflow",
-      "db": "default",
       "project_root": "."
     },
     "goal-revision-loop": {
       "workflow_ref": "examples/goal_revision_loop.py:goal_revision_loop_workflow",
-      "db": "default",
       "project_root": "."
     },
     "local-model-adapter": {
       "workflow_ref": "examples/local_model_adapter_workflow.py:local_model_adapter_workflow",
-      "db": "default",
       "project_root": "."
     }
   }
@@ -64,8 +58,4 @@ hermes-workflows worker --config .hermes/workflows.registry.json --worker-id exa
 hermes-workflows status --db .hermes/workflows.sqlite --id wf_parallel_research
 ```
 
-Workflows containing `ask(...)` intentionally stop with Review Queue requests. Respond through the Hermes dashboard/plugin Review Queue or another configured review adapter, then run the worker again.
-
-## Advanced / runtime examples
-
-Older examples such as `dynamic_workflow_return.py`, `restart_signal_demo.py`, `repo_change_review_workflow.py`, and `workflows_demo_2026_06_05.py` are useful for contributors inspecting runtime seams, generated child workflows, direct engine usage, or historical demos. They are not the day-one authoring model.
+Workflows containing `ask(...)` intentionally stop with Review Queue requests. Respond through the Hermes dashboard/plugin Review Queue or a review adapter built from the contract in [Author workflows](../docs/authoring.md#building-a-review-queue-adapter), then run the worker again if you used the bounded smoke command above.

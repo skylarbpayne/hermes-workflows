@@ -36,11 +36,11 @@ waiting workflow
   -> adapter displays the prompt, schema/actions, and redacted artifact
   -> human submits an approve/reject decision or typed response
   -> adapter captures provenance
-  -> adapter records the response/decision with resume=false by default
-  -> resident Workflow Worker continues from the durable state transition
+  -> adapter records the response/decision; default is resume=true
+  -> run continues immediately, unless the adapter explicitly passed resume=false for record-only behavior
 ```
 
-For `ask(...)`, adapters record typed responses matching the request schema. For approval gates, adapters record approve/reject decisions. They should not invent a parallel review path or run workflow code inside a chat/gateway callback.
+For `ask(...)`, adapters record typed responses matching the request schema. For approval gates, adapters record approve/reject decisions. They should not invent a parallel review path. Remote or untrusted callbacks should pass `resume=false` rather than running workflow code in the gateway process.
 
 ## Current adapters
 
@@ -61,14 +61,14 @@ The plugin adds profile-aware Review Queue operations without changing core:
 - render review cards in Hermes chat/dashboard
 - capture human/channel/message provenance automatically
 - record typed review responses and approval decisions
-- leave continuation to the resident Workflow Worker by default
+- resume immediately by default, with explicit `resume=false` available for record-only adapters
 
 Implemented public tool names:
 
 ```text
 workflow_review_requests_list(db?: string, status?: string, limit?: int)
-workflow_review_respond(db, workflow_id, key, payload, by, channel?, message_id?, resume?=false)
-workflow_approval_decide(db, workflow_id, key, action, by, channel?, message_id?, resume?=false)
+workflow_review_respond(db, workflow_id, key, payload, by, channel?, message_id?, resume?=true)
+workflow_approval_decide(db, workflow_id, key, action, by, channel?, message_id?, resume?=true)
 ```
 
 Legacy compatibility handlers may remain internally, but public docs and UI should say Review Queue, Human Input, review request, and approval gate. Do not make users choose between separate review/approval/operator concepts.
@@ -80,7 +80,7 @@ hwf-approval:v1:approve:<structured-token>
 hwf-approval:v1:reject:<structured-token>
 ```
 
-The plugin should remain a thin adapter over `hermes_workflows`. It should not own replay, validation, workflow execution, or worker lifecycle. `resume=false` is the safe default for remote/gateway/plugin tool calls. The bundled trusted local dashboard may opt into `resume=true` only when the deployment is explicitly allowed to run local workflow continuation.
+The plugin should remain a thin adapter over `hermes_workflows`. It should not own validation, workflow execution policy, or worker lifecycle. Review actions default to `resume=true` because that is what operators expect: click/respond and the run continues. Remote or untrusted adapters can still pass `resume=false` when they need record-only behavior and a resident Workflow Worker will continue later.
 
 ## Continuation after review
 
