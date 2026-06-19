@@ -244,6 +244,11 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "incomingByTarget" in index_js
     assert "data-dag-node-id" in index_js
     assert "Artifacts from this step" in index_js
+    assert "expandedChildWorkflowIds" in index_js
+    assert '"Expand child workflow"' in index_js
+    assert '"Collapse child workflow"' in index_js
+    assert "hwf-child-dag-expanded" in index_js
+    assert "data-child-workflow-id" in index_js
     assert "hwf-dag-strip" not in index_js
 
     assert ".hwf-dag-graph" in style_css
@@ -251,6 +256,9 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert ".hwf-dag-edge-line" in style_css
     assert ".hwf-dag-layer" in style_css
     assert ".hwf-dag-inspector" in style_css
+    assert ".hwf-dag-node-kind-child_workflow" in style_css
+    assert ".hwf-child-workflow-summary" in style_css
+    assert ".hwf-child-dag-expanded" in style_css
 
 
 def test_dashboard_frontend_inspect_run_waits_for_run_status_payload():
@@ -912,6 +920,42 @@ def test_dashboard_run_dag_preserves_pipeline_item_lanes(tmp_path, monkeypatch):
     assert (draft_b, humanize_b) in edges
     assert (draft_a, humanize_b) not in edges
     assert (draft_b, humanize_a) not in edges
+
+
+def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):
+    from tests.test_dynamic_workflow_return import dynamic_processor_pipeline
+
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dynamic_processor_pipeline,
+        {"items": [{"id": "a", "label": "alpha"}, {"id": "b", "label": "beta"}]},
+        workflow_id="wf_dynamic_child_dag",
+        workflow_ref="tests.test_dynamic_workflow_return:dynamic_processor_pipeline",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    dag = run(api.run_dag("wf_dynamic_child_dag", db="runtime-smoke"))
+    nodes = {node["id"]: node for node in dag["nodes"]}
+    child_nodes = [node for node in dag["nodes"] if node["kind"] == "child_workflow"]
+    child_internal_step_suffix = ":analyze_generated_item:0"
+
+    assert len(child_nodes) == 2
+    assert not any(node_id.endswith(child_internal_step_suffix) for node_id in nodes)
+    for child_node in child_nodes:
+        assert child_node["collapsible"] is True
+        assert child_node["expanded_by_default"] is False
+        assert child_node["symbol"] == "process_item"
+        assert child_node["label"] == "process_item"
+        assert child_node["child_workflow_id"].startswith("wf_dynamic_child_dag.child.")
+        assert child_node["child_status"] == "completed"
+        assert child_node["child_node_count"] >= 3
+        child_dag = child_node["child_dag"]
+        child_dag_nodes = {node["id"]: node for node in child_dag["nodes"]}
+        child_internal_step = next(node_id for node_id in child_dag_nodes if node_id.endswith(child_internal_step_suffix))
+        assert child_dag["workflow_id"] == child_node["child_workflow_id"]
+        assert child_dag_nodes[child_internal_step]["kind"] == "step"
+        assert child_dag_nodes[child_internal_step]["status"] == "completed"
 
 
 def test_dashboard_run_dag_does_not_chain_out_of_order_parallel_steps():

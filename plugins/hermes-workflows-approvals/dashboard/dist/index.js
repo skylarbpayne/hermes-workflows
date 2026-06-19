@@ -586,6 +586,7 @@
     if (node.kind === "step" && node.completion_mode === "approval") return "approval step";
     if (node.kind === "step" && node.completion_mode === "worker") return "worker step";
     if (node.kind === "step") return "step";
+    if (node.kind === "child_workflow") return "subworkflow";
     if (node.kind === "gather") return "fan-in";
     if (node.id === "workflow:start") return "start";
     if (node.id === "workflow:completed") return "completed";
@@ -670,6 +671,9 @@
     const selectedState = hooks.useState(null);
     const selectedDagNodeId = selectedState[0];
     const setSelectedDagNodeId = selectedState[1];
+    const expandedChildWorkflowIdsState = hooks.useState({});
+    const expandedChildWorkflowIds = expandedChildWorkflowIdsState[0];
+    const setExpandedChildWorkflowIds = expandedChildWorkflowIdsState[1];
     const dag = useJSON(API + "/runs/" + encodeURIComponent(props.workflowId) + "/dag" + qs({ db: props.db }), props.workflowId + ":dag:" + props.refreshKey);
     if (dag.loading) return e("p", { className: "hwf-muted" }, "Loading Run DAG…");
     if (dag.error) return e("p", { className: "hwf-bad" }, dag.error);
@@ -688,6 +692,12 @@
     const markerId = "hwf-dag-arrow-" + String(props.workflowId || "run").replace(/[^A-Za-z0-9_-]/g, "-");
     function selectNode(node) { setSelectedDagNodeId(node.id); }
     function isConnected(edge) { return selected && (edge.from === selected.id || edge.to === selected.id); }
+    const selectedChildWorkflowId = selected && selected.kind === "child_workflow" && selected.child_workflow_id;
+    const selectedChildExpanded = selectedChildWorkflowId && !!expandedChildWorkflowIds[selectedChildWorkflowId];
+    function toggleSelectedChildWorkflow() {
+      if (!selectedChildWorkflowId) return;
+      setExpandedChildWorkflowIds(Object.assign({}, expandedChildWorkflowIds, { [selectedChildWorkflowId]: !selectedChildExpanded }));
+    }
     return e("div", { className: "hwf-dag" },
       nodes.length ? e("div", { className: "hwf-dag-graph", role: "group", "aria-label": "Workflow run DAG graph" },
         e("svg", { className: "hwf-dag-svg hwf-dag-edge-svg", viewBox: "0 0 " + graphWidth + " " + graphHeight, role: "img", "aria-label": "Run-derived workflow DAG", style: { width: graphWidth + "px", height: graphHeight + "px" } },
@@ -748,6 +758,15 @@
         e("p", { className: "hwf-muted" },
           (incomingByTarget[selected.id] || []).length ? "After: " + incomingByTarget[selected.id].map(shortId).join(", ") + ". " : "No incoming edges. ",
           (outgoingBySource[selected.id] || []).length ? "Next: " + outgoingBySource[selected.id].map(shortId).join(", ") + "." : "No outgoing edges."),
+        selectedChildWorkflowId && e("div", { className: "hwf-child-workflow-summary" },
+          e("div", { className: "hwf-meta" },
+            e(Pill, { label: "child: " + shortId(selectedChildWorkflowId) }),
+            selected.child_status && e(Pill, { label: selected.child_status, className: statusClass(selected.child_status) }),
+            selected.child_node_count !== undefined && e(Pill, { label: "nodes: " + selected.child_node_count })),
+          e(Button, { variant: "outline", onClick: toggleSelectedChildWorkflow }, selectedChildExpanded ? "Collapse child workflow" : "Expand child workflow")),
+        selectedChildWorkflowId && selectedChildExpanded && e("div", { className: "hwf-child-dag-expanded", "data-child-workflow-id": selectedChildWorkflowId },
+          e("div", { className: "hwf-section-title" }, "Child workflow DAG"),
+          e(RunDag, { db: props.db, workflowId: selectedChildWorkflowId, refreshKey: props.refreshKey + ":child:" + selectedChildWorkflowId })),
         e("div", { className: "hwf-section-title" }, "Artifacts from this step"),
         selected.artifacts && selected.artifacts.length ? selected.artifacts.map(function (artifact) {
           return e(ArtifactCard, { key: artifact.id, artifact: artifact });
