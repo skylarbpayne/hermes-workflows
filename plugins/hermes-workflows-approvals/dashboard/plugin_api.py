@@ -655,6 +655,8 @@ def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, A
         return str(payload.get("prompt") or payload.get("key") or event.get("key") or "Operator step")
     if event_type == "AgentRequested":
         return str(payload.get("key") or event.get("key") or "Agent step")
+    if event_type.startswith("ChildWorkflow"):
+        return str(payload.get("symbol") or payload.get("workflow_name") or payload.get("child_key") or event.get("key") or "Child workflow")
     if event_type == "SignalReceived":
         return str(payload.get("key") or event.get("key") or "Step output")
     return str(payload.get("step_name") or event.get("key") or event_type)
@@ -716,7 +718,81 @@ def _payload_contains_value(container: Any, value: Any) -> bool:
     return False
 
 
-def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+def _child_workflow_nodes_from_events(events: list[dict[str, Any]], child_runs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("type") != "ChildWorkflowRequested":
+            continue
+        payload = event.get("payload") or {}
+        node_id = str(payload.get("key") or event.get("key") or "")
+        child_workflow_id = payload.get("child_workflow_id")
+        if not node_id or not child_workflow_id:
+            continue
+        child_id = str(child_workflow_id)
+        child_dag = child_runs.get(child_id)
+        summary: dict[str, Any] = {
+            "child_workflow_id": child_id,
+            "child_key": payload.get("child_key"),
+            "group": payload.get("group"),
+            "workflow_name": payload.get("workflow_name") or payload.get("symbol"),
+            "symbol": payload.get("symbol"),
+            "source_sha256": payload.get("source_sha256"),
+            "collapsible": True,
+            "expanded_by_default": False,
+        }
+        if child_dag:
+            child_run = child_dag.get("run") or {}
+            summary.update(
+                {
+                    "child_status": child_run.get("status"),
+                    "child_waiting_on": child_run.get("waiting_on"),
+                    "child_node_count": len(child_dag.get("nodes") or []),
+                    "child_edge_count": len(child_dag.get("edges") or []),
+                    "child_dag": child_dag,
+                }
+            )
+        summaries[node_id] = summary
+    return summaries
+
+
+def _child_run_dags(
+    engine: WorkflowEngine,
+    status: dict[str, Any],
+    *,
+    recent_events: int,
+    command_limit: int = 50,
+    command_payload_chars: int = 2000,
+) -> dict[str, dict[str, Any]]:
+    child_ids: list[str] = []
+    seen: set[str] = set()
+    for event in status.get("events") or status.get("recent_events") or []:
+        if event.get("type") != "ChildWorkflowRequested":
+            continue
+        payload = event.get("payload") or {}
+        child_workflow_id = payload.get("child_workflow_id")
+        if child_workflow_id and str(child_workflow_id) not in seen:
+            child_ids.append(str(child_workflow_id))
+            seen.add(str(child_workflow_id))
+
+    child_runs: dict[str, dict[str, Any]] = {}
+    for child_id in child_ids:
+        try:
+            child_status = _status_packet(
+                engine,
+                child_id,
+                recent_events=recent_events,
+                commands="all",
+                command_limit=command_limit,
+                command_payload_chars=command_payload_chars,
+            )
+        except Exception:
+            continue
+        child_artifacts = _artifacts_from_status(child_status)
+        child_runs[child_id] = _run_dag_payload(child_status, child_artifacts)
+    return child_runs
+
+
+def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], child_runs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str]] = set()
@@ -726,6 +802,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
     completed_pending_frontier: set[str] = set()
     gather_children: set[str] = set()
     completed_outputs: dict[str, Any] = {}
+    events = status.get("events") or status.get("recent_events") or []
+    child_node_summaries = _child_workflow_nodes_from_events(events, child_runs or {})
 
     def add_edge(source: str, target: str) -> None:
         if not source or not target or source == target:
@@ -757,6 +835,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
             completion_mode = _dag_completion_mode(event_type, payload)
             if completion_mode:
                 node["completion_mode"] = completion_mode
+            if node.get("kind") == "child_workflow" and node_id in child_node_summaries:
+                node.update(child_node_summaries[node_id])
             nodes[node_id] = node
         else:
             node["status"] = _dag_node_status(event_type, str(node.get("status") or ""))
@@ -768,6 +848,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
                 node["completion_mode"] = completion_mode
             if payload.get("step_name") or event_type in {"ApprovalRequested", "AgentRequested"}:
                 node["label"] = _dag_node_label(event_type, payload, event)
+            if node.get("kind") == "child_workflow" and node_id in child_node_summaries:
+                node.update(child_node_summaries[node_id])
         return node_id
 
     def flush_sequential_until(node_id: str | None = None) -> None:
@@ -802,7 +884,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         }
         return matching_parents if len(matching_parents) == 1 else parents
 
-    for event in status.get("events") or status.get("recent_events") or []:
+    for event in events:
         event_type = str(event.get("type") or "")
         payload = event.get("payload") or {}
         node_id = add_node(event)
@@ -1251,7 +1333,16 @@ async def run_dag(workflow_id: str, db: str | None = None, recent_events: int = 
         command_limit=200,
         command_payload_chars=5000,
     )
-    return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"])}
+    _db_alias, db_path = _resolve_dashboard_db(db)
+    engine = WorkflowEngine(db_path, read_only=True)
+    child_runs = _child_run_dags(
+        engine,
+        status["run"],
+        recent_events=_int(recent_events, default=200, maximum=200),
+        command_limit=50,
+        command_payload_chars=2000,
+    )
+    return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"], child_runs=child_runs)}
 
 
 @router.get("/operator-steps")
