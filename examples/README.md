@@ -11,6 +11,7 @@ These examples are ordered as a launch curriculum. Start with the installed `rev
 | `examples/parallel_research.py` | `parallel([... agent(...) ...])` fan-out/fan-in, aggregate review | source checkout / registry alias |
 | `examples/pipeline_section_review.py` | `pipeline(items, draft, check, review)` with per-item Review Queue cards | source checkout / registry alias |
 | `examples/goal_revision_loop.py` | bounded `goal(do_fn, check_fn)` loop | source checkout / registry alias |
+| `examples/dynamic_workflow_return.py` | `agent(..., returns=Workflow)` returning generated workflow code, then `ctx.map_workflow(...)` child runs | source checkout / registry alias |
 | `examples/local_model_adapter_workflow.py` | `agent(..., model=...)` with fake-output fallback and local/Hermes runner configuration shape | source checkout / registry alias |
 
 All launch-facing examples avoid direct `WorkflowEngine`, low-level `ctx.approval.request(...)`, and manual signal plumbing in the workflow body.
@@ -40,6 +41,10 @@ From a source checkout, a compact registry for the examples can use one default 
     },
     "goal-revision-loop": {
       "workflow_ref": "examples/goal_revision_loop.py:goal_revision_loop_workflow",
+      "project_root": "."
+    },
+    "dynamic-workflow-return": {
+      "workflow_ref": "examples/dynamic_workflow_return.py:dynamic_workflow_return_workflow",
       "project_root": "."
     },
     "local-model-adapter": {

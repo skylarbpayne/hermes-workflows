@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -11,7 +12,7 @@ from types import ModuleType
 
 import pytest
 
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, pipeline, step, workflow
+from hermes_workflows import ApprovalDecisionInput, Workflow, WorkflowEngine, agent, pipeline, step, workflow
 from hermes_workflows.workflows.coding import coding_workflow
 from tests.test_hermes_plugin_approvals import create_pending_approval
 
@@ -100,6 +101,31 @@ async def dashboard_pipeline_lane_workflow(ctx, inputs):
         lambda section: dashboard_pipeline_draft(ctx, section),
         lambda draft: dashboard_pipeline_humanize(ctx, draft),
     )
+
+
+DASHBOARD_GENERATED_CHILD_SOURCE = '''
+from hermes_workflows import step, workflow
+
+@step
+async def dashboard_generated_child_step(ctx, inputs):
+    return {"generated": inputs["value"]}
+
+@workflow
+async def dashboard_generated_child(ctx, inputs):
+    return await dashboard_generated_child_step(ctx, inputs)
+'''
+
+
+@workflow
+async def dashboard_generated_workflow_source_pipeline(ctx, inputs):
+    processor = await agent(
+        "build_generated_child",
+        prompt="Return a generated workflow that processes one dashboard item.",
+        input={"value": inputs["value"]},
+        returns=Workflow,
+        mock_output={"source": DASHBOARD_GENERATED_CHILD_SOURCE, "symbol": "dashboard_generated_child"},
+    )
+    return await processor({"value": inputs["value"]}, key="demo")
 
 
 def load_dashboard_api():
@@ -210,7 +236,12 @@ def test_dashboard_frontend_exposes_workflow_code_and_run_dag_affordances():
     assert "Artifacts from this step" in index_js
     assert "/definitions/" in index_js and "/source" in index_js
     assert "/dag" in index_js
+    assert '"Open generated Workflow source"' in index_js
+    assert '"Source hash"' in index_js
+    assert '"Provenance"' in index_js
+    assert 'render.render === "python-source"' in index_js
     assert ".hwf-code-block" in style_css
+    assert ".hwf-workflow-source-preview" in style_css
     assert ".hwf-dag-node" in style_css
     assert ".hwf-dag-node-selected" in style_css
 
@@ -263,6 +294,14 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "incomingByTarget" in index_js
     assert "data-dag-node-id" in index_js
     assert "Artifacts from this step" in index_js
+    assert "expandedChildWorkflowIds" in index_js
+    assert "expandInlineChildWorkflows" in index_js
+    assert '"Expand inline DAG"' in index_js
+    assert '"Collapse inline DAG"' in index_js
+    assert "hwf-dag-node-child-inline" in index_js
+    assert "Child workflow DAG" not in index_js
+    assert "data-child-workflow-id" not in index_js
+    assert "e(RunDag, { db: props.db, workflowId: selectedChildWorkflowId" not in index_js
     assert "hwf-dag-strip" not in index_js
 
     assert ".hwf-dag-graph" in style_css
@@ -270,6 +309,9 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert ".hwf-dag-edge-line" in style_css
     assert ".hwf-dag-layer" in style_css
     assert ".hwf-dag-inspector" in style_css
+    assert ".hwf-dag-node-kind-child_workflow" in style_css
+    assert ".hwf-dag-node-child-inline" in style_css
+    assert ".hwf-child-workflow-summary" in style_css
 
 
 def test_dashboard_frontend_inspect_run_waits_for_run_status_payload():
@@ -933,6 +975,42 @@ def test_dashboard_run_dag_preserves_pipeline_item_lanes(tmp_path, monkeypatch):
     assert (draft_b, humanize_a) not in edges
 
 
+def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):
+    from tests.test_dynamic_workflow_return import dynamic_processor_pipeline
+
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dynamic_processor_pipeline,
+        {"items": [{"id": "a", "label": "alpha"}, {"id": "b", "label": "beta"}]},
+        workflow_id="wf_dynamic_child_dag",
+        workflow_ref="tests.test_dynamic_workflow_return:dynamic_processor_pipeline",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    dag = run(api.run_dag("wf_dynamic_child_dag", db="runtime-smoke"))
+    nodes = {node["id"]: node for node in dag["nodes"]}
+    child_nodes = [node for node in dag["nodes"] if node["kind"] == "child_workflow"]
+    child_internal_step_suffix = ":analyze_generated_item:0"
+
+    assert len(child_nodes) == 2
+    assert not any(node_id.endswith(child_internal_step_suffix) for node_id in nodes)
+    for child_node in child_nodes:
+        assert child_node["collapsible"] is True
+        assert child_node["expanded_by_default"] is False
+        assert child_node["symbol"] == "process_item"
+        assert child_node["label"] == "process_item"
+        assert child_node["child_workflow_id"].startswith("wf_dynamic_child_dag.child.")
+        assert child_node["child_status"] == "completed"
+        assert child_node["child_node_count"] >= 3
+        child_dag = child_node["child_dag"]
+        child_dag_nodes = {node["id"]: node for node in child_dag["nodes"]}
+        child_internal_step = next(node_id for node_id in child_dag_nodes if node_id.endswith(child_internal_step_suffix))
+        assert child_dag["workflow_id"] == child_node["child_workflow_id"]
+        assert child_dag_nodes[child_internal_step]["kind"] == "step"
+        assert child_dag_nodes[child_internal_step]["status"] == "completed"
+
+
 def test_dashboard_run_dag_does_not_chain_out_of_order_parallel_steps():
     api = load_dashboard_api()
     status = {
@@ -996,6 +1074,70 @@ def test_dashboard_run_dag_attaches_step_artifacts(tmp_path, monkeypatch):
     assert any(edge["from"] == "workflow:start" and edge["to"] == "step:dashboard_path_artifact_step:0" for edge in dag["edges"])
     assert any(edge["to"] == "approve_path_artifact" for edge in dag["edges"])
     assert str(db) not in json.dumps(dag)
+
+
+def test_dashboard_run_dag_attaches_generated_workflow_source_to_agent_and_child(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_generated_workflow_source_pipeline,
+        {"value": "syntax-highlight-me"},
+        workflow_id="wf_generated_source_viewer",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_generated_workflow_source_pipeline",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    dag = run(api.run_dag("wf_generated_source_viewer", db="runtime-smoke"))
+    nodes = {node["id"]: node for node in dag["nodes"]}
+    workflow_source_artifacts = [artifact for artifact in dag["artifacts"] if artifact["kind"] == "workflow_source"]
+
+    assert len(workflow_source_artifacts) == 2
+    assert {artifact["source"]["event"] for artifact in workflow_source_artifacts} == {
+        "StepCompleted",
+        "ChildWorkflowRequested",
+    }
+    assert nodes["agent:build_generated_child:0"]["artifact_count"] == 1
+    child_node = next(node for node in dag["nodes"] if node["id"].startswith("child:dashboard_generated_child:"))
+    assert child_node["artifact_count"] == 1
+
+    artifact = workflow_source_artifacts[0]
+    assert artifact["artifact_render"]["kind"] == "workflow_source"
+    assert artifact["artifact_render"]["render"] == "python-source"
+    assert artifact["artifact_render"]["language"] == "python"
+    assert artifact["artifact_render"]["highlight_class"] == "language-python"
+    assert artifact["artifact_render"]["source_hash"] == artifact["preview"]["source_sha256"]
+    assert artifact["preview"]["symbol"] == "dashboard_generated_child"
+    assert artifact["preview"]["workflow_name"].startswith("generated:")
+    assert "@workflow" in artifact["preview"]["source"]
+    assert "async def dashboard_generated_child" in artifact["preview"]["source"]
+    assert "source_sha256" in artifact["preview"]
+    assert "provenance" in artifact["preview"]
+
+
+def test_dashboard_generated_workflow_approval_artifact_renders_as_python_source():
+    api = load_dashboard_api()
+    source_hash = hashlib.sha256(DASHBOARD_GENERATED_CHILD_SOURCE.encode("utf-8")).hexdigest()
+    artifact = {
+        "kind": "generated_workflow.approval.v1",
+        "workflow_name": f"generated:{source_hash}:dashboard_generated_child",
+        "symbol": "dashboard_generated_child",
+        "source_sha256": source_hash,
+        "source": DASHBOARD_GENERATED_CHILD_SOURCE,
+        "runner_provenance": {"runner": "unit-test"},
+        "agent_request": {"name": "build_generated_child"},
+        "agent_response": {"response_keys": ["source", "symbol"]},
+    }
+
+    preview = api._workflow_source_preview(artifact)
+    descriptor = api._artifact_descriptor(artifact)
+
+    assert preview["source"] == DASHBOARD_GENERATED_CHILD_SOURCE
+    assert preview["source_sha256"] == source_hash
+    assert preview["source_hash_verified"] is True
+    assert preview["provenance"]["runner_provenance"] == {"runner": "unit-test"}
+    assert descriptor["kind"] == "workflow_source"
+    assert descriptor["render"] == "python-source"
+    assert descriptor["highlight_class"] == "language-python"
 
 
 def test_dashboard_run_dag_collapses_coding_workflow_approvals_and_handoff_to_steps(tmp_path, monkeypatch):

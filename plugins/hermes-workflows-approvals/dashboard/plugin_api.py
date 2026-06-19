@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import mimetypes
@@ -12,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
+from hermes_workflows import ApprovalDecisionInput, Workflow, WorkflowEngine
 from hermes_workflows.hermes_plugin_approvals import (
     _configured_dbs,
     _next_step_for_receipt,
@@ -155,6 +156,80 @@ def _operator_approval_artifact(value: Any) -> Any:
     return value
 
 
+def _workflow_source_preview(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, Workflow):
+        source = value.source
+        symbol = value.symbol
+        source_sha256 = value.source_sha256
+        provenance = value.provenance
+        module_name = value.module_name
+        approval_required = value.approval_required
+        approval_key = value.approval_key
+    elif isinstance(value, dict) and value.get("__hermes_type__") == "Workflow" and isinstance(value.get("source"), str):
+        source = value["source"]
+        symbol = str(value.get("symbol") or "workflow")
+        source_sha256 = str(value.get("source_sha256") or hashlib.sha256(source.encode("utf-8")).hexdigest())
+        provenance = value.get("provenance")
+        module_name = value.get("module_name")
+        approval_required = bool(value.get("approval_required", False))
+        approval_key = value.get("approval_key")
+    elif isinstance(value, dict) and value.get("kind") == "generated_workflow.approval.v1" and isinstance(value.get("source"), str):
+        source = value["source"]
+        symbol = str(value.get("symbol") or "workflow")
+        source_sha256 = str(value.get("source_sha256") or hashlib.sha256(source.encode("utf-8")).hexdigest())
+        provenance = {
+            "runner_provenance": value.get("runner_provenance"),
+            "agent_request": value.get("agent_request"),
+            "agent_response": value.get("agent_response"),
+        }
+        module_name = None
+        approval_required = True
+        approval_key = value.get("approval_key")
+    else:
+        return None
+    actual_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return {
+        "kind": "generated_workflow_source",
+        "language": "python",
+        "highlight_class": "language-python",
+        "source": source,
+        "symbol": symbol,
+        "source_sha256": source_sha256,
+        "source_hash_verified": actual_sha256 == source_sha256,
+        "workflow_name": str(value.get("workflow_name") or f"generated:{source_sha256}:{symbol}") if isinstance(value, dict) else f"generated:{source_sha256}:{symbol}",
+        "module_name": module_name,
+        "provenance": provenance,
+        "approval_required": approval_required,
+        "approval_key": approval_key,
+    }
+
+
+def _workflow_source_artifact(
+    value: Any,
+    *,
+    artifact_id: str,
+    workflow_id: str,
+    title: str,
+    source: dict[str, Any],
+    metadata: Any = None,
+) -> dict[str, Any] | None:
+    preview = _workflow_source_preview(value)
+    if preview is None:
+        return None
+    artifact: dict[str, Any] = {
+        "id": artifact_id,
+        "workflow_id": workflow_id,
+        "kind": "workflow_source",
+        "title": title,
+        "source": source,
+        "preview": _redact_artifact_local_refs(preview),
+        "artifact_render": _artifact_descriptor(value),
+    }
+    if metadata is not None:
+        artifact["metadata"] = metadata
+    return artifact
+
+
 def _artifact_kind_from_media_type(media_type: str | None) -> str | None:
     if not media_type:
         return None
@@ -187,6 +262,18 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
     }
     if artifact is None:
         return {**descriptor, "kind": "none", "render": "none"}
+    workflow_source = _workflow_source_preview(artifact)
+    if workflow_source is not None:
+        return {
+            **descriptor,
+            "kind": "workflow_source",
+            "render": "python-source",
+            "language": "python",
+            "highlight_class": "language-python",
+            "source_hash": workflow_source["source_sha256"],
+            "symbol": workflow_source["symbol"],
+            "hash_verified": workflow_source["source_hash_verified"],
+        }
     if isinstance(artifact, str):
         if artifact.startswith(("http://", "https://")):
             return {**descriptor, "kind": "link", "render": "external-link", "reference": {"type": "url", "href": artifact}}
@@ -655,6 +742,8 @@ def _dag_node_label(event_type: str, payload: dict[str, Any], event: dict[str, A
         return str(payload.get("prompt") or payload.get("key") or event.get("key") or "Operator step")
     if event_type == "AgentRequested":
         return str(payload.get("key") or event.get("key") or "Agent step")
+    if event_type.startswith("ChildWorkflow"):
+        return str(payload.get("symbol") or payload.get("workflow_name") or payload.get("child_key") or event.get("key") or "Child workflow")
     if event_type == "SignalReceived":
         return str(payload.get("key") or event.get("key") or "Step output")
     return str(payload.get("step_name") or event.get("key") or event_type)
@@ -716,7 +805,81 @@ def _payload_contains_value(container: Any, value: Any) -> bool:
     return False
 
 
-def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+def _child_workflow_nodes_from_events(events: list[dict[str, Any]], child_runs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("type") != "ChildWorkflowRequested":
+            continue
+        payload = event.get("payload") or {}
+        node_id = str(payload.get("key") or event.get("key") or "")
+        child_workflow_id = payload.get("child_workflow_id")
+        if not node_id or not child_workflow_id:
+            continue
+        child_id = str(child_workflow_id)
+        child_dag = child_runs.get(child_id)
+        summary: dict[str, Any] = {
+            "child_workflow_id": child_id,
+            "child_key": payload.get("child_key"),
+            "group": payload.get("group"),
+            "workflow_name": payload.get("workflow_name") or payload.get("symbol"),
+            "symbol": payload.get("symbol"),
+            "source_sha256": payload.get("source_sha256"),
+            "collapsible": True,
+            "expanded_by_default": False,
+        }
+        if child_dag:
+            child_run = child_dag.get("run") or {}
+            summary.update(
+                {
+                    "child_status": child_run.get("status"),
+                    "child_waiting_on": child_run.get("waiting_on"),
+                    "child_node_count": len(child_dag.get("nodes") or []),
+                    "child_edge_count": len(child_dag.get("edges") or []),
+                    "child_dag": child_dag,
+                }
+            )
+        summaries[node_id] = summary
+    return summaries
+
+
+def _child_run_dags(
+    engine: WorkflowEngine,
+    status: dict[str, Any],
+    *,
+    recent_events: int,
+    command_limit: int = 50,
+    command_payload_chars: int = 2000,
+) -> dict[str, dict[str, Any]]:
+    child_ids: list[str] = []
+    seen: set[str] = set()
+    for event in status.get("events") or status.get("recent_events") or []:
+        if event.get("type") != "ChildWorkflowRequested":
+            continue
+        payload = event.get("payload") or {}
+        child_workflow_id = payload.get("child_workflow_id")
+        if child_workflow_id and str(child_workflow_id) not in seen:
+            child_ids.append(str(child_workflow_id))
+            seen.add(str(child_workflow_id))
+
+    child_runs: dict[str, dict[str, Any]] = {}
+    for child_id in child_ids:
+        try:
+            child_status = _status_packet(
+                engine,
+                child_id,
+                recent_events=recent_events,
+                commands="all",
+                command_limit=command_limit,
+                command_payload_chars=command_payload_chars,
+            )
+        except Exception:
+            continue
+        child_artifacts = _artifacts_from_status(child_status)
+        child_runs[child_id] = _run_dag_payload(child_status, child_artifacts)
+    return child_runs
+
+
+def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], child_runs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str]] = set()
@@ -726,6 +889,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
     completed_pending_frontier: set[str] = set()
     gather_children: set[str] = set()
     completed_outputs: dict[str, Any] = {}
+    events = status.get("events") or status.get("recent_events") or []
+    child_node_summaries = _child_workflow_nodes_from_events(events, child_runs or {})
 
     def add_edge(source: str, target: str) -> None:
         if not source or not target or source == target:
@@ -757,6 +922,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
             completion_mode = _dag_completion_mode(event_type, payload)
             if completion_mode:
                 node["completion_mode"] = completion_mode
+            if node.get("kind") == "child_workflow" and node_id in child_node_summaries:
+                node.update(child_node_summaries[node_id])
             nodes[node_id] = node
         else:
             node["status"] = _dag_node_status(event_type, str(node.get("status") or ""))
@@ -768,6 +935,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
                 node["completion_mode"] = completion_mode
             if payload.get("step_name") or event_type in {"ApprovalRequested", "AgentRequested"}:
                 node["label"] = _dag_node_label(event_type, payload, event)
+            if node.get("kind") == "child_workflow" and node_id in child_node_summaries:
+                node.update(child_node_summaries[node_id])
         return node_id
 
     def flush_sequential_until(node_id: str | None = None) -> None:
@@ -802,7 +971,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]]) ->
         }
         return matching_parents if len(matching_parents) == 1 else parents
 
-    for event in status.get("events") or status.get("recent_events") or []:
+    for event in events:
         event_type = str(event.get("type") or "")
         payload = event.get("payload") or {}
         node_id = add_node(event)
@@ -1076,10 +1245,33 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     for event in status.get("events") or status.get("recent_events") or []:
+        if event.get("type") == "ChildWorkflowRequested":
+            payload = event.get("payload") or {}
+            workflow_artifact = _workflow_source_artifact(
+                payload.get("workflow"),
+                artifact_id=f"{workflow_id}:child-workflow-source:{event.get('key')}",
+                workflow_id=workflow_id,
+                title=f"Generated child workflow source: {payload.get('symbol') or event.get('key')}",
+                source={"event": "ChildWorkflowRequested", "key": event.get("key"), "seq": event.get("seq")},
+            )
+            if workflow_artifact is not None:
+                artifacts.append(workflow_artifact)
+            continue
         if event.get("type") != "StepCompleted":
             continue
         payload = event.get("payload") or {}
         if "output" in payload:
+            workflow_artifact = _workflow_source_artifact(
+                payload.get("output"),
+                artifact_id=f"{workflow_id}:workflow-source:{event.get('key')}",
+                workflow_id=workflow_id,
+                title=f"Generated workflow source: {event.get('key')}",
+                source={"event": "StepCompleted", "key": event.get("key"), "seq": event.get("seq")},
+                metadata=payload.get("metadata"),
+            )
+            if workflow_artifact is not None:
+                artifacts.append(workflow_artifact)
+                continue
             artifacts.append(
                 {
                     "id": f"{workflow_id}:step:{event.get('key')}",
@@ -1251,7 +1443,16 @@ async def run_dag(workflow_id: str, db: str | None = None, recent_events: int = 
         command_limit=200,
         command_payload_chars=5000,
     )
-    return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"])}
+    _db_alias, db_path = _resolve_dashboard_db(db)
+    engine = WorkflowEngine(db_path, read_only=True)
+    child_runs = _child_run_dags(
+        engine,
+        status["run"],
+        recent_events=_int(recent_events, default=200, maximum=200),
+        command_limit=50,
+        command_payload_chars=2000,
+    )
+    return {"db_alias": status["db_alias"], **_run_dag_payload(status["run"], status["artifacts"], child_runs=child_runs)}
 
 
 @router.get("/operator-steps")

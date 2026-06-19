@@ -68,6 +68,36 @@ def test_launch_examples_reach_expected_review_queue_requests(tmp_path):
         assert expected_keys <= _review_keys(engine, workflow_id)
 
 
+def test_dynamic_workflow_return_example_generates_and_runs_child_workflows(tmp_path):
+    workflow_fn = _load_example("dynamic_workflow_return.py", "dynamic_workflow_return_workflow")
+    engine = WorkflowEngine(tmp_path / "wf_dynamic_return.sqlite")
+    engine.start(workflow_fn, {}, workflow_id="wf_dynamic_return")
+
+    result = _drain(engine, "wf_dynamic_return", max_commands=20)
+
+    assert result.status == "completed"
+    assert result.result["generated_workflow"]["symbol"] == "process_launch_item"
+    assert [item["id"] for item in result.result["processed"]] == ["dynamic-examples", "subworkflow-ui"]
+    assert result.result["processed"][0]["summary"].startswith("Dynamic workflow examples -> docs")
+    events = engine.events("wf_dynamic_return")
+    assert [event["type"] for event in events].count("ChildWorkflowRequested") == 2
+    assert [event["type"] for event in events].count("ChildWorkflowCompleted") == 2
+    child_ids = [
+        event["payload"]["child_workflow_id"]
+        for event in events
+        if event["type"] == "ChildWorkflowRequested"
+    ]
+    assert child_ids == [
+        "wf_dynamic_return.child.map:0:process_launch_item:"
+        + result.result["generated_workflow"]["source_sha256"][:12]
+        + ".dynamic-examples",
+        "wf_dynamic_return.child.map:0:process_launch_item:"
+        + result.result["generated_workflow"]["source_sha256"][:12]
+        + ".subworkflow-ui",
+    ]
+    assert all(engine.workflow_status(child_id)["status"] == "completed" for child_id in child_ids)
+
+
 def test_goal_and_local_model_examples_complete_without_provider_credentials(tmp_path):
     cases = [
         ("goal_revision_loop.py", "goal_revision_loop_workflow", "wf_goal"),

@@ -469,6 +469,28 @@
   line-height: 1.45;
 }
 
+.hwf-workflow-source-preview {
+  margin: 0.75rem 0;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: color-mix(in srgb, var(--hwf-surface), var(--color-primary) 3%);
+  padding: 0.75rem;
+}
+
+.hwf-workflow-source-preview summary,
+.hwf-source-provenance summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.hwf-workflow-source-preview .hwf-code-block {
+  margin-top: 0.75rem;
+}
+
+.hwf-source-provenance {
+  margin-top: 0.75rem;
+}
+
 .hwf-code-keyword {
   color: var(--hwf-code-keyword);
   font-weight: 600;
@@ -569,6 +591,28 @@
   stroke: rgba(16, 185, 129, 0.42);
 }
 
+.hwf-dag-node-kind-child_workflow .hwf-dag-node-bg {
+  stroke: rgba(96, 165, 250, 0.58);
+  stroke-dasharray: 5 3;
+}
+
+.hwf-dag-node-child-inline .hwf-dag-node-bg {
+  fill: rgba(15, 23, 42, 0.96);
+  stroke: rgba(96, 165, 250, 0.34);
+}
+
+.hwf-dag-node-child-inline .hwf-dag-kind {
+  fill: #93c5fd;
+}
+
+.hwf-dag-node-child-inline .hwf-dag-label {
+  font-size: 0.84rem;
+}
+
+.hwf-dag-node-child-inline .hwf-dag-node-shadow {
+  opacity: 0.65;
+}
+
 .hwf-dag-node-kind-approval .hwf-dag-node-bg {
   stroke: rgba(245, 158, 11, 0.52);
 }
@@ -612,6 +656,25 @@
   border-radius: 1rem;
   padding: 1rem;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+}
+
+.hwf-child-workflow-summary {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem;
+  border: 1px dashed rgba(96, 165, 250, 0.38);
+  border-radius: 0.85rem;
+  background: rgba(96, 165, 250, 0.08);
+}
+
+.hwf-child-dag-expanded {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 0.85rem;
+  background: rgba(15, 23, 42, 0.52);
 }
 
 .hwf-approval-dialog {
