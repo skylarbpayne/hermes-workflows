@@ -93,6 +93,9 @@
   function ArtifactInlinePreview(props) {
     const render = props.render || {};
     const value = props.value;
+    if (isGeneratedPythonWorkflowArtifact(value)) {
+      return e(GeneratedPythonWorkflowPreview, { value: value });
+    }
     if (render.render === "inline-markdown") {
       const markdown = value && typeof value === "object" ? value.markdown : value;
       if (typeof markdown === "string" && markdown.trim()) {
@@ -103,6 +106,27 @@
       return e("pre", { className: "hwf-text-preview" }, value);
     }
     return null;
+  }
+
+  function isGeneratedPythonWorkflowArtifact(value) {
+    return Boolean(
+      value &&
+      typeof value === "object" &&
+      value.kind === "generated_workflow.approval.v1" &&
+      typeof value.source === "string" &&
+      value.source.trim()
+    );
+  }
+
+  function GeneratedPythonWorkflowPreview(props) {
+    const value = props.value || {};
+    return e("div", { className: "hwf-generated-source" },
+      e("div", { className: "hwf-section-title" }, "Generated Python workflow"),
+      e("div", { className: "hwf-meta" },
+        value.symbol && e(Pill, { label: "symbol: " + value.symbol }),
+        value.source_sha256 && e(Pill, { label: "sha256: " + shortId(value.source_sha256) })),
+      e("pre", { className: "hwf-code-block hwf-generated-code-block" },
+        e(PythonCode, { className: "language-python", code: value.source })));
   }
 
   function shortId(value) {
@@ -437,7 +461,7 @@
   function PythonCode(props) {
     const code = props.code || "";
     const parts = [];
-    const pattern = /(#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:async|await|def|class|return|if|elif|else|for|while|try|except|finally|with|from|import|as|raise|yield|True|False|None|and|or|not|in|is)\b)/g;
+    const pattern = /("""[\s\S]*?"""|'''[\s\S]*?'''|#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|@[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*|\b\d+(?:\.\d+)?\b|\b(?:async|await|def|class|return|if|elif|else|for|while|try|except|finally|with|from|import|as|raise|yield|True|False|None|and|or|not|in|is)\b)/g;
     let last = 0;
     let match;
     while ((match = pattern.exec(code))) {
@@ -446,6 +470,8 @@
       let className = "hwf-code-keyword";
       if (token.startsWith("#")) className = "hwf-code-comment";
       else if (token.startsWith("\"") || token.startsWith("'")) className = "hwf-code-string";
+      else if (token.startsWith("@")) className = "hwf-code-decorator";
+      else if (/^\d/.test(token)) className = "hwf-code-number";
       parts.push(e("span", { key: parts.length, className: className }, token));
       last = match.index + token.length;
     }
