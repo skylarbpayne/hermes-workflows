@@ -598,6 +598,73 @@
     return text.length > max ? text.slice(0, max - 1) + "…" : text;
   }
 
+  function childInlineDagNodeId(parentNodeId, childNodeId) {
+    return String(parentNodeId) + "::child::" + String(childNodeId);
+  }
+
+  function terminalChildDagNodeIds(childDag) {
+    const childNodes = childDag && Array.isArray(childDag.nodes) ? childDag.nodes : [];
+    const childEdges = childDag && Array.isArray(childDag.edges) ? childDag.edges : [];
+    const outgoing = {};
+    childEdges.forEach(function (edge) { outgoing[edge.from] = true; });
+    return childNodes.filter(function (node) { return !outgoing[node.id]; }).map(function (node) { return node.id; });
+  }
+
+  function startChildDagNodeIds(childDag) {
+    const childNodes = childDag && Array.isArray(childDag.nodes) ? childDag.nodes : [];
+    const childEdges = childDag && Array.isArray(childDag.edges) ? childDag.edges : [];
+    const incoming = {};
+    childEdges.forEach(function (edge) { incoming[edge.to] = true; });
+    return childNodes.filter(function (node) { return !incoming[node.id]; }).map(function (node) { return node.id; });
+  }
+
+  function expandInlineChildWorkflows(nodes, edges, expandedChildWorkflowIds) {
+    const byId = {};
+    nodes.forEach(function (node) { byId[node.id] = node; });
+    const visibleNodes = [];
+    const visibleEdges = [];
+    nodes.forEach(function (node) {
+      visibleNodes.push(node);
+      const childWorkflowId = node.kind === "child_workflow" && node.child_workflow_id;
+      const childDag = childWorkflowId && expandedChildWorkflowIds[childWorkflowId] && node.child_dag;
+      if (!childDag || !Array.isArray(childDag.nodes)) return;
+      childDag.nodes.forEach(function (childNode) {
+        visibleNodes.push(Object.assign({}, childNode, {
+          id: childInlineDagNodeId(node.id, childNode.id),
+          label: childNode.label || childNode.id,
+          inline_child_workflow_id: childWorkflowId,
+          inline_child_parent_node_id: node.id,
+          kind: childNode.kind || "step",
+          status: childNode.status || "recorded"
+        }));
+      });
+      startChildDagNodeIds(childDag).forEach(function (startId) {
+        visibleEdges.push({ from: node.id, to: childInlineDagNodeId(node.id, startId) });
+      });
+      (childDag.edges || []).forEach(function (edge) {
+        visibleEdges.push({
+          from: childInlineDagNodeId(node.id, edge.from),
+          to: childInlineDagNodeId(node.id, edge.to)
+        });
+      });
+    });
+    edges.forEach(function (edge) {
+      const fromNode = byId[edge.from];
+      const toNode = byId[edge.to];
+      if (!fromNode || !toNode) return;
+      const childWorkflowId = fromNode.kind === "child_workflow" && fromNode.child_workflow_id;
+      const childDag = childWorkflowId && expandedChildWorkflowIds[childWorkflowId] && fromNode.child_dag;
+      if (childDag && Array.isArray(childDag.nodes)) {
+        terminalChildDagNodeIds(childDag).forEach(function (terminalId) {
+          visibleEdges.push({ from: childInlineDagNodeId(edge.from, terminalId), to: edge.to });
+        });
+      } else {
+        visibleEdges.push(edge);
+      }
+    });
+    return { nodes: visibleNodes, edges: visibleEdges };
+  }
+
   function layoutDagNodes(nodes, edges) {
     const nodeWidth = 184;
     const nodeHeight = 68;
@@ -678,9 +745,12 @@
     if (dag.loading) return e("p", { className: "hwf-muted" }, "Loading Run DAG…");
     if (dag.error) return e("p", { className: "hwf-bad" }, dag.error);
     const data = dag.data || {};
-    const nodes = data.nodes || [];
-    const edges = data.edges || [];
-    const selected = nodes.find(function (node) { return node.id === selectedDagNodeId; }) || nodes[0] || null;
+    const baseNodes = data.nodes || [];
+    const baseEdges = data.edges || [];
+    const expandedGraph = expandInlineChildWorkflows(baseNodes, baseEdges, expandedChildWorkflowIds);
+    const nodes = expandedGraph.nodes;
+    const edges = expandedGraph.edges;
+    const selected = nodes.find(function (node) { return node.id === selectedDagNodeId; }) || baseNodes[0] || nodes[0] || null;
     const layout = layoutDagNodes(nodes, edges);
     const nodeWidth = layout.nodeWidth;
     const nodeHeight = layout.nodeHeight;
@@ -690,14 +760,19 @@
     const incomingByTarget = layout.incoming;
     const outgoingBySource = layout.outgoing;
     const markerId = "hwf-dag-arrow-" + String(props.workflowId || "run").replace(/[^A-Za-z0-9_-]/g, "-");
-    function selectNode(node) { setSelectedDagNodeId(node.id); }
-    function isConnected(edge) { return selected && (edge.from === selected.id || edge.to === selected.id); }
     const selectedChildWorkflowId = selected && selected.kind === "child_workflow" && selected.child_workflow_id;
     const selectedChildExpanded = selectedChildWorkflowId && !!expandedChildWorkflowIds[selectedChildWorkflowId];
     function toggleSelectedChildWorkflow() {
       if (!selectedChildWorkflowId) return;
       setExpandedChildWorkflowIds(Object.assign({}, expandedChildWorkflowIds, { [selectedChildWorkflowId]: !selectedChildExpanded }));
     }
+    function selectNode(node) {
+      setSelectedDagNodeId(node.id);
+      if (node.kind === "child_workflow" && node.child_workflow_id) {
+        setExpandedChildWorkflowIds(Object.assign({}, expandedChildWorkflowIds, { [node.child_workflow_id]: !expandedChildWorkflowIds[node.child_workflow_id] }));
+      }
+    }
+    function isConnected(edge) { return selected && (edge.from === selected.id || edge.to === selected.id); }
     return e("div", { className: "hwf-dag" },
       nodes.length ? e("div", { className: "hwf-dag-graph", role: "group", "aria-label": "Workflow run DAG graph" },
         e("svg", { className: "hwf-dag-svg hwf-dag-edge-svg", viewBox: "0 0 " + graphWidth + " " + graphHeight, role: "img", "aria-label": "Run-derived workflow DAG", style: { width: graphWidth + "px", height: graphHeight + "px" } },
@@ -732,7 +807,7 @@
             const artifactText = node.artifact_count ? node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s") : "";
             return e("g", {
               key: node.id,
-              className: "hwf-dag-svg-node " + (nodeSelected ? "hwf-dag-node-selected" : "") + " hwf-dag-node-kind-" + (node.kind || "event"),
+              className: "hwf-dag-svg-node " + (nodeSelected ? "hwf-dag-node-selected" : "") + " hwf-dag-node-kind-" + (node.kind || "event") + (node.inline_child_workflow_id ? " hwf-dag-node-child-inline" : ""),
               transform: "translate(" + pos.x + " " + pos.y + ")",
               onClick: function () { selectNode(node); },
               onKeyDown: function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectNode(node); } },
@@ -763,10 +838,7 @@
             e(Pill, { label: "child: " + shortId(selectedChildWorkflowId) }),
             selected.child_status && e(Pill, { label: selected.child_status, className: statusClass(selected.child_status) }),
             selected.child_node_count !== undefined && e(Pill, { label: "nodes: " + selected.child_node_count })),
-          e(Button, { variant: "outline", onClick: toggleSelectedChildWorkflow }, selectedChildExpanded ? "Collapse child workflow" : "Expand child workflow")),
-        selectedChildWorkflowId && selectedChildExpanded && e("div", { className: "hwf-child-dag-expanded", "data-child-workflow-id": selectedChildWorkflowId },
-          e("div", { className: "hwf-section-title" }, "Child workflow DAG"),
-          e(RunDag, { db: props.db, workflowId: selectedChildWorkflowId, refreshKey: props.refreshKey + ":child:" + selectedChildWorkflowId })),
+          e(Button, { variant: "outline", onClick: toggleSelectedChildWorkflow }, selectedChildExpanded ? "Collapse inline DAG" : "Expand inline DAG")),
         e("div", { className: "hwf-section-title" }, "Artifacts from this step"),
         selected.artifacts && selected.artifacts.length ? selected.artifacts.map(function (artifact) {
           return e(ArtifactCard, { key: artifact.id, artifact: artifact });

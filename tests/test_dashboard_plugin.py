@@ -245,10 +245,13 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "data-dag-node-id" in index_js
     assert "Artifacts from this step" in index_js
     assert "expandedChildWorkflowIds" in index_js
-    assert '"Expand child workflow"' in index_js
-    assert '"Collapse child workflow"' in index_js
-    assert "hwf-child-dag-expanded" in index_js
-    assert "data-child-workflow-id" in index_js
+    assert "expandInlineChildWorkflows" in index_js
+    assert '"Expand inline DAG"' in index_js
+    assert '"Collapse inline DAG"' in index_js
+    assert "hwf-dag-node-child-inline" in index_js
+    assert "Child workflow DAG" not in index_js
+    assert "data-child-workflow-id" not in index_js
+    assert "e(RunDag, { db: props.db, workflowId: selectedChildWorkflowId" not in index_js
     assert "hwf-dag-strip" not in index_js
 
     assert ".hwf-dag-graph" in style_css
@@ -257,8 +260,8 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert ".hwf-dag-layer" in style_css
     assert ".hwf-dag-inspector" in style_css
     assert ".hwf-dag-node-kind-child_workflow" in style_css
+    assert ".hwf-dag-node-child-inline" in style_css
     assert ".hwf-child-workflow-summary" in style_css
-    assert ".hwf-child-dag-expanded" in style_css
 
 
 def test_dashboard_frontend_inspect_run_waits_for_run_status_payload():
