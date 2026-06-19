@@ -455,6 +455,14 @@
   white-space: pre;
 }
 
+.hwf-generated-source {
+  margin: 0.75rem 0;
+}
+
+.hwf-generated-code-block {
+  max-height: 28rem;
+}
+
 .hwf-code-block code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.82rem;
@@ -486,6 +494,11 @@
 .hwf-code-keyword {
   color: var(--hwf-code-keyword);
   font-weight: 600;
+}
+
+.hwf-code-decorator,
+.hwf-code-number {
+  color: var(--hwf-code-keyword);
 }
 
 .hwf-code-string {

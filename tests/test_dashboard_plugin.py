@@ -259,6 +259,25 @@ def test_dashboard_code_highlighting_uses_subtle_token_colors_instead_of_loud_hi
     assert "color: #86efac" not in style_css
 
 
+def test_dashboard_code_highlighting_handles_real_python_and_generated_workflows():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "function GeneratedPythonWorkflowPreview" in index_js
+    assert "isGeneratedPythonWorkflowArtifact(value)" in index_js
+    assert 'value.kind === "generated_workflow.approval.v1"' in index_js
+    assert '"Generated Python workflow"' in index_js
+    assert 'e(PythonCode, { className: "language-python", code: value.source })' in index_js
+
+    assert '"""[\\s\\S]*?"""' in index_js
+    assert "'''[\\s\\S]*?'''" in index_js
+    assert "@[A-Za-z_]\\w*" in index_js
+    assert "hwf-code-decorator" in index_js
+    assert "hwf-code-number" in index_js
+    assert ".hwf-generated-source" in style_css
+    assert ".hwf-generated-code-block" in style_css
+
+
 def test_dashboard_frontend_exposes_visual_run_dag_graph():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
     style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
