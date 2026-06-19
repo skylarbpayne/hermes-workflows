@@ -22,28 +22,10 @@ _NAME_HINT_STACK: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextV
 
 
 @dataclass(frozen=True)
-class ContextBundle:
-    label: str
-    content: Any
-    source: str | None = None
-    sha256: str | None = None
-
-    def to_manifest(self) -> dict[str, Any]:
-        jsonable = _jsonable(self.content)
-        return {
-            "label": self.label,
-            "source": self.source,
-            "content": jsonable,
-            "sha256": self.sha256 or _sha256_json(jsonable),
-        }
-
-
-@dataclass(frozen=True)
 class AgentCall(Generic[T]):
     name: str
     prompt: str
     input: Any = None
-    context: Any = None
     returns: Any = dict
     key_by: Any = None
     key: str | None = None
@@ -121,7 +103,6 @@ class AgentCall(Generic[T]):
             self.name,
             prompt=self.prompt,
             input=input_value,
-            context=self.context,
             returns=self.returns,
             key_by=(key_by if key_by is not _MISSING else _default_item_key(input_value)),
             key=self.key,
@@ -149,7 +130,6 @@ class AgentCall(Generic[T]):
 
     def _payload(self, key: str) -> dict[str, Any]:
         safe_input = _jsonable(self.input)
-        context_manifest = _context_manifest(self.context)
         rendered_prompt = self.prompt
         request = {
             "kind": "agent.request.v1",
@@ -163,8 +143,6 @@ class AgentCall(Generic[T]):
             "rendered_prompt_sha256": _sha256_text(rendered_prompt),
             "input": safe_input,
             "input_sha256": _sha256_json(safe_input),
-            "context": context_manifest,
-            "context_sha256": _sha256_json(context_manifest),
             "returns": _return_schema_id(self.returns),
             "tools": list(self.tools or []),
             "skills": list(self.skills or []),
@@ -181,7 +159,6 @@ class AgentCall(Generic[T]):
             {
                 "prompt": request["prompt"],
                 "input": request["input"],
-                "context_sha256": request["context_sha256"],
                 "returns": request["returns"],
                 "tools": request["tools"],
                 "skills": request["skills"],
@@ -206,7 +183,6 @@ class AskCall(Generic[T]):
     prompt: str
     key: str | None = None
     input: Any = None
-    context: Any = None
     returns: Any = dict
     approver: str = "human"
     timeout: str | None = None
@@ -230,7 +206,6 @@ class AskCall(Generic[T]):
             artifact=self.input,
             schema=_return_schema_id(self.returns),
             schema_descriptor=_return_schema_descriptor(self.returns),
-            context=_context_manifest(self.context),
             approver=self.approver,
             timeout=self.timeout,
             block=block,
@@ -272,7 +247,6 @@ def agent(
     *,
     prompt: str,
     input: Any = None,
-    context: Any = None,
     returns: Any = dict,
     key_by: Any = None,
     key: str | None = None,
@@ -297,7 +271,6 @@ def agent(
         public_name,
         prompt=prompt,
         input=input,
-        context=context,
         returns=returns,
         key_by=key_by,
         key=key,
@@ -321,7 +294,6 @@ def ask(
     *,
     key: str | None = None,
     input: Any = None,
-    context: Any = None,
     returns: Any = dict,
     approver: str = "human",
     timeout: str | None = None,
@@ -329,10 +301,10 @@ def ask(
     """Request typed input from a Review Queue surface.
 
     `ask(...)` mirrors `agent(...)`: `input=` is the value/artifact to review,
-    `context=` is extra context, and `returns=` is the typed response contract.
+    and `returns=` is the typed response contract.
     """
 
-    return AskCall(prompt, key=key, input=input, context=context, returns=returns, approver=approver, timeout=timeout)
+    return AskCall(prompt, key=key, input=input, returns=returns, approver=approver, timeout=timeout)
 
 
 async def parallel(calls: Iterable[Any], *, limit: int | None = None) -> list[Any]:
@@ -591,36 +563,6 @@ def _callable_public_name(fn: Callable[..., Any], *, fallback: str) -> str:
 def _public_label(name: str) -> str:
     text = str(name).strip().replace("_", " ").replace("-", " ")
     return " ".join(part for part in text.split()) or str(name)
-
-
-def _context_manifest(context: Any) -> list[dict[str, Any]]:
-    if context is None:
-        return []
-    if isinstance(context, ContextBundle):
-        return [context.to_manifest()]
-    if isinstance(context, Mapping):
-        if "label" in context and "content" in context:
-            bundle = ContextBundle(
-                label=str(context["label"]),
-                content=context.get("content"),
-                source=str(context["source"]) if context.get("source") is not None else None,
-                sha256=str(context["sha256"]) if context.get("sha256") is not None else None,
-            )
-            return [bundle.to_manifest()]
-        return [{"label": "context", "content": _jsonable(context), "sha256": _sha256_json(context)}]
-    if isinstance(context, Sequence) and not isinstance(context, (str, bytes, bytearray)):
-        bundles: list[dict[str, Any]] = []
-        for index, item in enumerate(context):
-            if isinstance(item, ContextBundle):
-                bundles.append(item.to_manifest())
-            elif isinstance(item, Mapping) and "label" in item and "content" in item:
-                bundles.extend(_context_manifest(item))
-            else:
-                jsonable = _jsonable(item)
-                bundles.append({"label": f"context:{index}", "content": jsonable, "sha256": _sha256_json(jsonable)})
-        return bundles
-    jsonable = _jsonable(context)
-    return [{"label": "context", "content": jsonable, "sha256": _sha256_json(jsonable)}]
 
 
 def _coerce_return(value: Any, returns: Any) -> Any:

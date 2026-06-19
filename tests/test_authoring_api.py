@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 
@@ -43,7 +43,6 @@ class AngleChoice:
 
 
 PROMPT_VERSION = "v1"
-CONTEXT_VERSION = "ctx-v1"
 
 
 @workflow
@@ -52,7 +51,6 @@ async def prompted_agent_workflow(inputs):
         "research",
         prompt=f"Research {inputs['topic']}",
         input={"topic": inputs["topic"]},
-        context=[{"label": "brief", "content": "api rehaul"}],
         returns=ResearchPacket,
     )
     assert isinstance(research, ResearchPacket)
@@ -60,12 +58,11 @@ async def prompted_agent_workflow(inputs):
 
 
 @workflow
-async def memoized_context_workflow(inputs):
+async def memoized_agent_workflow(inputs):
     research = await agent(
         "research",
         prompt=f"Research {inputs['topic']} with {PROMPT_VERSION}",
         input={"topic": inputs["topic"]},
-        context=[{"label": "brief", "content": CONTEXT_VERSION}],
         returns=ResearchPacket,
     )
     await ask(
@@ -171,7 +168,15 @@ def test_ask_does_not_accept_legacy_artifact_or_output_names():
         ask("Review", key="review", input={"new": True}, output=ReviewDecision)
 
 
-def test_agent_prompt_input_context_are_sent_to_runner_and_typed_output_replays(tmp_path):
+def test_agent_and_ask_do_not_accept_context_keyword():
+    legacy_kwargs: dict[str, Any] = {"context": {"old": True}}
+    with pytest.raises(TypeError, match="context"):
+        agent("research", prompt="Research", input={"topic": "x"}, **legacy_kwargs)
+    with pytest.raises(TypeError, match="context"):
+        ask("Review", key="review", input={"draft": "x"}, **legacy_kwargs)
+
+
+def test_agent_prompt_input_are_sent_to_runner_and_typed_output_replays(tmp_path):
     calls = []
 
     def runner(request):
@@ -189,8 +194,8 @@ def test_agent_prompt_input_context_are_sent_to_runner_and_typed_output_replays(
     assert calls[0]["name"] == "research"
     assert calls[0]["prompt"] == "Research typed workflows"
     assert calls[0]["input"] == {"topic": "typed workflows"}
-    assert calls[0]["context"][0]["label"] == "brief"
-    assert calls[0]["context_sha256"]
+    assert "context" not in calls[0]
+    assert "context_sha256" not in calls[0]
     assert calls[0]["fingerprint"]
     assert calls[0]["returns"].endswith(":ResearchPacket")
 
@@ -203,26 +208,24 @@ def test_agent_prompt_input_context_are_sent_to_runner_and_typed_output_replays(
     assert replay_calls == []
 
 
-def test_agent_replay_fails_loudly_when_prompt_or_context_fingerprint_changes(tmp_path):
-    global PROMPT_VERSION, CONTEXT_VERSION
+def test_agent_replay_fails_loudly_when_prompt_or_input_fingerprint_changes(tmp_path):
+    global PROMPT_VERSION
     PROMPT_VERSION = "v1"
-    CONTEXT_VERSION = "ctx-v1"
     db = tmp_path / "workflow.sqlite"
     calls = []
 
     def runner(request):
         calls.append(request)
-        return {"output": {"summary": "memoized", "sources": [request["context_sha256"]]}}
+        return {"output": {"summary": "memoized", "sources": [request["input_sha256"]]}}
 
     engine = WorkflowEngine(db, agent_runner=runner)
-    first = engine.run_until_idle(memoized_context_workflow, {"topic": "memoization"}, workflow_id="wf_memoized")
+    first = engine.run_until_idle(memoized_agent_workflow, {"topic": "memoization"}, workflow_id="wf_memoized")
 
     assert first.status == "waiting"
     assert len(calls) == 1
     operator_step = engine.workflow_status("wf_memoized")["operator_steps"][0]
 
     PROMPT_VERSION = "v2"
-    CONTEXT_VERSION = "ctx-v2"
     responded = engine.signal(
         "wf_memoized",
         "operator.response",

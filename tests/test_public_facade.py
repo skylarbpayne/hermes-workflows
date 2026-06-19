@@ -5,7 +5,6 @@ import hermes_workflows
 
 def test_top_level_public_facade_teaches_authoring_primitives_only() -> None:
     assert set(hermes_workflows.__all__) == {
-        "ContextBundle",
         "Workflow",
         "agent",
         "ask",

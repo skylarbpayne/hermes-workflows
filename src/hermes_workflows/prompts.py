@@ -89,8 +89,6 @@ def _build_runner_request(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "input",
         "input_sha256",
-        "context",
-        "context_sha256",
         "fingerprint",
         "tools",
         "skills",

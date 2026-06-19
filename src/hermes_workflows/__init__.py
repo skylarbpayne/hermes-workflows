@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .authoring import ContextBundle, agent, ask, goal, parallel, pipeline
+from .authoring import agent, ask, goal, parallel, pipeline
 from .bash import bash
 from .decorators import workflow
 from .workflow_values import Workflow
@@ -22,7 +22,6 @@ from .workflow_values import Workflow
 from . import prompts as _prompts  # noqa: F401
 
 __all__ = [
-    "ContextBundle",
     "Workflow",
     "agent",
     "ask",

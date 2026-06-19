@@ -66,9 +66,8 @@ class Summary:
 
 summary = await agent(
     "summarize_packet",
-    prompt="Summarize this packet for a launch review.",
+    prompt="Summarize this packet for maintainers as a launch review.",
     input=Packet(id="docs", body="..."),
-    context={"audience": "maintainers"},
     returns=Summary,
     model="openrouter/example-model",
     key_by="docs",
@@ -78,8 +77,7 @@ summary = await agent(
 Common arguments:
 
 - `prompt=`: instruction for the worker/agent. This is included in the durable agent request and sent to the configured runner.
-- `input=`: the primary structured payload for the work. It is serialized into the durable request, sent to the runner, and used in the replay fingerprint.
-- `context=`: supporting material sent alongside the prompt/input. The runtime stores it as labeled context bundles with hashes, includes it in the runner request, and includes its hash in the replay fingerprint. Use it for background/reference material, not for the primary object being transformed.
+- `input=`: the complete structured payload for the work, including the thing being transformed plus any constraints/reference material the worker needs. It is serialized into the durable request, sent to the runner, and used in the replay fingerprint.
 - `returns=`: dataclass, scalar, or another explicit JSON-compatible typed contract. Prefer real types over raw `dict` in public examples.
 - `key=` / `key_by=`: stable identity for replay and fan-out.
 - `model=`: requested model metadata. The resident worker maps this through configured runner/model argv templates.
@@ -105,7 +103,6 @@ decision = await ask(
     "Review this launch packet.",
     key="review_launch_packet",
     input=summary,
-    context={"risk": "public docs"},
     returns=ReviewDecision,
     approver="human:operator",
 )
