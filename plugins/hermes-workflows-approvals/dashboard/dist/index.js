@@ -93,6 +93,9 @@
   function ArtifactInlinePreview(props) {
     const render = props.render || {};
     const value = props.value;
+    if (render.render === "python-source") {
+      return e(WorkflowSourcePreview, { render: render, value: value });
+    }
     if (render.render === "inline-markdown") {
       const markdown = value && typeof value === "object" ? value.markdown : value;
       if (typeof markdown === "string" && markdown.trim()) {
@@ -120,8 +123,9 @@
     const preview = artifact.preview;
     const rows = [];
     const noisy = { approval_queue: true, entity_proposals: true, archive_candidates: true, zero_side_effect_ledger: true, ledger: true, diagnostics: true, metadata: true };
+    if (artifact.artifact_render && artifact.artifact_render.render === "python-source") noisy.source = true;
     if (preview && typeof preview === "object" && !Array.isArray(preview)) {
-      ["source_account", "account", "from", "sender", "subject", "snippet", "body_preview", "draft_to", "to", "draft_subject", "gmail_draft_id", "send_requires_approval", "path", "uri", "href", "url"].forEach(function (key) {
+      ["workflow_name", "symbol", "source_sha256", "source_hash_verified", "source_account", "account", "from", "sender", "subject", "snippet", "body_preview", "draft_to", "to", "draft_subject", "gmail_draft_id", "send_requires_approval", "path", "uri", "href", "url"].forEach(function (key) {
         if (preview[key] !== undefined && preview[key] !== null && rows.length < 10) rows.push([key, preview[key]]);
       });
       Object.keys(preview).forEach(function (key) {
@@ -451,6 +455,27 @@
     }
     if (last < code.length) parts.push(code.slice(last));
     return e("code", { className: props.className || "language-python" }, parts);
+  }
+
+  function WorkflowSourcePreview(props) {
+    const value = props.value && typeof props.value === "object" ? props.value : {};
+    const render = props.render || {};
+    const source = value.source || "";
+    const symbol = value.symbol || render.symbol || "workflow";
+    const sourceHash = value.source_sha256 || render.source_hash || "—";
+    const provenance = value.provenance;
+    return e("details", { className: "hwf-workflow-source-preview", open: true },
+      e("summary", null, "Open generated Workflow source"),
+      e("div", { className: "hwf-meta" },
+        e(Pill, { label: "Python" }),
+        e(Pill, { label: "symbol: " + symbol }),
+        e(Pill, { label: "Source hash" }),
+        e("code", { className: "hwf-run-id", title: sourceHash }, shortId(sourceHash)),
+        value.source_hash_verified === false && e(Pill, { label: "hash mismatch", className: "hwf-bad" })),
+      e("pre", { className: "hwf-code-block" }, e(PythonCode, { className: value.highlight_class || render.highlight_class || "language-python", code: source })),
+      e("details", { className: "hwf-source-provenance" },
+        e("summary", null, "Provenance"),
+        e("pre", null, provenance ? pretty(provenance) : "No runner provenance recorded for this generated Workflow.")));
   }
 
   function WorkflowSourceModal(props) {
