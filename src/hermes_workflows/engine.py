@@ -1553,7 +1553,6 @@ class WorkflowEngine:
                     item.setdefault("artifact", request.get("artifact"))
                     item.setdefault("schema", request.get("schema"))
                     item.setdefault("schema_descriptor", request.get("schema_descriptor"))
-                    item.setdefault("context", request.get("context"))
                     item.setdefault("approver", request.get("approver"))
                     item.setdefault("timeout", request.get("timeout"))
             operator_steps.append(item)
@@ -2424,7 +2423,6 @@ class WorkflowEngine:
                 "rendered_prompt": payload.get("prompt") or "",
                 "returns": "json",
                 "input": None,
-                "context": [],
                 "step_key": agent_key,
             }
 
@@ -3271,7 +3269,6 @@ class WorkflowContext:
         artifact: Any = None,
         schema: str = "json",
         schema_descriptor: Optional[dict[str, Any]] = None,
-        context: Optional[list[dict[str, Any]]] = None,
         approver: str = "human",
         timeout: Optional[str] = None,
         block: bool = True,
@@ -3284,7 +3281,6 @@ class WorkflowContext:
             artifact=artifact,
             schema=schema,
             schema_descriptor=schema_descriptor,
-            context=context,
             approver=approver,
             timeout=timeout,
             block=block,
@@ -3434,7 +3430,6 @@ class ApprovalClient:
         artifact: Any = None,
         schema: str = "json",
         schema_descriptor: Optional[dict[str, Any]] = None,
-        context: Optional[list[dict[str, Any]]] = None,
         approver: str = "human",
         timeout: Optional[str] = None,
         block: bool = True,
@@ -3451,7 +3446,6 @@ class ApprovalClient:
             "artifact": artifact,
             "schema": schema,
             "schema_descriptor": schema_descriptor,
-            "context": context or [],
             "approver": approver,
             "allowed": None,
             "authority": [],

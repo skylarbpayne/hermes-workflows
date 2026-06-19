@@ -173,7 +173,7 @@ def test_decision_tokens_use_configured_db_alias_not_raw_db_path(tmp_path, monke
     assert str(db) not in token
 
 
-def test_workflow_approval_decide_defaults_to_resume_false(tmp_path):
+def test_workflow_approval_decide_defaults_to_resume_true(tmp_path):
     from hermes_workflows.hermes_plugin_approvals import register
 
     db = tmp_path / "workflow.sqlite"
@@ -196,12 +196,11 @@ def test_workflow_approval_decide_defaults_to_resume_false(tmp_path):
     )
 
     assert result["receipt"]["action"] == "approve"
-    assert result["receipt"]["resume_requested"] is False
-    assert result["receipt"]["status"] == "decision_recorded"
-    assert result["next_step"] == "Run or queue a trusted workflow resumer for workflow_ref tests.test_hermes_plugin_approvals:plugin_approval_workflow."
-    status = WorkflowEngine(db).workflow_status("wf_plugin")
-    assert status["status"] == "running"
-    assert status["waiting_on"] == "signal:approval.decision:approve_plugin_test"
+    assert result["receipt"]["resume_requested"] is True
+    assert result["receipt"]["status"] == "running"
+    completed = WorkflowEngine(db).drain("wf_plugin")
+    assert completed.status == "completed"
+    assert completed.result["followup_ran"] is True
 
 
 def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path):

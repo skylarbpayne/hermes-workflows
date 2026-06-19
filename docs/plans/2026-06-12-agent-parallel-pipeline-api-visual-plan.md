@@ -21,7 +21,7 @@ Implemented on branch `api-agent-parallel-pipeline` in one coherent PR-sized cha
 Implemented surface:
 
 ```python
-research = await agent("research", prompt="Research typed workflows", input=brief, context=[...], returns=ResearchPacket)
+research = await agent("research", prompt="Research typed workflows", input=brief, returns=ResearchPacket)
 sections = await parallel([agent("draft_section", prompt=f"Draft {s}", input=s, key_by=s.slug, returns=SectionDraft) for s in sections])
 final_sections = await pipeline(sections, humanize_section, evidence_check_section, limit=4)
 await ask("Review final draft", key="review_final", input=draft, returns=ReviewDecision)
@@ -242,7 +242,6 @@ flowchart LR
     B --> P["rendered prompt"]
     I --> F["fingerprint"]
     P --> F
-    C["context bundle refs + hashes"] --> F
     R["returns schema"] --> F
     F --> M{"completed output for step key?"}
     M -->|"match"| O["return saved typed output"]
@@ -250,7 +249,7 @@ flowchart LR
     M -->|"mismatch"| X["fail / require explicit invalidation"]
 ```
 
-Memoization rule: saved outputs are reused only when the step key and dependency fingerprint match. The fingerprint includes rendered prompt, structured input, context bundle hashes, return schema, and runner-relevant options. Changed context must not silently reuse stale output.
+Memoization rule: saved outputs are reused only when the step key and dependency fingerprint match. The fingerprint includes rendered prompt, structured input, return schema, and runner-relevant options. Changed input must not silently reuse stale output.
 
 ## Lifecycle of one `agent(...)` call
 
@@ -370,7 +369,7 @@ gantt
 
     section One PR: replay truth
     typed return rehydration                :c1, after b6, 2d
-    context bundle + fingerprint            :c2, after c1, 2d
+    fingerprint policy                      :c2, after c1, 2d
     mismatch diagnostics / invalidation     :c3, after c2, 1d
     docs + blog workflow smoke              :c4, after c3, 1d
 ```
@@ -383,13 +382,13 @@ This is one implementation PR, not four product-language fragments. If it starts
 flowchart LR
     P0["Docs + artifact: shared language"] --> P1["One API rehaul PR"]
 
-    P1 --> A["agent(prompt=..., input=..., context=..., returns=...)"]
+    P1 --> A["agent(prompt=..., input=..., returns=...)"]
     P1 --> B["prompt builders return AgentCall[T]"]
     P1 --> C["parallel([...])"]
     P1 --> D["pipeline(items, stages...)"]
     P1 --> E["ask"]
     P1 --> F["typed replay"]
-    P1 --> G["context fingerprint guard"]
+    P1 --> G["request fingerprint guard"]
 
     A --> T1["No visible ctx in happy-path examples"]
     C --> T2["Fan-out starts missing work before waiting"]

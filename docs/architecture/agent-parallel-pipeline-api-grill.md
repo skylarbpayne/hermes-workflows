@@ -280,7 +280,7 @@ Required semantics:
 - Records a public step named `name`, scoped by lexical parent and optional `key_by`.
 - Requires a prompt, either inline or rendered by a higher-order helper.
 - Dispatches through configured Hermes Agent / subagent / subprocess runner adapter.
-- Stores the rendered prompt, structured input snapshot, context bundle digest, output schema, result, artifacts, logs, provenance, model/variant, tool/skill selection, cost metadata, and runner identity.
+- Stores the rendered prompt, structured input snapshot, output schema, result, artifacts, logs, provenance, model/variant, tool/skill selection, cost metadata, and runner identity.
 - Replays from the durable ledger without re-running the agent.
 - Returns typed output after first completion and after replay.
 - Fails closed on missing/invalid structured output when `returns` is supplied.
@@ -432,7 +432,6 @@ step_key = workflow_id + lexical_parent + name + key_by
 fingerprint = hash({
   rendered_prompt,
   structured_input_json,
-  context_bundle_hashes,
   returns_schema_id,
   tools, skills, files, model, variant, isolation,
   prompt_template_id_or_version,
@@ -444,32 +443,24 @@ Replay rule:
 1. Workflow code re-runs and constructs the same `AgentCall` descriptor.
 2. If a completed output exists for `step_key` and the fingerprint matches, return the saved typed output.
 3. If no output exists, enqueue/dispatch the agent call.
-4. If a completed output exists but the fingerprint changed, fail loudly unless the author explicitly requested a new version/attempt/invalidation. Silent re-use with changed prompt/context is poison; silent re-run is also poison.
+4. If a completed output exists but the fingerprint changed, fail loudly unless the author explicitly requested a new version/attempt/invalidation. Silent re-use with changed prompt/input is poison; silent re-run is also poison.
 
-Context injection should therefore be explicit enough to fingerprint, but not so verbose that authors hate it. Proposed shape:
+Inputs should therefore be explicit enough to fingerprint without a second fuzzy `context` channel. If a worker needs repository files, memory, constraints, or other reference material, put that material in the typed `input=` object.
 
 ```python
 research = await agent(
     "research",
     prompt=research_prompt(topic),
-    input={"topic": topic},
-    context=[
-        repo.files(["README.md", "docs/**/*.md"]),
-        memory_pack("hermes-workflows-api-principles"),
-    ],
+    input={
+        "topic": topic,
+        "reference_files": repo.files(["README.md", "docs/**/*.md"]),
+        "principles": memory_pack("hermes-workflows-api-principles"),
+    },
     returns=ResearchPacket,
 )
 ```
 
-Each context provider resolves to a bundle with:
-
-- human-readable label,
-- stable source reference,
-- content hash / version,
-- redaction metadata,
-- materialized text/files passed to the runner.
-
-Saved agent outputs should store both the result and the resolved context manifest. That gives the dashboard a truthful receipt: “this output came from this prompt, these typed inputs, and these context bundles.”
+Saved agent outputs should store both the result and the concrete request. That gives the dashboard a truthful receipt: “this output came from this prompt and this typed input.”
 
 ## Design constraints
 
@@ -616,13 +607,12 @@ Given:
 research = await agent(
     "research",
     prompt=research_prompt(topic),
-    input={"topic": topic},
-    context=[repo.files(["docs/**/*.md"])],
+    input={"topic": topic, "reference_files": repo.files(["docs/**/*.md"])},
     returns=ResearchPacket,
 )
 ```
 
-When the workflow replays after the agent result completed, `research` is a `ResearchPacket`, not a `dict`, and the runner is not called again. If the rendered prompt, structured input, context bundle digest, or return schema changes for the same key, the runtime fails loudly or requires explicit invalidation/versioning.
+When the workflow replays after the agent result completed, `research` is a `ResearchPacket`, not a `dict`, and the runner is not called again. If the rendered prompt, structured input, or return schema changes for the same key, the runtime fails loudly or requires explicit invalidation/versioning.
 
 ### Parallel topology test
 
@@ -656,7 +646,7 @@ Pre-release compatibility is intentionally removed: normal authoring uses `agent
 - **Accepted direction:** Python workflow harness with `agent`, `parallel`, `pipeline`, approvals, typed returns, and runtime-derived inspectability.
 - **Open:** exact typed-model mechanism: dataclass annotations, `returns=...`, Pydantic-like base, or all of the above.
 - **Accepted:** the API rehaul should land as one coherent PR containing `agent`, `parallel`, `pipeline`, approvals, typed replay, and context/fingerprint semantics.
-- **Open:** exact context provider API and fingerprint mismatch policy names (`version`, `invalidate`, `rerun_when`, etc.).
+- **Open:** exact fingerprint mismatch policy names (`version`, `invalidate`, `rerun_when`, etc.).
 - **Open:** stage key syntax for pipeline item identity.
 
 ## Implementation status

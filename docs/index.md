@@ -10,14 +10,17 @@ Code-first durable workflows for agent work that should not disappear into chat 
 The launch-facing SDK is intentionally small:
 
 ```python
-from hermes_workflows import agent, ask, parallel, pipeline, workflow
+from hermes_workflows import agent, ask, bash, goal, parallel, pipeline, workflow
 ```
 
-Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or external review, and `parallel(...)` / `pipeline(...)` to compose them without exposing runtime bookkeeping in normal workflow code.
+Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or external review, `bash(...)` for deterministic durable shell commands, `parallel(...)` / `pipeline(...)` for fan-out and staged item work, and `goal(...)` for bounded improve-until-accepted loops.
 
 ## Start here
 
 <div class="doc-grid" markdown="1">
+
+- **[Author workflows](authoring.html)**
+  Learn the public SDK: `workflow`, `agent`, `ask`, `bash`, `parallel`, `pipeline`, and `goal`.
 
 - **[Setup guide](setup-for-agents.html)**
   Install from source, create a registry, run a workflow, start the Workflow Worker, and reach the Review Queue.
@@ -68,11 +71,7 @@ These implementation/design records are useful for contributors, but they are no
 
 - [Agent / parallel / pipeline API grill](architecture/agent-parallel-pipeline-api-grill.html)
 - [Agent / parallel / pipeline API visual plan](plans/2026-06-12-agent-parallel-pipeline-api-visual-plan.html)
-- [Dynamic sub-workflows](architecture/dynamic-sub-workflows.html)
-- [Dashboard runtime semantics and approval artifacts](architecture/dashboard-runtime-semantics-agentstep-approvals.html)
-- [Invocation audit](operations/invocation-audit-2026-06-06.html)
 - [Dashboard UX research](ux/workflows-dashboard-ux-research-2026-06-06.html)
-- [Resumable child workflows plan](plans/2026-05-29-resumable-child-workflows.html)
 
 ## Site build
 

@@ -9,7 +9,7 @@ Hermes Workflows is ready to present as an alpha developer library for code-firs
 
 ## Current launch surface
 
-- **SDK:** `agent(...)`, `ask(...)`, `parallel(...)`, `pipeline(...)`, and `workflow` are the launch-facing authoring surface.
+- **SDK:** `agent(...)`, `ask(...)`, `bash(...)`, `goal(...)`, `parallel(...)`, `pipeline(...)`, and `workflow` are the launch-facing authoring surface.
 - **Runtime:** `hermes-workflows run ...` records/replays workflow state; `hermes-workflows worker --config ...` owns continuation.
 - **Review:** Review Queue requests and approval gates are typed, durable, and provenance-stamped.
 - **Dashboard:** the Hermes plugin reads configured DB aliases/catalog entries and avoids arbitrary SQLite path routing.
@@ -33,8 +33,9 @@ Before calling a public launch complete, verify:
 3. A public docs crawl finds no broken internal links.
 4. Package metadata includes repository, homepage, documentation, and issue URLs.
 5. Repo metadata includes homepage, description, and useful topics.
-6. Tracked-file scans do not expose credentials, private paths, or obsolete generated run packets.
-7. The repo visibility is public and the public docs URLs are reachable without private GitHub access.
+6. Launch-facing docs use the facade-first quickstart and example curriculum rather than old `ctx`/`@step` demos.
+7. Tracked-file scans do not expose credentials, private paths, or obsolete generated run packets.
+8. The repo visibility is public and the public docs URLs are reachable without private GitHub access.
 
 ## Known alpha boundaries
 

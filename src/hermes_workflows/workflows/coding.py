@@ -557,7 +557,6 @@ async def coding_workflow(ctx, inputs: CodingWorkflowInput) -> CodingWorkflowRes
         "implement_coding_plan",
         prompt=f"Implement approved coding plan for: {plan['goal']}.",
         input={"plan": plan},
-        context=[plan],
         key=INTERNAL_IMPLEMENTATION_AGENT_KEY,
         tools=["terminal", "file"],
     )

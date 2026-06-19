@@ -113,7 +113,7 @@ Provider credentials are owned by the provider CLI or the Hermes/operator enviro
 
 ### Approval decisions
 
-Approval adapters record human provenance. A chat gateway or Hermes plugin should usually choose record-only behavior (`resume=false`) so workflow code does not run inside the gateway. The resident `hermes-workflows worker --config ...` process should observe the durable response/decision and continue the workflow from the same registry/DB.
+Approval adapters record human provenance. Review actions default to immediate continuation (`resume=true`) because operators expect the run to move after they respond. A remote or untrusted adapter can pass `resume=false` for record-only behavior, then the resident `hermes-workflows worker --config ...` process observes the durable response/decision and continues the workflow from the same registry/DB.
 
 ## Seams and extension points
 
@@ -172,7 +172,7 @@ Approval decisions can fail when:
 - the workflow is already terminal
 - a record-only adapter stores the approval but no trusted resumer runs afterward
 
-Use idempotency keys tied to the source message/event. For gateway integrations, prefer record-only decisions and a separate trusted resume path when downstream code execution should not happen in the gateway process.
+Use idempotency keys tied to the source message/event. If an adapter cannot safely run local continuation itself, pass `resume=false` and rely on the resident worker.
 
 ### SQLite and workspace failures
 
@@ -182,7 +182,7 @@ The SQLite DB path is local operator state. Failures include unwritable parent d
 
 There are two examples locations by design:
 
-- `src/hermes_workflows/examples/` contains tiny installed/importable examples. These are safe for README quickstarts because `python -m pip install .` makes refs like `hermes_workflows.examples.trip:trip_planning_workflow` importable.
+- `src/hermes_workflows/examples/` contains tiny installed/importable examples. These are safe for README quickstarts because `python -m pip install .` makes refs like `hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow` importable.
 - `examples/` contains source-tree demos, deterministic fake runners, prompt files, generated-output helpers, repo-workflow experiments, and larger scenario material. These examples are useful for contributors and dogfooding, but many assume `PYTHONPATH=src:.` or a source checkout.
 
 Keep user-facing quickstarts on installed examples unless the reader is explicitly working as a contributor from the repository tree.
