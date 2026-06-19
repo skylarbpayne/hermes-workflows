@@ -1,6 +1,15 @@
+---
+layout: page
+title: Hermes Agent Review Queue plugin
+---
+
 # Hermes Agent Review Queue plugin
 
 `hermes-workflows` ships a thin Hermes Agent plugin for workflow review surfaces. The plugin does not make Hermes the workflow runtime. It lists Review Queue requests and records human responses/approval decisions against configured workflow DB aliases; the resident Workflow Worker owns continuation.
+
+<div class="disclaimer" markdown="1">
+**Affiliation disclaimer:** Hermes Workflows is an independent project by Skylar Payne. It is not affiliated with, endorsed by, sponsored by, or officially connected to Nous Research or the Nous Research Hermes Agent project.
+</div>
 
 The core package does not import Hermes. Hermes discovers the adapter through the `hermes_agent.plugins` Python entry point:
 
@@ -94,6 +103,27 @@ The dashboard tab at `/workflows` shows:
 Dashboard HTTP APIs are intentionally alias-only. They reject arbitrary SQLite paths because dashboard routes run inside the Hermes process and must not become local file readers/writers.
 
 Dashboard buttons are disabled unless `dashboard_approver_id` or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID` is configured server-side. The backend stamps provenance like `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision/response. Review actions default to `resume=true` so the configured workflow source can enqueue or run the next continuation immediately. Remote or untrusted adapters can pass `resume=false` when they need record-only behavior.
+
+## Dashboard screenshots
+
+These screenshots use sanitized example workflow data. They show the intended operator surface: source aliases, run status, Review Queue cards, schema-derived actions, and run detail receipts.
+
+<div class="screenshot-grid" markdown="1">
+<figure>
+  <img src="../assets/images/dashboard-overview.svg" alt="Sanitized dashboard overview showing workflow counts, review status, and recent runs.">
+  <figcaption>Overview: configured source, Review Queue count, recent runs, and artifact totals.</figcaption>
+</figure>
+
+<figure>
+  <img src="../assets/images/dashboard-review-queue.svg" alt="Sanitized Review Queue card showing approve and request changes buttons with provenance metadata.">
+  <figcaption>Review Queue: typed human input with schema-derived action buttons and provenance.</figcaption>
+</figure>
+
+<figure>
+  <img src="../assets/images/dashboard-run-detail.svg" alt="Sanitized run detail showing a step DAG, selected review step, and event timeline.">
+  <figcaption>Run detail: step-only DAG, event timeline, and artifact receipts.</figcaption>
+</figure>
+</div>
 
 ## Public plugin tools
 

@@ -1,3 +1,8 @@
+---
+layout: page
+title: "Runtime boundary: workflows, skills, subagents, and operators"
+---
+
 # Runtime vs Skills/Subagents Boundary
 
 Status: accepted

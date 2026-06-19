@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Hermes Workflows Review Queue screenshot</title>
+  <desc id="desc">Sanitized Review Queue screenshot showing schema-derived action buttons, reviewer feedback, and provenance.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#06121f"/><stop offset=".55" stop-color="#09233b"/><stop offset="1" stop-color="#22143d"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#22d3ee"/><stop offset=".55" stop-color="#2dd4bf"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="22" stdDeviation="22" flood-color="#020617" flood-opacity=".42"/></filter>
+    <style>
+      .h{font:800 40px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fbff;letter-spacing:-.03em}.h2{font:800 25px ui-sans-serif,system-ui;fill:#e5f3ff;letter-spacing:-.02em}.s{font:500 17px ui-sans-serif,system-ui;fill:#93abc8}.t{font:700 13px ui-sans-serif,system-ui;fill:#8ea9c9;letter-spacing:.1em;text-transform:uppercase}.m{font:600 15px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#bfdbfe}.card{fill:#0f1b2f;stroke:#294360;stroke-width:1.2}.panel{fill:#111f35;stroke:#315074;stroke-width:1}
+    </style>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <rect x="72" y="58" width="1296" height="784" rx="34" fill="#08111f" stroke="#28405f" filter="url(#shadow)"/>
+  <text x="128" y="128" class="t">Review Queue</text>
+  <text x="128" y="178" class="h">Human input, typed decisions, real receipts</text>
+  <text x="128" y="214" class="s">Cards come from workflow `ask(...)` / approval gates and render controls from `returns=` schemas.</text>
+
+  <rect x="128" y="268" width="790" height="512" rx="28" class="card"/>
+  <rect x="164" y="306" width="142" height="32" rx="16" fill="#134e4a"/><text x="188" y="328" class="t" fill="#99f6e4">Waiting</text>
+  <text x="164" y="380" class="h2">Review this launch packet</text>
+  <text x="164" y="416" class="s">workflow_id: </text><text x="270" y="416" class="m">wf_docs_review</text>
+  <text x="164" y="448" class="s">key: </text><text x="212" y="448" class="m">review_draft_packet</text>
+
+  <rect x="164" y="488" width="686" height="124" rx="20" class="panel"/>
+  <text x="196" y="526" class="t">Input artifact</text>
+  <text x="196" y="564" class="s">Title: Review packet: Dashboard screenshot packet</text>
+  <text x="196" y="594" class="s">Risk: Confirm Review Queue response before external side effects.</text>
+
+  <text x="164" y="666" class="t">Schema-derived actions</text>
+  <rect x="164" y="692" width="130" height="48" rx="24" fill="#2dd4bf"/><text x="199" y="723" font-family="ui-sans-serif,system-ui" font-size="17" font-weight="900" fill="#04201d">Approve</text>
+  <rect x="310" y="692" width="204" height="48" rx="24" fill="#19283e" stroke="#4b6383"/><text x="338" y="723" font-family="ui-sans-serif,system-ui" font-size="17" font-weight="900" fill="#e5f3ff">Request changes</text>
+  <rect x="532" y="692" width="318" height="48" rx="24" fill="#0b1322" stroke="#334155"/><text x="562" y="723" font-family="ui-sans-serif,system-ui" font-size="16" font-weight="800" fill="#94a3b8">Feedback required for changes</text>
+
+  <rect x="966" y="268" width="318" height="512" rx="28" class="card"/>
+  <text x="1000" y="326" class="h2">Provenance</text>
+  <text x="1000" y="370" class="t">Recorded by</text><text x="1000" y="402" class="s">operator</text>
+  <text x="1000" y="452" class="t">Channel</text><text x="1000" y="484" class="s">hermes-dashboard</text>
+  <text x="1000" y="534" class="t">Resume</text><text x="1000" y="566" class="s">trusted local adapter: true</text>
+  <text x="1000" y="616" class="t">Safety</text><text x="1000" y="648" class="s">No send / publish / deploy</text>
+  <rect x="1000" y="692" width="214" height="48" rx="24" fill="url(#accent)"/><text x="1030" y="723" font-family="ui-sans-serif,system-ui" font-size="17" font-weight="900" fill="#031522">Record response</text>
+</svg>

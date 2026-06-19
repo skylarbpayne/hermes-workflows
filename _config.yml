@@ -2,6 +2,10 @@ title: hermes-workflows
 description: Durable Python workflow runtime for agent and automation projects.
 theme: minima
 markdown: kramdown
+highlighter: rouge
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
 plugins: []
 defaults:
   - scope:
