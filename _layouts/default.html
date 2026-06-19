@@ -6,35 +6,140 @@
   <title>{% if page.title %}{{ page.title | escape }} | {% endif %}{{ site.title | escape }}</title>
   <meta name="description" content="{{ site.description | escape }}">
   <style>
-    :root { color-scheme: light dark; --bg:#0b1020; --panel:#111827; --text:#e5e7eb; --muted:#9ca3af; --link:#7dd3fc; --border:#253044; --code:#0f172a; }
-    @media (prefers-color-scheme: light) { :root { --bg:#ffffff; --panel:#f8fafc; --text:#111827; --muted:#4b5563; --link:#0369a1; --border:#d1d5db; --code:#f1f5f9; } }
+    :root {
+      color-scheme: dark;
+      --bg:#06111f;
+      --bg-2:#0b1730;
+      --panel:#0f1b2f;
+      --panel-2:#14243b;
+      --text:#eaf2ff;
+      --muted:#9db2cf;
+      --link:#67e8f9;
+      --link-strong:#2dd4bf;
+      --border:#2c4667;
+      --code:#0b1220;
+      --code-border:#263a59;
+      --accent:#2dd4bf;
+      --accent-2:#60a5fa;
+      --accent-3:#c084fc;
+      --warn:#fbbf24;
+      --danger:#fb7185;
+      --ok:#34d399;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .35);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --bg:#f7fbff;
+        --bg-2:#eaf4ff;
+        --panel:#ffffff;
+        --panel-2:#f1f7ff;
+        --text:#0f172a;
+        --muted:#475569;
+        --link:#0369a1;
+        --link-strong:#0f766e;
+        --border:#cbd5e1;
+        --code:#f8fafc;
+        --code-border:#dbeafe;
+        --shadow: 0 18px 50px rgba(15, 23, 42, .12);
+      }
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 18% 14%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 34rem),
+        radial-gradient(circle at 84% 0%, color-mix(in srgb, var(--accent-3) 18%, transparent), transparent 34rem),
+        linear-gradient(135deg, var(--bg), var(--bg-2));
+      color: var(--text);
+      line-height: 1.65;
+    }
     a { color: var(--link); text-decoration-thickness: .08em; text-underline-offset: .18em; }
-    .site-header { border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 82%, transparent); position: sticky; top: 0; z-index: 20; backdrop-filter: blur(12px); }
+    a:hover { color: var(--link-strong); }
+    .site-header {
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--panel) 84%, transparent);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(18px);
+      box-shadow: 0 12px 34px rgba(2, 6, 23, .18);
+    }
     .site-shell { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
-    .site-header .site-shell { display: flex; align-items: center; gap: 18px; min-height: 64px; flex-wrap: wrap; }
-    .brand { font-weight: 800; letter-spacing: -0.03em; color: var(--text); text-decoration: none; font-size: 1.1rem; }
-    .site-nav { display: flex; flex-wrap: wrap; gap: 10px 14px; font-size: .93rem; }
-    .site-nav a { color: var(--muted); text-decoration: none; }
+    .site-header .site-shell { display: flex; align-items: center; gap: 18px; min-height: 68px; flex-wrap: wrap; }
+    .brand { font-weight: 900; letter-spacing: -0.045em; color: var(--text); text-decoration: none; font-size: 1.16rem; display:inline-flex; align-items:center; gap:.55rem; }
+    .brand::before { content:""; width: 1rem; height: 1rem; border-radius: .35rem; background: linear-gradient(135deg, var(--accent), var(--accent-2), var(--accent-3)); box-shadow: 0 0 26px color-mix(in srgb, var(--accent) 44%, transparent); }
+    .site-nav { display: flex; flex-wrap: wrap; gap: 10px 14px; font-size: .92rem; }
+    .site-nav a { color: var(--muted); text-decoration: none; font-weight: 700; }
     .site-nav a:hover { color: var(--link); }
-    main.site-shell { padding-top: 32px; padding-bottom: 80px; }
-    .content { max-width: 920px; }
-    h1, h2, h3 { line-height: 1.18; letter-spacing: -0.025em; }
-    h1 { font-size: clamp(2rem, 4vw, 3.2rem); margin: 0 0 1rem; }
-    h2 { margin-top: 2.4rem; padding-top: .6rem; border-top: 1px solid var(--border); }
-    p, li { font-size: 1rem; }
-    code { background: var(--code); border: 1px solid var(--border); border-radius: .35rem; padding: .12rem .28rem; }
-    pre { background: var(--code); border: 1px solid var(--border); border-radius: .7rem; padding: 1rem; overflow-x: auto; }
-    pre code { border: 0; padding: 0; background: transparent; }
-    table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
-    th, td { border: 1px solid var(--border); padding: .55rem .7rem; vertical-align: top; }
-    th { background: var(--panel); }
+    main.site-shell { padding-top: 38px; padding-bottom: 84px; }
+    .content {
+      max-width: 960px;
+      background: color-mix(in srgb, var(--panel) 76%, transparent);
+      border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+      border-radius: 28px;
+      padding: clamp(1.2rem, 3vw, 2.4rem);
+      box-shadow: var(--shadow);
+    }
+    h1, h2, h3 { line-height: 1.14; letter-spacing: -0.035em; }
+    h1 { font-size: clamp(2.25rem, 5vw, 4rem); margin: 0 0 1rem; }
+    h2 { margin-top: 2.7rem; padding-top: .85rem; border-top: 1px solid var(--border); font-size: clamp(1.55rem, 3vw, 2.2rem); }
+    h3 { font-size: 1.3rem; margin-top: 1.8rem; }
+    p, li { font-size: 1.02rem; }
+    strong { color: color-mix(in srgb, var(--text) 92%, var(--accent)); }
+    blockquote {
+      margin: 1.4rem 0;
+      padding: 1rem 1.2rem;
+      border-left: 4px solid var(--accent);
+      background: color-mix(in srgb, var(--panel-2) 72%, transparent);
+      border-radius: 0 1rem 1rem 0;
+      color: var(--text);
+    }
+    code { background: var(--code); border: 1px solid var(--code-border); border-radius: .45rem; padding: .13rem .32rem; color: color-mix(in srgb, var(--text) 88%, var(--accent)); }
+    pre {
+      background: linear-gradient(180deg, color-mix(in srgb, var(--code) 92%, #111827), var(--code));
+      border: 1px solid var(--code-border);
+      border-radius: 1rem;
+      padding: 1.05rem 1.15rem;
+      overflow-x: auto;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 16px 40px rgba(2,6,23,.18);
+    }
+    pre code { border: 0; padding: 0; background: transparent; color: inherit; }
+    .highlight { border-radius: 1rem; }
+    .highlight pre { margin: 1rem 0; }
+    .highlight .k, .highlight .kd, .highlight .kn, .highlight .ow { color: #c084fc; font-weight: 800; }
+    .highlight .nf, .highlight .na, .highlight .nt { color: #67e8f9; }
+    .highlight .s, .highlight .s1, .highlight .s2, .highlight .dl { color: #86efac; }
+    .highlight .mi, .highlight .mf, .highlight .kc, .highlight .bp { color: #fbbf24; }
+    .highlight .c, .highlight .c1, .highlight .cm { color: #7dd3fc; opacity: .72; font-style: italic; }
+    .highlight .o, .highlight .p { color: #cbd5e1; }
+    .language-bash .nb, .language-sh .nb { color: #2dd4bf; }
+    table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; margin: 1.2rem 0; }
+    th, td { border: 1px solid var(--border); padding: .6rem .75rem; vertical-align: top; }
+    th { background: var(--panel-2); }
+    img { max-width: 100%; height: auto; }
+    figure { margin: 1.6rem 0; }
+    figcaption { color: var(--muted); font-size: .92rem; margin-top: .55rem; }
     .doc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
     .doc-grid ul { display: contents; }
-    .doc-grid li { list-style: none; background: var(--panel); border: 1px solid var(--border); border-radius: .8rem; padding: 1rem; }
-    .mermaid { background: #fff; color: #111827; border: 1px solid var(--border); border-radius: .9rem; padding: 1rem; margin: 1.2rem 0; overflow-x: auto; }
+    .doc-grid li { list-style: none; background: var(--panel-2); border: 1px solid var(--border); border-radius: 1rem; padding: 1.05rem; transition: transform .16s ease, border-color .16s ease; }
+    .doc-grid li:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); }
+    .screenshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin: 1.4rem 0; }
+    .screenshot-grid figure { margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: 1rem; padding: .75rem; }
+    .screenshot-grid img, .screenshot-frame { border-radius: .75rem; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); box-shadow: var(--shadow); background: #07111f; }
+    .notice, .disclaimer {
+      border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+      background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 13%, var(--panel)), color-mix(in srgb, var(--accent-3) 10%, var(--panel)));
+      border-radius: 1rem;
+      padding: 1rem 1.1rem;
+      margin: 1.2rem 0;
+    }
+    .disclaimer { border-color: color-mix(in srgb, var(--warn) 52%, var(--border)); }
+    .mermaid { background: #fff; color: #111827; border: 1px solid var(--border); border-radius: 1rem; padding: 1rem; margin: 1.2rem 0; overflow-x: auto; }
     footer { color: var(--muted); border-top: 1px solid var(--border); margin-top: 3rem; padding-top: 1.25rem; font-size: .9rem; }
+    footer .fine-print { margin-top: .6rem; font-size: .85rem; }
   </style>
 </head>
 <body>
@@ -48,14 +153,16 @@
         <a href="{{ site.baseurl }}/docs/architecture/domain-model-and-seams.html">Architecture</a>
         <a href="{{ site.baseurl }}/docs/architecture/runtime-vs-skills-subagents.html">Runtime boundary</a>
         <a href="{{ site.baseurl }}/docs/operations/inspectability-cookbook.html">Inspectability</a>
-        <a href="{{ site.baseurl }}/docs/summary.html">Launch readiness</a>
         <a href="{{ site.baseurl }}/">Project</a>
       </nav>
     </div>
   </header>
   <main class="site-shell">
     <article class="content">{{ content }}</article>
-    <footer>Code-first durable workflows for agent work, Review Queues, Workflow Workers, and receipts.</footer>
+    <footer>
+      Code-first durable workflows for agent work, Review Queues, Workflow Workers, and receipts.
+      <div class="fine-print">Hermes Workflows is an independent project. It is not affiliated with, endorsed by, sponsored by, or officially connected to Nous Research or the Nous Research Hermes Agent project.</div>
+    </footer>
   </main>
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';

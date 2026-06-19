@@ -1,3 +1,8 @@
+---
+layout: page
+title: Dashboard UX research
+---
+
 # /workflows UX research and product direction
 
 Date: 2026-06-06

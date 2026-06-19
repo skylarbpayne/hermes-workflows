@@ -1,3 +1,8 @@
+---
+layout: page
+title: First real repo launch workflow report
+---
+
 # Repo launch packet: hermes-workflows
 
 Approved by: maintainer-approval

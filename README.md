@@ -2,6 +2,8 @@
 
 `hermes-workflows` makes long-running agent work reviewable instead of ephemeral. It gives trusted Python workflow projects durable state, typed agent work, typed human review, a resident Workflow Worker, and receipts that survive process exits, review pauses, and restarts.
 
+> **Affiliation disclaimer:** Hermes Workflows is an independent project by Skylar Payne. It is not affiliated with, endorsed by, sponsored by, or officially connected to Nous Research or the Nous Research Hermes Agent project.
+
 The public authoring surface is intentionally small:
 
 ```python

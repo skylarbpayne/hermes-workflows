@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">Hermes Workflows run detail screenshot</title>
+  <desc id="desc">Sanitized run detail screenshot showing a step-only workflow DAG, timeline, and artifact receipts.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset=".6" stop-color="#10243f"/><stop offset="1" stop-color="#28123d"/></linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#2dd4bf"/><stop offset="1" stop-color="#60a5fa"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="22" stdDeviation="22" flood-color="#020617" flood-opacity=".38"/></filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#60a5fa"/></marker>
+    <style>
+      .h{font:800 39px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fbff;letter-spacing:-.03em}.h2{font:800 24px ui-sans-serif,system-ui;fill:#e5f3ff;letter-spacing:-.02em}.s{font:500 16px ui-sans-serif,system-ui;fill:#93abc8}.t{font:700 12px ui-sans-serif,system-ui;fill:#8ea9c9;letter-spacing:.1em;text-transform:uppercase}.m{font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#bfdbfe}.card{fill:#0f1b2f;stroke:#294360;stroke-width:1.2}.node{fill:#111f35;stroke:#3b82f6;stroke-width:1.5}.done{fill:#10291f;stroke:#22c55e;stroke-width:1.5}.wait{fill:#14263a;stroke:#22d3ee;stroke-width:1.5}
+    </style>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <rect x="72" y="58" width="1296" height="784" rx="34" fill="#08111f" stroke="#28405f" filter="url(#shadow)"/>
+  <text x="128" y="128" class="t">Run detail</text>
+  <text x="128" y="178" class="h">Step DAG, event timeline, artifact receipts</text>
+  <text x="128" y="214" class="s">The dashboard shows workflow steps and provenance without exposing wait/signal plumbing as product concepts.</text>
+
+  <rect x="128" y="264" width="760" height="500" rx="28" class="card"/>
+  <text x="166" y="318" class="h2">DAG</text>
+  <path d="M245 450 C330 450,330 450,408 450" fill="none" stroke="url(#edge)" stroke-width="4" marker-end="url(#arrow)"/>
+  <path d="M558 450 C640 450,640 450,718 450" fill="none" stroke="url(#edge)" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="166" y="398" width="108" height="104" rx="24" class="done"/><text x="196" y="440" class="t" fill="#bbf7d0">Start</text><text x="190" y="472" class="s" fill="#dcfce7">workflow</text>
+  <rect x="408" y="398" width="150" height="104" rx="24" class="done"/><text x="438" y="440" class="t" fill="#bbf7d0">Worker</text><text x="438" y="472" class="s" fill="#dcfce7">draft packet</text>
+  <rect x="718" y="398" width="132" height="104" rx="24" class="wait"/><text x="752" y="440" class="t" fill="#a5f3fc">Review</text><text x="746" y="472" class="s" fill="#cffafe">waiting</text>
+
+  <rect x="166" y="582" width="684" height="126" rx="22" fill="#111f35" stroke="#315074"/>
+  <text x="198" y="624" class="t">Selected step</text><text x="198" y="660" class="h2">Review this draft packet</text><text x="198" y="692" class="s">Status: waiting · schema: ReviewDecision · actions: approve / request_changes</text>
+
+  <rect x="932" y="264" width="352" height="500" rx="28" class="card"/>
+  <text x="966" y="318" class="h2">Timeline</text>
+  <circle cx="986" cy="372" r="8" fill="#22c55e"/><text x="1010" y="378" class="m">WorkflowStarted</text><text x="1010" y="404" class="s">input recorded</text>
+  <line x1="986" y1="382" x2="986" y2="452" stroke="#315074" stroke-width="3"/>
+  <circle cx="986" cy="462" r="8" fill="#22c55e"/><text x="1010" y="468" class="m">StepCompleted</text><text x="1010" y="494" class="s">draft_packet output</text>
+  <line x1="986" y1="472" x2="986" y2="542" stroke="#315074" stroke-width="3"/>
+  <circle cx="986" cy="552" r="8" fill="#22d3ee"/><text x="1010" y="558" class="m">ReviewRequested</text><text x="1010" y="584" class="s">human input waiting</text>
+  <line x1="986" y1="562" x2="986" y2="632" stroke="#315074" stroke-width="3"/>
+  <circle cx="986" cy="642" r="8" fill="#64748b"/><text x="1010" y="648" class="m">Next</text><text x="1010" y="674" class="s">worker resumes after response</text>
+</svg>

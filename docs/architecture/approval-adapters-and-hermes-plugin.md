@@ -1,3 +1,8 @@
+---
+layout: page
+title: Approval adapters and Review Queue
+---
+
 # Approval adapters, Review Queue, and Hermes plugin path
 
 `hermes-workflows` core stays runtime-agnostic. Human review is useful only if people can answer from the surfaces they already use, but the runtime should not become Discord-specific, Telegram-specific, or Hermes-specific.

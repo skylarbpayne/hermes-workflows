@@ -7,6 +7,10 @@ title: Hermes Workflows documentation
 
 Code-first durable workflows for agent work that should not disappear into chat history. Hermes Workflows gives Python projects persistent workflow state, typed agent work, typed human review, a resident **Workflow Worker**, and inspectable receipts for restarts, approvals, retries, and handoffs.
 
+<div class="disclaimer" markdown="1">
+**Affiliation disclaimer:** Hermes Workflows is an independent project by Skylar Payne. It is not affiliated with, endorsed by, sponsored by, or officially connected to Nous Research or the Nous Research Hermes Agent project.
+</div>
+
 The launch-facing SDK is intentionally small:
 
 ```python
@@ -37,10 +41,14 @@ Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or externa
 - **[Runtime boundary](architecture/runtime-vs-skills-subagents.html)**
   What belongs in durable workflow state versus prompts, skills, subagents, and operators.
 
-- **[Launch readiness](summary.html)**
-  Public-launch status, docs/accessibility notes, and verification expectations.
-
 </div>
+
+## Dashboard preview
+
+<figure>
+  <img class="screenshot-frame" src="assets/images/dashboard-overview.svg" alt="Sanitized screenshot of the Hermes Workflows dashboard overview with run counts, Review Queue status, and recent workflow runs.">
+  <figcaption>Sanitized example dashboard overview. The live dashboard uses configured workflow DB aliases so the CLI, worker, and Review Queue read the same state.</figcaption>
+</figure>
 
 ## Runtime model in one pass
 

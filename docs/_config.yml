@@ -2,6 +2,10 @@ title: Hermes Workflows
 description: Code-first durable workflow runtime for agent work, Review Queues, Workflow Workers, and receipts.
 theme: minima
 markdown: kramdown
+highlighter: rouge
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
 plugins: []
 exclude:
   - output/
