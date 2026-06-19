@@ -46,6 +46,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Strict JSON CLI adapter for hermes-workflows agent(...) runners.")
     parser.add_argument("--agent-command", required=True, help="Provider CLI executable/argv0.")
     parser.add_argument("--agent-arg", action="append", default=[], help="Provider CLI argv entry appended after --agent-command.")
+    parser.add_argument(
+        "--agent-model-arg",
+        action="append",
+        default=[],
+        help="Provider CLI argv template appended only when request.model is set; repeat for multiple args. Use {model} as the model placeholder.",
+    )
+    parser.add_argument(
+        "--agent-prompt-arg",
+        help=(
+            "Provider CLI flag that should receive the rendered agent prompt as the following argv value "
+            "instead of stdin, e.g. --agent-prompt-arg --oneshot for Hermes."
+        ),
+    )
     parser.add_argument("--response-mode", choices=["json-object"], default="json-object")
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
     parser.add_argument("--max-agent-stdout-bytes", type=int, default=1_000_000)
@@ -68,6 +81,8 @@ def _normalize_agent_arg_options(argv: Sequence[str] | None) -> Sequence[str] | 
     options. The public contract intentionally uses repeated `--agent-arg`
     entries for provider argv, including provider flags like `--json`, so we
     rewrite only that spelling to the unambiguous `--agent-arg=<value>` form.
+    `--agent-model-arg` has the same shape because model-specific provider
+    flags commonly look like `--model`.
     """
 
     if argv is None:
@@ -76,13 +91,32 @@ def _normalize_agent_arg_options(argv: Sequence[str] | None) -> Sequence[str] | 
     index = 0
     while index < len(argv):
         item = str(argv[index])
-        if item == "--agent-arg" and index + 1 < len(argv):
-            normalized.append(f"--agent-arg={argv[index + 1]}")
+        if item in {"--agent-arg", "--agent-model-arg", "--agent-prompt-arg"} and index + 1 < len(argv):
+            normalized.append(f"{item}={argv[index + 1]}")
             index += 2
             continue
         normalized.append(item)
         index += 1
     return normalized
+
+
+def expand_model_arg_templates(model_arg_templates: Sequence[str], request: dict[str, Any]) -> list[str]:
+    """Expand opt-in provider argv templates for request.model.
+
+    Providers do not agree on a standard model flag, so hermes-workflows only
+    appends model argv when the operator configures one or more templates. Each
+    configured argv entry is appended when `request["model"]` is a non-empty
+    string, with literal `{model}` occurrences replaced by that model.
+    Templates without `{model}` are allowed for providers that use a flag/value
+    pair such as `--agent-model-arg --model --agent-model-arg {model}`.
+    """
+
+    model = request.get("model")
+    if model is None or model == "" or not model_arg_templates:
+        return []
+    if not isinstance(model, str):
+        raise AdapterError("invalid_runner_request", "request.model must be a string when present")
+    return [str(template).replace("{model}", model) for template in model_arg_templates]
 
 
 def load_runner_request(stdin_text: str) -> dict[str, Any]:
@@ -279,6 +313,7 @@ def parse_provider_response(stdout: str, request: dict[str, Any], provider_resul
         "agent_command": sanitized_command(provider_result.argv, secrets),
         "request_kind": request.get("kind"),
         "request_name": request.get("name"),
+        "request_model": request.get("model"),
         "request_sha256": sha256_json(request),
         "rendered_prompt_sha256": request.get("rendered_prompt_sha256"),
         "provider_provenance": sanitize_provider_provenance(provider_provenance or {}, secrets),
@@ -428,7 +463,7 @@ def redact_text(text: str, secrets: set[str] | None = None) -> str:
     for secret in sorted(secrets or set(), key=len, reverse=True):
         if secret:
             redacted = redacted.replace(secret, "[REDACTED]")
-    redacted = re.sub(r"(agent(...) request:\s*).*", r"\1[REDACTED]", redacted, flags=re.DOTALL)
+    redacted = re.sub(r"(agent\(\.\.\.\) request:\s*).*", r"\1[REDACTED]", redacted, flags=re.DOTALL)
     redacted = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", redacted)
     redacted = re.sub(
         r"(?i)\b([A-Za-z0-9_.-]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|COOKIE)[A-Za-z0-9_.-]*)(\s*[:=]\s*)(\"?)[^\s,}\]\"']+",
@@ -446,15 +481,21 @@ def _duration_ms(started: float) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     started = time.monotonic()
     args = parse_args(argv)
-    agent_argv = [str(args.agent_command), *[str(part) for part in args.agent_arg]]
+    base_agent_argv = [str(args.agent_command), *[str(part) for part in args.agent_arg]]
+    agent_argv = list(base_agent_argv)
     request: dict[str, Any] | None = None
     try:
         stdin_text = sys.stdin.read()
         request = load_runner_request(stdin_text)
+        agent_argv = [*base_agent_argv, *expand_model_arg_templates(args.agent_model_arg, request)]
         prompt = build_provider_prompt(request)
+        provider_stdin = prompt
+        if args.agent_prompt_arg:
+            agent_argv = [*agent_argv, str(args.agent_prompt_arg), prompt]
+            provider_stdin = ""
         provider_result = run_agent_command(
             agent_argv,
-            prompt,
+            provider_stdin,
             args.timeout_seconds,
             args.max_agent_stdout_bytes,
             args.max_agent_stderr_bytes,

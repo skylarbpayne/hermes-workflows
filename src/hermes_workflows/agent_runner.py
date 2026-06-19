@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from .agent_cli_adapter import (
     AdapterError,
     build_provider_prompt,
+    expand_model_arg_templates,
     parse_provider_response,
     redacted_error,
     run_agent_command,
@@ -25,6 +26,8 @@ class SubprocessAgentRunner:
     """
 
     argv: Sequence[str]
+    model_arg_templates: Sequence[str] = ()
+    request_stdin_mode: str = "prompt"
     timeout_seconds: float = 120.0
     max_agent_stdout_bytes: int = 1_000_000
     max_agent_stderr_bytes: int = 4096
@@ -35,16 +38,23 @@ class SubprocessAgentRunner:
             raise ValueError("agent runner command must not be empty")
         if self.timeout_seconds <= 0:
             raise ValueError("agent runner timeout must be positive")
+        if self.request_stdin_mode not in {"prompt", "json"}:
+            raise ValueError("agent runner request_stdin_mode must be 'prompt' or 'json'")
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         argv = [str(part) for part in self.argv]
         provider_result = None
         try:
-            prompt = build_provider_prompt(request)
+            argv = [*argv, *expand_model_arg_templates(self.model_arg_templates, request)]
+            stdin_payload = (
+                json.dumps(request, sort_keys=True, separators=(",", ":"))
+                if self.request_stdin_mode == "json"
+                else build_provider_prompt(request)
+            )
             provider_result = run_agent_command(
                 argv,
-                prompt,
+                stdin_payload,
                 self.timeout_seconds,
                 self.max_agent_stdout_bytes,
                 self.max_agent_stderr_bytes,
@@ -101,6 +111,8 @@ def build_agent_runner(
     *,
     agent_command: str | None,
     agent_args: Sequence[str] | None = None,
+    agent_model_args: Sequence[str] | None = None,
+    agent_request_stdin: str = "prompt",
     timeout_seconds: float = 120.0,
     max_stdout_bytes: int = 1_000_000,
     max_stderr_bytes: int = 4096,
@@ -110,6 +122,8 @@ def build_agent_runner(
         return None
     return SubprocessAgentRunner(
         [agent_command, *list(agent_args or [])],
+        model_arg_templates=list(agent_model_args or []),
+        request_stdin_mode=agent_request_stdin,
         timeout_seconds=timeout_seconds,
         max_agent_stdout_bytes=max_stdout_bytes,
         max_agent_stderr_bytes=max_stderr_bytes,

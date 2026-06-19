@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import shutil
@@ -7,6 +8,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from hermes_workflows.cli import agent_runner_from_args, normalize_agent_value_options
 
 
 WORKFLOW_MODULE = '''
@@ -106,6 +109,49 @@ print(json.dumps({
 }))
 '''
 
+AGENT_MODEL_RUNNER_WORKFLOW_MODULE = '''
+from hermes_workflows import agent, workflow
+
+@workflow
+async def agent_model_runner_workflow(ctx, inputs):
+    packet = await agent(
+        "writer",
+        prompt="Write a short packet.",
+        input={"topic": inputs["topic"]},
+        returns=dict,
+        key="write_packet",
+        model=inputs["model"],
+    )
+    return {"packet": packet}
+'''
+
+AGENT_MODEL_PROVIDER_MODULE = '''
+import json
+import sys
+
+sys.stdin.read()
+print(json.dumps({
+    "output": {"argv": sys.argv[1:]},
+    "provenance": {"model": "fake-provider"},
+}))
+'''
+
+HERMES_SUBAGENT_PROVIDER_MODULE = '''
+import json
+import sys
+
+argv = sys.argv[1:]
+prompt = ""
+if "--oneshot" in argv:
+    prompt = argv[argv.index("--oneshot") + 1]
+elif "-z" in argv:
+    prompt = argv[argv.index("-z") + 1]
+print(json.dumps({
+    "output": {"argv": argv, "prompt_has_runner_request": "agent.runner_request.v1" in prompt},
+    "provenance": {"model": argv[argv.index("--model") + 1] if "--model" in argv else None},
+}))
+'''
+
 
 def run_cli(tmp_path, *args, env_extra=None):
     env = os.environ.copy()
@@ -139,6 +185,209 @@ def run_worker(tmp_path, workflow_ref, db, workflow_id, *, max_commands=None, on
     if max_commands is not None:
         args.extend(["--max-commands", str(max_commands)])
     return json.loads(run_cli(tmp_path, *args).stdout)
+
+
+def test_agent_runner_from_args_reads_agent_model_args_from_env(monkeypatch):
+    monkeypatch.setenv("HERMES_WORKFLOWS_AGENT_COMMAND", "provider")
+    monkeypatch.delenv("HERMES_WORKFLOWS_AGENT_ARGS_JSON", raising=False)
+    monkeypatch.setenv("HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON", json.dumps(["--provider-model", "{model}"]))
+    args = argparse.Namespace(
+        agent_command=None,
+        agent_arg=[],
+        agent_model_arg=[],
+        agent_request_stdin=None,
+        agent_timeout_seconds=120.0,
+        max_agent_stdout_bytes=1_000_000,
+        max_agent_stderr_bytes=4096,
+    )
+
+    runner = agent_runner_from_args(args)
+
+    assert runner is not None
+    assert runner.argv == ["provider"]
+    assert runner.model_arg_templates == ["--provider-model", "{model}"]
+
+
+def test_agent_runner_from_args_prefers_cli_model_args_over_env(monkeypatch):
+    monkeypatch.setenv("HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON", json.dumps(["--env-model", "{model}"]))
+    args = argparse.Namespace(
+        agent_command="provider",
+        agent_arg=["--base"],
+        agent_model_arg=["--cli-model={model}"],
+        agent_request_stdin=None,
+        agent_timeout_seconds=120.0,
+        max_agent_stdout_bytes=1_000_000,
+        max_agent_stderr_bytes=4096,
+    )
+
+    runner = agent_runner_from_args(args)
+
+    assert runner is not None
+    assert runner.argv == ["provider", "--base"]
+    assert runner.model_arg_templates == ["--cli-model={model}"]
+
+
+def test_cli_normalizes_option_like_agent_model_arg_values():
+    assert normalize_agent_value_options(
+        ["worker", "wf:run", "--agent-model-arg", "--model", "--agent-model-arg", "{model}"]
+    ) == ["worker", "wf:run", "--agent-model-arg=--model", "--agent-model-arg={model}"]
+
+
+def test_worker_cli_respects_agent_model_arg_templates(tmp_path):
+    (tmp_path / "agent_model_runner_wf.py").write_text(AGENT_MODEL_RUNNER_WORKFLOW_MODULE)
+    provider = tmp_path / "agent_model_provider.py"
+    provider.write_text(AGENT_MODEL_PROVIDER_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "agent_model_runner_wf:agent_model_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_model_runner_cli",
+            "--input-json",
+            json.dumps({"topic": "package worker", "model": "hermes-test-model"}),
+        ).stdout
+    )
+    assert started["status"] == "running"
+
+    completed = json.loads(
+        run_cli(
+            tmp_path,
+            "worker",
+            "agent_model_runner_wf:agent_model_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_model_runner_cli",
+            "--worker-id",
+            "test-agent-model-runner-worker",
+            "--max-commands",
+            "10",
+            "--agent-command",
+            sys.executable,
+            "--agent-arg",
+            str(provider),
+            "--agent-model-arg",
+            "--provider-model={model}",
+        ).stdout
+    )
+
+    assert completed["status"] == "completed"
+    assert completed["result"]["packet"]["argv"] == ["--provider-model=hermes-test-model"]
+
+
+def test_worker_cli_respects_agent_model_arg_env_templates_end_to_end(tmp_path):
+    (tmp_path / "agent_model_runner_wf.py").write_text(AGENT_MODEL_RUNNER_WORKFLOW_MODULE)
+    provider = tmp_path / "agent_model_provider.py"
+    provider.write_text(AGENT_MODEL_PROVIDER_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "agent_model_runner_wf:agent_model_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_model_runner_env",
+            "--input-json",
+            json.dumps({"topic": "package worker", "model": "hermes-env-model"}),
+        ).stdout
+    )
+    assert started["status"] == "running"
+
+    completed = json.loads(
+        run_cli(
+            tmp_path,
+            "worker",
+            "agent_model_runner_wf:agent_model_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_agent_model_runner_env",
+            "--worker-id",
+            "test-agent-model-env-worker",
+            "--max-commands",
+            "10",
+            env_extra={
+                "HERMES_WORKFLOWS_AGENT_COMMAND": sys.executable,
+                "HERMES_WORKFLOWS_AGENT_ARGS_JSON": json.dumps([str(provider)]),
+                "HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON": json.dumps(["--provider-model", "{model}"]),
+            },
+        ).stdout
+    )
+
+    assert completed["status"] == "completed"
+    assert completed["result"]["packet"]["argv"] == ["--provider-model", "hermes-env-model"]
+
+
+def test_worker_cli_existing_agent_adapter_passes_model_to_hermes_oneshot_cli(tmp_path):
+    (tmp_path / "agent_model_runner_wf.py").write_text(AGENT_MODEL_RUNNER_WORKFLOW_MODULE)
+    fake_hermes = tmp_path / "fake_hermes.py"
+    fake_hermes.write_text(HERMES_SUBAGENT_PROVIDER_MODULE)
+    db = tmp_path / "workflow.sqlite"
+
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "run",
+            "agent_model_runner_wf:agent_model_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_existing_agent_adapter_model_runner",
+            "--input-json",
+            json.dumps({"topic": "package worker", "model": "hermes-subagent-model"}),
+        ).stdout
+    )
+    assert started["status"] == "running"
+
+    completed = json.loads(
+        run_cli(
+            tmp_path,
+            "worker",
+            "agent_model_runner_wf:agent_model_runner_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_existing_agent_adapter_model_runner",
+            "--worker-id",
+            "test-existing-agent-adapter-model-worker",
+            "--max-commands",
+            "10",
+            env_extra={
+                "HERMES_WORKFLOWS_AGENT_COMMAND": sys.executable,
+                "HERMES_WORKFLOWS_AGENT_REQUEST_STDIN": "json",
+                "HERMES_WORKFLOWS_AGENT_ARGS_JSON": json.dumps(
+                    [
+                        "-m",
+                        "hermes_workflows.agent_cli_adapter",
+                        "--agent-command",
+                        sys.executable,
+                        "--agent-arg",
+                        str(fake_hermes),
+                        "--agent-model-arg",
+                        "--model",
+                        "--agent-model-arg",
+                        "{model}",
+                        "--agent-prompt-arg",
+                        "--oneshot",
+                    ]
+                ),
+            },
+        ).stdout
+    )
+
+    argv = completed["result"]["packet"]["argv"]
+    assert completed["status"] == "completed"
+    assert argv[:2] == ["--model", "hermes-subagent-model"]
+    assert "--oneshot" in argv
+    assert completed["result"]["packet"]["prompt_has_runner_request"] is True
 
 
 def test_worker_cli_executes_agent_jobs_with_configured_provider_command(tmp_path):
