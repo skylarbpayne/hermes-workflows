@@ -49,6 +49,12 @@ def test_installed_reviewable_draft_quickstart_reaches_typed_review_queue(tmp_pa
 def test_launch_examples_reach_expected_review_queue_requests(tmp_path):
     cases = [
         ("bash_repo_health.py", "bash_repo_health_workflow", "wf_bash", {"review_repo_health"}),
+        (
+            "personal_pr_delivery.py",
+            "personal_pr_delivery_workflow",
+            "wf_personal_pr",
+            {"review_pr_plan_1"},
+        ),
         ("parallel_research.py", "parallel_research_workflow", "wf_parallel", {"review_research_packet"}),
         (
             "pipeline_section_review.py",
@@ -66,6 +72,52 @@ def test_launch_examples_reach_expected_review_queue_requests(tmp_path):
 
         assert result.status == "waiting"
         assert expected_keys <= _review_keys(engine, workflow_id)
+
+
+def test_personal_pr_delivery_example_runs_feedback_gates_and_dry_run_worktree(tmp_path):
+    workflow_fn = _load_example("personal_pr_delivery.py", "personal_pr_delivery_workflow")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "README.md").write_text("# Test repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+    engine = WorkflowEngine(tmp_path / "wf_personal_pr_dry_run.sqlite")
+    engine.start(
+        workflow_fn,
+        {
+            "intent": "Add a personal PR workflow example",
+            "repo_hints": [str(repo)],
+            "worktree_root": str(tmp_path / "worktrees"),
+            "dry_run": True,
+            "mock_agents": True,
+        },
+        workflow_id="wf_personal_pr_dry_run",
+    )
+
+    result = _drain(engine, "wf_personal_pr_dry_run")
+    assert result.status == "waiting"
+    assert _review_keys(engine, "wf_personal_pr_dry_run") == {"review_pr_plan_1"}
+
+    for key in ["review_pr_plan_1", "review_phase_implement-scoped-change_1", "review_pr_packet_1", "approve_merge_and_deploy"]:
+        signaled = engine.signal(
+            "wf_personal_pr_dry_run",
+            "operator.response",
+            key=key,
+            payload={"action": "approve", "feedback": "looks good"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "event_id": f"evt-{key}"},
+        )
+        result = engine.drain("wf_personal_pr_dry_run", initial=signaled)
+
+    assert result.status == "completed"
+    assert result.result.status == "merged_deployed"
+    assert result.result.worktree.worktree_path.startswith(str(tmp_path / "worktrees"))
+    assert result.result.pr.dry_run is True
 
 
 def test_dynamic_workflow_return_example_generates_and_runs_child_workflows(tmp_path):
