@@ -32,7 +32,20 @@ def _drain(engine: WorkflowEngine, workflow_id: str, *, max_commands: int = 20):
 
 
 def _review_keys(engine: WorkflowEngine, workflow_id: str) -> set[str]:
-    return {request["key"] for request in engine.workflow_status(workflow_id)["review_requests"]}
+    status = engine.workflow_status(workflow_id)
+    return {request["key"] for request in status["review_requests"]} | {approval["key"] for approval in status["approvals"]}
+
+
+def _drain_until_review_key(engine: WorkflowEngine, workflow_id: str, key: str, *, max_commands: int = 30):
+    result = None
+    for _ in range(max_commands):
+        result = engine.worker_once(workflow_id, worker_id="launch-example-worker")
+        if key in _review_keys(engine, workflow_id):
+            return result
+        if result.status == "failed":
+            break
+    assert result is not None
+    return result
 
 
 def test_installed_reviewable_draft_quickstart_reaches_typed_review_queue(tmp_path):
@@ -66,6 +79,32 @@ def test_launch_examples_reach_expected_review_queue_requests(tmp_path):
 
         assert result.status == "waiting"
         assert expected_keys <= _review_keys(engine, workflow_id)
+
+
+def test_content_and_event_planning_examples_reach_approval_gates(tmp_path):
+    cases = [
+        ("content_asset_lane.py", "content_asset_lane_workflow", "wf_content_asset_lane", "select_content_topic"),
+        ("event_planning_demo.py", "event_planning_demo_workflow", "wf_event_planning", "approve_event_ops_packet"),
+    ]
+    for filename, attr, workflow_id, expected_key in cases:
+        workflow_fn = _load_example(filename, attr)
+        engine = WorkflowEngine(tmp_path / f"{workflow_id}.sqlite")
+        engine.start(workflow_fn, {}, workflow_id=workflow_id)
+
+        result = _drain_until_review_key(engine, workflow_id, expected_key)
+
+        assert result.status in {"running", "waiting"}
+        assert expected_key in _review_keys(engine, workflow_id)
+
+
+def test_content_asset_lane_includes_gemini_visual_generation_step():
+    source = (REPO_ROOT / "examples" / "content_asset_lane.py").read_text()
+
+    assert "gemini-nano-banana-2" in source
+    assert "plan_blog_visual_elements" in source
+    assert "approve_blog_visual_elements_plan" in source
+    assert "generate_blog_visual_elements_with_gemini_nano_banana_2" in source
+    assert "visual-generation receipt" in source or "visual-generation receipts" in source
 
 
 def test_dynamic_workflow_return_example_generates_and_runs_child_workflows(tmp_path):

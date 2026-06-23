@@ -1,0 +1,77 @@
+{
+  "dbs": {
+    "default": "../../../.hermes/presentation-july2/workflows.sqlite"
+  },
+  "workflows": {
+    "reviewable-draft": {
+      "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src"
+      ]
+    },
+    "parallel-research": {
+      "workflow_ref": "examples.parallel_research:parallel_research_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src",
+        "."
+      ]
+    },
+    "pipeline-section-review": {
+      "workflow_ref": "examples.pipeline_section_review:pipeline_section_review_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src",
+        "."
+      ]
+    },
+    "dynamic-workflow-return": {
+      "workflow_ref": "examples.dynamic_workflow_return:dynamic_workflow_return_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src",
+        "."
+      ]
+    },
+    "coding-review": {
+      "workflow_ref": "examples.coding_review_demo:coding_review_demo_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src",
+        "."
+      ]
+    },
+    "content-asset-lane": {
+      "workflow_ref": "examples.content_asset_lane:content_asset_lane_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src",
+        "."
+      ]
+    },
+    "event-planning-demo": {
+      "workflow_ref": "examples.event_planning_demo:event_planning_demo_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src",
+        "."
+      ]
+    },
+    "email-triage-demo": {
+      "workflow_ref": "hermes_workflows.examples.email_triage:email_triage_workflow",
+      "db": "default",
+      "project_root": ".",
+      "python_paths": [
+        "src"
+      ]
+    }
+  }
+}

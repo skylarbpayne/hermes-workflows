@@ -13,6 +13,7 @@ from .receipts import redact_secrets
 
 PLUGIN_NAME = "hermes-workflows-approvals"
 TOOLSET = "hermes_workflows_approvals"
+_BUNDLED_SKILLS_DIR = Path(__file__).parent / "plugin_skills"
 _TOKEN_PREFIX = "hwf-approval:v1"
 _SECRET_KEY_FRAGMENTS = (
     "api_key",
@@ -509,7 +510,19 @@ WORKFLOW_REVIEW_RESPOND_SCHEMA = {
 
 
 
+def _register_bundled_skills(ctx) -> None:
+    """Expose read-only plugin-bundled skills as hermes-workflows-approvals:<skill>."""
+    register_skill = getattr(ctx, "register_skill", None)
+    if not callable(register_skill) or not _BUNDLED_SKILLS_DIR.exists():
+        return
+    for child in sorted(_BUNDLED_SKILLS_DIR.iterdir(), key=lambda path: path.name):
+        skill_md = child / "SKILL.md"
+        if child.is_dir() and skill_md.exists():
+            register_skill(child.name, skill_md)
+
+
 def register(ctx) -> None:
+    _register_bundled_skills(ctx)
     ctx.register_tool(
         name="workflow_review_requests_list",
         toolset=TOOLSET,

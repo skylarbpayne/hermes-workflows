@@ -91,6 +91,18 @@ hermes -p <profile> plugins enable hermes-workflows-approvals
 
 Dashboard discovery is runtime-only: Hermes scans `$HERMES_HOME/plugins/<name>/dashboard/manifest.json`, serves the JS/CSS bundle, and mounts `plugin_api.py` under `/api/plugins/hermes-workflows-approvals`. No dashboard source fork or npm build is required for normal installation.
 
+## Bundled skills
+
+The plugin also ships read-only Hermes skills and registers them with `ctx.register_skill(...)` when Hermes loads the plugin:
+
+```text
+hermes-workflows-approvals:hermes-workflows
+hermes-workflows-approvals:hermes-workflows-running
+hermes-workflows-approvals:hermes-workflows-creating
+```
+
+Load them explicitly with `skill_view("hermes-workflows-approvals:hermes-workflows-running")` or `skill_view("hermes-workflows-approvals:hermes-workflows-creating")`. They are plugin-scoped to avoid collisions with local/profile skills and should stay generic product knowledge: how to run workflows and how to author workflows, not organization-specific workflow designs.
+
 The dashboard tab at `/workflows` shows:
 
 - active configured workflow source alias and existence status

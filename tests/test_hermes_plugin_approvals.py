@@ -40,12 +40,16 @@ class FakePluginContext:
     def __init__(self):
         self.tools: dict[str, dict[str, Any]] = {}
         self.hooks: dict[str, Any] = {}
+        self.skills: dict[str, Path] = {}
 
     def register_tool(self, **kwargs):
         self.tools[kwargs["name"]] = kwargs
 
     def register_hook(self, name: str, callback):
         self.hooks[name] = callback
+
+    def register_skill(self, name: str, path: Path):
+        self.skills[name] = Path(path)
 
 
 def create_pending_approval(db: Path) -> WorkflowEngine:
@@ -85,8 +89,11 @@ def test_plugin_entrypoint_and_directory_manifest_are_present():
     shim = Path("plugins/hermes-workflows-approvals/__init__.py")
     assert manifest.exists()
     assert shim.exists()
-    assert "workflow_review_requests_list" in manifest.read_text()
-    assert "pre_gateway_dispatch" in manifest.read_text()
+    manifest_text = manifest.read_text()
+    assert "workflow_review_requests_list" in manifest_text
+    assert "pre_gateway_dispatch" in manifest_text
+    assert "hermes-workflows-running" in manifest_text
+    assert "hermes-workflows-creating" in manifest_text
 
 
 def test_plugin_registers_approval_tools_and_gateway_hook():
@@ -104,6 +111,19 @@ def test_plugin_registers_approval_tools_and_gateway_hook():
     assert ctx.tools["workflow_review_respond"]["toolset"] == "hermes_workflows_approvals"
     assert ctx.tools["workflow_approval_decide"]["toolset"] == "hermes_workflows_approvals"
     assert "pre_gateway_dispatch" in ctx.hooks
+    assert set(ctx.skills) == {
+        "hermes-workflows",
+        "hermes-workflows-running",
+        "hermes-workflows-creating",
+    }
+    for skill_name, skill_path in ctx.skills.items():
+        assert skill_path.name == "SKILL.md"
+        assert skill_path.exists()
+        text = skill_path.read_text()
+        assert f"name: {skill_name}" in text
+        assert "Skylar" not in text
+        assert "Palmer" not in text
+        assert "demo portfolio" not in text
 
 
 def test_configured_dbs_accepts_json_string_from_hermes_config(monkeypatch, tmp_path):

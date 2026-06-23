@@ -8,3 +8,7 @@ provides_tools:
   - workflow_approval_decide
 provides_hooks:
   - pre_gateway_dispatch
+provides_skills:
+  - hermes-workflows
+  - hermes-workflows-running
+  - hermes-workflows-creating
