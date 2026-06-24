@@ -7,14 +7,14 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
+from .types import to_json_value
 from .workflow_values import Workflow
 
 
@@ -3815,19 +3815,7 @@ def _review_action_descriptor(action: Any, *, has_feedback: bool = False) -> dic
 
 
 def _to_jsonable(value: Any) -> Any:
-    if isinstance(value, Workflow):
-        return value.to_json()
-    if isinstance(value, ApprovalDecision):
-        return _to_jsonable(value.to_dict())
-    if isinstance(value, MappingABC):
-        return {str(key): _to_jsonable(item) for key, item in value.items()}
-    if is_dataclass(value) and not isinstance(value, type):
-        return {str(key): _to_jsonable(item) for key, item in value.__dict__.items()}
-    if isinstance(value, list):
-        return [_to_jsonable(item) for item in value]
-    if isinstance(value, tuple):
-        return [_to_jsonable(item) for item in value]
-    return value
+    return to_json_value(value)
 
 
 def _from_jsonable(value: Any) -> Any:

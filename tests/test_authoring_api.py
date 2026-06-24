@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Literal
 
 import pytest
 
@@ -34,6 +34,13 @@ class ReviewDecision:
 class PublishChoice:
     action: Literal["ship", "revise"]
     feedback: str | None = None
+
+
+@dataclass
+class DescribedPublishChoice:
+    action: Annotated[Literal["ship", "revise"], "Publish decision to record"]
+    expected_attendees: int = field(metadata={"description": "Expected attendee count used for venue planning"})
+    feedback: Annotated[str | None, "Optional reviewer feedback"] = None
 
 
 @dataclass
@@ -456,6 +463,50 @@ def test_dataclass_action_literal_automatically_drives_review_actions(tmp_path):
 
     assert result.status == "completed"
     assert result.result == {"action": "revise", "feedback": "needs a sharper opener"}
+
+
+def test_dataclass_schema_includes_annotated_and_metadata_descriptions(tmp_path):
+    @workflow
+    async def described_publish_choice_workflow(inputs):
+        decision = await ask(
+            prompt="Review described publish choice",
+            key="review_described_publish_choice",
+            input={"draft": inputs["draft"]},
+            returns=DescribedPublishChoice,
+        )
+        return {"action": decision.action, "feedback": decision.feedback}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(
+        described_publish_choice_workflow,
+        {"draft": "hello"},
+        workflow_id="wf_described_publish_choice",
+    )
+
+    assert first.status == "waiting"
+    request = engine.workflow_status("wf_described_publish_choice")["review_requests"][0]
+    assert request["request_schema"]["fields"] == [
+        {
+            "name": "action",
+            "kind": "choice",
+            "required": True,
+            "description": "Publish decision to record",
+            "options": ["ship", "revise"],
+        },
+        {
+            "name": "expected_attendees",
+            "kind": "number",
+            "required": True,
+            "description": "Expected attendee count used for venue planning",
+        },
+        {
+            "name": "feedback",
+            "kind": "text",
+            "required": False,
+            "description": "Optional reviewer feedback",
+        },
+    ]
 
 
 def test_pipeline_ask_stage_fans_out_human_prompts(tmp_path):
