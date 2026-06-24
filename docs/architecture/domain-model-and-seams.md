@@ -98,7 +98,7 @@ Normal `@step` bodies execute locally in the worker/resumer process that drains 
 
 ### Agent steps
 
-`agent(...)` does not call a model by itself. It records a durable request and requires a configured agent runner. The built-in `SubprocessAgentRunner` executes a trusted local command with one JSON request on stdin and expects one bounded JSON object on stdout:
+`agent(...)` does not call a model by itself. It records a durable request and requires a configured agent runner. The built-in `SubprocessAgentRunner` lives in `hermes_workflows.agent_runner`; `hermes_workflows.runners` is a compatibility re-export. The same canonical implementation can run a provider directly with JSON stdin/stdout or run the worker's adapter path with prompt/model argument expansion:
 
 ```mermaid
 flowchart LR

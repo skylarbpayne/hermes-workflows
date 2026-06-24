@@ -282,7 +282,7 @@ That keeps the execution path simple:
 agent(..., model="openrouter/example")
   -> existing external_agent command
   -> Workflow Worker leases it
-  -> existing SubprocessAgentRunner invokes hermes_workflows.agent_cli_adapter
+  -> canonical SubprocessAgentRunner invokes hermes_workflows.agent_cli_adapter
   -> adapter invokes hermes --model openrouter/example --oneshot <prompt>
   -> strict JSON output completes the agent step
 ```
