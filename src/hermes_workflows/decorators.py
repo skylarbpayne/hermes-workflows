@@ -75,6 +75,9 @@ def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]
 
     workflow_name = f"{_REGISTRATION_NAMESPACE}:{fn.__name__}" if _REGISTRATION_NAMESPACE else fn.__name__
     setattr(fn, "__workflow_name__", workflow_name)
+    from .input_parsing import workflow_input_type
+
+    setattr(fn, "__workflow_input_type__", workflow_input_type(fn))
 
     def run(argv: list[str] | None = None) -> int:
         from .runner_api import workflow_run_cli

@@ -1975,6 +1975,11 @@ class WorkflowEngine:
         ctx = WorkflowContext(self, workflow_id)
         inputs = JsonCodec.loads(instance["input_json"])
         try:
+            input_type = getattr(workflow_fn, "__workflow_input_type__", None)
+            if input_type is not None:
+                from .input_parsing import coerce_workflow_input
+
+                inputs = coerce_workflow_input(inputs, input_type)
             from .authoring import bind_workflow_context, reset_workflow_context
 
             token = bind_workflow_context(ctx)

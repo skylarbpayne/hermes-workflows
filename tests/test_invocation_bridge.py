@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,23 @@ async def two_approval_workflow(ctx, inputs):
         approver=inputs.get("approver", "human:skylar"),
     )
     return {"first": first, "second": second}
+
+
+@dataclass
+class TypedBridgeInput:
+    topic: str
+    approver: str = "human:skylar"
+
+
+@workflow
+async def typed_bridge_approval_workflow(ctx, inputs: TypedBridgeInput):
+    decision = await ctx.approval.request(
+        f"Approve typed bridge test for {inputs.topic}?",
+        key="approve_typed_bridge_test",
+        artifact={"summary": inputs.topic},
+        approver=inputs.approver,
+    )
+    return {"typed_followup_ran": True, "topic": inputs.topic, "decision": decision}
 
 
 def run_cli(tmp_path, *args, check=True):
@@ -193,6 +211,50 @@ def test_trusted_resumer_completes_plugin_recorded_resume_false_decision(tmp_pat
     assert receipt["result"]["api_token"] == "[REDACTED]"
     assert receipt["approvals"][0]["status"] == "approve"
     assert WorkflowEngine(db).workflow_status("wf_bridge_resume")["status"] == "completed"
+
+
+def test_typed_workflow_invocation_preserves_registry_provenance_for_trusted_resume(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"pilot": str(db)},
+            "workflows": {
+                "typed_bridge": {
+                    "workflow_ref": "tests.test_invocation_bridge:typed_bridge_approval_workflow",
+                    "db": "pilot",
+                    "trusted_resume": True,
+                }
+            },
+        }
+    )
+    InvocationService(registry).invoke(
+        "typed_bridge",
+        workflow_id="wf_typed_bridge_resume",
+        input_payload={"topic": "typed input"},
+        source={"kind": "operator", "channel": "test"},
+    )
+    stored_input = InvocationService._stored_input_for_instance(WorkflowEngine(db), "wf_typed_bridge_resume")
+    assert stored_input is not None
+    assert stored_input["_registry_name"] == "typed_bridge"
+    assert stored_input["_source"] == {"kind": "operator", "channel": "test"}
+
+    WorkflowEngine(db).submit_approval_decision(
+        ApprovalDecisionInput(
+            workflow_id="wf_typed_bridge_resume",
+            key="approve_typed_bridge_test",
+            action="approve",
+            by="skylar",
+            source={"kind": "human", "id": "skylar", "channel": "discord", "message_id": "typed-msg-1"},
+            idempotency_key="typed-msg-1",
+        ),
+        resume=False,
+    )
+
+    receipt = TrustedResumer(registry).resume_trusted("typed_bridge", workflow_id="wf_typed_bridge_resume")
+
+    assert receipt["status"] == "completed"
+    assert receipt["result"]["typed_followup_ran"] is True
+    assert receipt["result"]["topic"] == "typed input"
 
 
 def test_resume_pending_requires_trusted_allowlist_and_only_resumes_recorded_decisions(tmp_path):
