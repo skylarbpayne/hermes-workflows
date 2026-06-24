@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, prompt_file, workflow, workflow_id
+from hermes_workflows import WorkflowEngine, agent, ask, current_step_context, goal, parallel, pipeline, prompt_file, step, workflow, workflow_id
 
 
 @dataclass
@@ -112,6 +114,28 @@ async def prompt_file_agent_workflow(inputs):
     )
     assert isinstance(research, ResearchPacket)
     return {"summary": research.summary, "sources": research.sources}
+
+
+@workflow
+async def workspace_agent_workflow(inputs):
+    packet = await agent(
+        "implement",
+        prompt="Implement the approved plan.",
+        input={"plan": inputs["plan"]},
+        workspace_dir=inputs["workspace_dir"],
+        isolation="worktree",
+    )
+    return packet
+
+
+@step
+async def capture_step_context_type():
+    return type(current_step_context()).__name__
+
+
+@workflow
+async def current_step_context_workflow(inputs):
+    return await capture_step_context_type()
 
 
 @workflow
@@ -348,6 +372,71 @@ def test_agent_accepts_rendered_prompt_file_metadata(tmp_path):
     assert calls[0]["template_sha256"] == calls[0]["prompt_sha256"]
     assert len(calls[0]["variables_sha256"]) == 64
     assert calls[0]["fingerprint"]
+
+
+def test_agent_request_carries_workspace_dir_and_worktree_isolation(tmp_path):
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        return {"output": {"workspace_dir": request["workspace_dir"], "isolation": request["isolation"]}}
+
+    workspace = tmp_path / "repo-worktree"
+    workspace.mkdir()
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+
+    result = engine.run_until_idle(
+        workspace_agent_workflow,
+        {"plan": "ship the slice", "workspace_dir": str(workspace)},
+        workflow_id="wf_workspace_agent",
+    )
+
+    assert result.status == "completed"
+    assert result.result == {"workspace_dir": str(workspace.resolve()), "isolation": "worktree"}
+    assert len(calls) == 1
+    assert calls[0]["workspace_dir"] == str(workspace.resolve())
+    assert calls[0]["isolation"] == "worktree"
+    assert calls[0]["fingerprint"]
+
+
+def test_agent_fingerprint_preserves_legacy_shape_when_workspace_dir_is_absent():
+    call = agent("research", prompt="Research typed workflows", input={"topic": "typed workflows"}, returns=ResearchPacket)
+    request = call._payload("agent:research:0")["args"][0]
+
+    legacy_fingerprint_payload = {
+        "prompt": "Research typed workflows",
+        "input": {"topic": "typed workflows"},
+        "returns": f"{ResearchPacket.__module__}:{ResearchPacket.__qualname__}",
+        "tools": [],
+        "skills": [],
+        "files": [],
+        "model": None,
+        "variant": None,
+        "isolation": "workspace",
+    }
+    expected = hashlib.sha256(
+        json.dumps(legacy_fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    assert request["workspace_dir"] is None
+    assert request["fingerprint"] == expected
+
+
+def test_current_step_context_remains_available_as_advanced_escape_hatch(tmp_path):
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite")
+
+    result = engine.run_until_idle(current_step_context_workflow, {}, workflow_id="wf_current_step_context")
+
+    assert result.status == "completed"
+    assert result.result == "StepExecutionContext"
+
+
+def test_agent_workspace_dir_rejects_empty_path():
+    call = agent("workspace", prompt="Report workspace", workspace_dir=" ")
+
+    with pytest.raises(TypeError, match="workspace_dir"):
+        call._payload("agent:workspace:0")
 
 
 def test_agent_replay_fails_loudly_when_prompt_or_input_fingerprint_changes(tmp_path):

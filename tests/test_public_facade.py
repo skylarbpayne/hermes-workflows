@@ -54,14 +54,18 @@ def test_top_level_dir_hides_advanced_compatibility_shims() -> None:
 
 
 def test_advanced_top_level_imports_remain_compatibility_shims() -> None:
-    from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, bash, step
+    from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, bash, current_context, current_step_context, step
     from hermes_workflows.approvals import ApprovalDecisionInput as SubmoduleApprovalDecisionInput
+    from hermes_workflows.authoring import current_context as submodule_current_context
+    from hermes_workflows.authoring import current_step_context as submodule_current_step_context
     from hermes_workflows.bash import bash as submodule_bash
     from hermes_workflows.decorators import step as submodule_step
     from hermes_workflows.engine import WorkflowEngine as SubmoduleWorkflowEngine
 
     assert WorkflowEngine is SubmoduleWorkflowEngine
     assert ApprovalDecisionInput is SubmoduleApprovalDecisionInput
+    assert current_context is submodule_current_context
+    assert current_step_context is submodule_current_step_context
     assert step is submodule_step
     assert bash is submodule_bash
 

@@ -211,6 +211,47 @@ json.dump(
     assert "agent.runner_request.v1" not in json.dumps(response["provenance"]["agent_command"])
 
 
+def test_agent_cli_adapter_runs_provider_from_request_workspace_dir(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    provider = tmp_path / "cwd_provider.py"
+    provider.write_text(
+        """
+import json
+import os
+import sys
+
+sys.stdin.read()
+json.dump({"output": {"cwd": os.getcwd()}, "provenance": {"runner": "cwd-provider"}}, sys.stdout)
+"""
+    )
+    command = [
+        sys.executable,
+        "-m",
+        ADAPTER_MODULE,
+        "--agent-command",
+        sys.executable,
+        "--agent-arg",
+        str(provider),
+    ]
+
+    completed = subprocess.run(
+        command,
+        input=json.dumps(_request(workspace_dir=str(workspace))),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=REPO_ROOT,
+        env=_subprocess_env(),
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    response = json.loads(completed.stdout)
+    assert response["output"] == {"cwd": str(workspace)}
+
+
 def test_agent_cli_adapter_rejects_invalid_runner_request_json():
     completed = _run_adapter_direct("{not-json")
 

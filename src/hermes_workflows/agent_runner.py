@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 from .agent_cli_adapter import (
@@ -58,6 +59,7 @@ class SubprocessAgentRunner:
                 self.timeout_seconds,
                 self.max_agent_stdout_bytes,
                 self.max_agent_stderr_bytes,
+                cwd=_request_workspace_dir(request),
             )
             if provider_result.timed_out:
                 raise AdapterError(
@@ -105,6 +107,20 @@ class SubprocessAgentRunner:
                 provider_result=exc.provider_result or provider_result,
             )
             raise RuntimeError(json.dumps(diagnostic, sort_keys=True, separators=(",", ":"))) from exc
+
+
+def _request_workspace_dir(request: dict[str, Any]) -> str | None:
+    workspace_dir = request.get("workspace_dir")
+    if workspace_dir in (None, ""):
+        return None
+    if not isinstance(workspace_dir, str):
+        raise AdapterError("invalid_runner_request", "request.workspace_dir must be a string when present")
+    path = Path(workspace_dir).expanduser()
+    if not path.is_absolute():
+        raise AdapterError("invalid_runner_request", "request.workspace_dir must be an absolute path")
+    if not path.exists() or not path.is_dir():
+        raise AdapterError("invalid_runner_request", "request.workspace_dir must exist and be a directory")
+    return str(path)
 
 
 def build_agent_runner(

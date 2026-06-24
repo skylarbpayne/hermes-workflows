@@ -48,8 +48,8 @@ class SubprocessAgentRunner:
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         request_bytes = self._encode_request(request)
-        returncode, stdout, stderr = self._run_command(request_bytes, started)
-
+        cwd = self._request_cwd(request)
+        returncode, stdout, stderr = self._run_command(request_bytes, started, cwd=cwd)
         duration_ms = self._duration_ms(started)
         if returncode != 0:
             raise AgentRunnerError(
@@ -99,14 +99,14 @@ class SubprocessAgentRunner:
             }
         return response
 
-    def _run_command(self, request_bytes: bytes, started: float) -> tuple[int, bytes, bytes]:
+    def _run_command(self, request_bytes: bytes, started: float, *, cwd: Path | None) -> tuple[int, bytes, bytes]:
         try:
             process = subprocess.Popen(
                 self.command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=str(self.cwd) if self.cwd is not None else None,
+                cwd=str(cwd) if cwd is not None else None,
                 env=self._subprocess_env(),
             )
         except OSError as exc:
@@ -208,6 +208,26 @@ class SubprocessAgentRunner:
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+    def _request_cwd(self, request: dict[str, Any]) -> Path | None:
+        workspace_dir = request.get("workspace_dir")
+        if workspace_dir in (None, ""):
+            return self.cwd
+        if not isinstance(workspace_dir, str):
+            raise AgentRunnerError("agent runner request workspace_dir must be a string", details={"command": self.command})
+        path = Path(workspace_dir).expanduser()
+        if not path.is_absolute():
+            raise AgentRunnerError(
+                "agent runner request workspace_dir must be an absolute path",
+                details={"command": self.command, "workspace_dir": workspace_dir},
+            )
+        if not path.exists() or not path.is_dir():
+            raise AgentRunnerError(
+                "agent runner request workspace_dir must exist and be a directory",
+                details={"command": self.command, "workspace_dir": str(path)},
+            )
+        return path
+
 
     def _encode_request(self, request: dict[str, Any]) -> bytes:
         try:

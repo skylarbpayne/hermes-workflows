@@ -131,6 +131,20 @@ def load_runner_request(stdin_text: str) -> dict[str, Any]:
     return request
 
 
+def _request_workspace_dir(request: dict[str, Any]) -> Path | None:
+    workspace_dir = request.get("workspace_dir")
+    if workspace_dir in (None, ""):
+        return None
+    if not isinstance(workspace_dir, str):
+        raise AdapterError("invalid_runner_request", "request.workspace_dir must be a string when present")
+    path = Path(workspace_dir).expanduser()
+    if not path.is_absolute():
+        raise AdapterError("invalid_runner_request", "request.workspace_dir must be an absolute path")
+    if not path.exists() or not path.is_dir():
+        raise AdapterError("invalid_runner_request", "request.workspace_dir must exist and be a directory")
+    return path
+
+
 def build_provider_prompt(request: dict[str, Any]) -> str:
     return (
         "You are being called by hermes-workflows agent(...).\n"
@@ -156,6 +170,7 @@ def run_agent_command(
     timeout_seconds: float,
     max_stdout_bytes: int,
     max_stderr_bytes: int,
+    cwd: str | Path | None = None,
 ) -> ProviderResult:
     started = time.monotonic()
     stdout = bytearray()
@@ -168,6 +183,7 @@ def run_agent_command(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cwd=str(Path(cwd).expanduser()) if cwd is not None else None,
         )
     except OSError as exc:
         duration_ms = _duration_ms(started)
@@ -499,6 +515,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.timeout_seconds,
             args.max_agent_stdout_bytes,
             args.max_agent_stderr_bytes,
+            cwd=_request_workspace_dir(request),
         )
         if provider_result.timed_out:
             raise AdapterError("provider_timeout", f"provider timed out after {args.timeout_seconds:g}s", provider_result=provider_result)

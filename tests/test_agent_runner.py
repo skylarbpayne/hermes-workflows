@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from hermes_workflows import Workflow, WorkflowEngine, agent, start_child, workflow
 from hermes_workflows.agent_runner import build_agent_runner
 
@@ -154,6 +156,37 @@ def test_subprocess_worker_runner_appends_expanded_model_arg_templates(tmp_path)
         "hermes-test-model",
         "literal-hermes-test-model",
     ]
+
+
+def test_worker_agent_runner_uses_request_workspace_dir_as_provider_cwd(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    provider = tmp_path / "cwd_provider.py"
+    provider.write_text(
+        """
+import json
+import os
+import sys
+
+sys.stdin.read()
+json.dump({"output": {"cwd": os.getcwd()}, "provenance": {"runner": "cwd-provider"}}, sys.stdout)
+"""
+    )
+    runner = build_agent_runner(agent_command=sys.executable, agent_args=[str(provider)], timeout_seconds=5)
+
+    assert runner is not None
+    response = runner(_runner_request(workspace_dir=str(workspace)))
+
+    assert response["output"] == {"cwd": str(workspace)}
+
+
+def test_worker_agent_runner_rejects_relative_workspace_dir(tmp_path):
+    provider = _argv_provider(tmp_path)
+    runner = build_agent_runner(agent_command=sys.executable, agent_args=[str(provider)], timeout_seconds=5)
+
+    assert runner is not None
+    with pytest.raises(RuntimeError, match="workspace_dir"):
+        runner(_runner_request(workspace_dir="relative/path"))
 
 
 def test_agent_dispatches_to_live_runner_and_replays_stored_result(tmp_path):

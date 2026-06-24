@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 import ast
+from pathlib import Path
 from typing import Annotated, Any, Callable, Generic, Literal, TypeVar, get_args, get_origin, get_type_hints
 
 from .approvals import ApprovalDecision
@@ -33,6 +34,7 @@ class AgentCall(Generic[T]):
     tools: Sequence[str] | None = None
     skills: Sequence[str] | None = None
     files: Sequence[str] | None = None
+    workspace_dir: str | Path | None = None
     model: str | None = None
     variant: str | None = None
     isolation: str = "workspace"
@@ -111,6 +113,7 @@ class AgentCall(Generic[T]):
             tools=self.tools,
             skills=self.skills,
             files=self.files,
+            workspace_dir=self.workspace_dir,
             model=self.model,
             variant=self.variant,
             isolation=self.isolation,
@@ -133,6 +136,7 @@ class AgentCall(Generic[T]):
     def _payload(self, key: str) -> dict[str, Any]:
         safe_input = _jsonable(self.input)
         prompt_fields = _agent_prompt_fields(self.prompt)
+        workspace_dir = _workspace_dir_value(self.workspace_dir)
         request = {
             "kind": "agent.request.v1",
             "name": self.name,
@@ -146,6 +150,7 @@ class AgentCall(Generic[T]):
             "tools": list(self.tools or []),
             "skills": list(self.skills or []),
             "files": list(self.files or []),
+            "workspace_dir": workspace_dir,
             "model": self.model,
             "variant": self.variant,
             "isolation": self.isolation,
@@ -154,19 +159,20 @@ class AgentCall(Generic[T]):
             "mock_output": self.mock_output,
             "step_key": key,
         }
-        request["fingerprint"] = _sha256_json(
-            {
-                "prompt": request["prompt"],
-                "input": request["input"],
-                "returns": request["returns"],
-                "tools": request["tools"],
-                "skills": request["skills"],
-                "files": request["files"],
-                "model": request["model"],
-                "variant": request["variant"],
-                "isolation": request["isolation"],
-            }
-        )
+        fingerprint_parts = {
+            "prompt": request["prompt"],
+            "input": request["input"],
+            "returns": request["returns"],
+            "tools": request["tools"],
+            "skills": request["skills"],
+            "files": request["files"],
+            "model": request["model"],
+            "variant": request["variant"],
+            "isolation": request["isolation"],
+        }
+        if workspace_dir is not None:
+            fingerprint_parts["workspace_dir"] = workspace_dir
+        request["fingerprint"] = _sha256_json(fingerprint_parts)
         return {
             "step_name": "agent",
             "args": [request],
@@ -239,6 +245,15 @@ def current_context() -> Any:
         raise RuntimeError("workflow authoring primitive used outside a running Hermes workflow") from exc
 
 
+def current_step_context() -> Any:
+    """Return the currently executing workflow or step context.
+
+    This is an advanced escape hatch for code that needs direct runtime access;
+    normal workflow and step bodies should prefer authoring primitives instead.
+    """
+    return current_context()
+
+
 def agent(
     name: str | None = None,
     *,
@@ -250,6 +265,7 @@ def agent(
     tools: Sequence[str] | None = None,
     skills: Sequence[str] | None = None,
     files: Sequence[str] | None = None,
+    workspace_dir: str | Path | None = None,
     model: str | None = None,
     variant: str | None = None,
     isolation: str = "workspace",
@@ -274,6 +290,7 @@ def agent(
         tools=tools,
         skills=skills,
         files=files,
+        workspace_dir=workspace_dir,
         model=model,
         variant=variant,
         isolation=isolation,
@@ -835,6 +852,18 @@ def _agent_prompt_fields(prompt: Any) -> dict[str, Any]:
         "rendered_prompt": prompt,
         "rendered_prompt_sha256": _sha256_text(prompt),
     }
+
+
+def _workspace_dir_value(workspace_dir: str | Path | None) -> str | None:
+    if workspace_dir is None:
+        return None
+    if isinstance(workspace_dir, Path):
+        path = workspace_dir.expanduser()
+    elif isinstance(workspace_dir, str) and workspace_dir.strip():
+        path = Path(workspace_dir).expanduser()
+    else:
+        raise TypeError("agent(...) workspace_dir must be a non-empty path string or Path")
+    return str(path.resolve())
 
 
 def _sha256_text(value: str) -> str:

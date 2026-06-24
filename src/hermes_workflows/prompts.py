@@ -167,6 +167,7 @@ def _build_runner_request(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
         "tools",
         "skills",
         "files",
+        "workspace_dir",
         "model",
         "variant",
         "isolation",
