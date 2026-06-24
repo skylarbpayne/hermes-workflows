@@ -39,7 +39,7 @@
       ]
     },
     "coding-review": {
-      "workflow_ref": "examples.coding_review_demo:coding_review_demo_workflow",
+      "workflow_ref": "examples/advanced/coding_review_demo.py:coding_review_demo_workflow",
       "db": "default",
       "project_root": ".",
       "python_paths": [
@@ -48,7 +48,7 @@
       ]
     },
     "content-asset-lane": {
-      "workflow_ref": "examples.content_asset_lane:content_asset_lane_workflow",
+      "workflow_ref": "examples/advanced/content_asset_lane.py:content_asset_lane_workflow",
       "db": "default",
       "project_root": ".",
       "python_paths": [
@@ -57,7 +57,7 @@
       ]
     },
     "event-planning-demo": {
-      "workflow_ref": "examples.event_planning_demo:event_planning_demo_workflow",
+      "workflow_ref": "examples/advanced/event_planning_demo.py:event_planning_demo_workflow",
       "db": "default",
       "project_root": ".",
       "python_paths": [

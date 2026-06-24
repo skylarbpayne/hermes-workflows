@@ -1,11 +1,15 @@
 # Examples
 
-These examples are ordered as a launch curriculum. Start with the installed `reviewable-draft` workflow, then use the source-tree examples to see the larger composition primitives.
+These examples are ordered as a launch curriculum. Start with four tiny source-tree examples that teach one framework idea each, then move into composition examples. Larger presentation/demo lanes live under `examples/advanced/` so they do not masquerade as the starter surface.
 
 ## Launch-facing examples
 
 | Example | Shows | Run shape |
 | --- | --- | --- |
+| `examples/typed_review.py` | typed workflow input, `MarkdownArtifact`, typed `ask(...)` review | source checkout / registry alias |
+| `examples/agent_workspace.py` | `agent(..., workspace_dir=..., isolation="worktree")` with deterministic mock output | source checkout / registry alias |
+| `examples/prompt_file.py` | durable prompt template file rendered into `agent(...)` | source checkout / registry alias |
+| `examples/artifact_review.py` | `JsonArtifact` review packet with typed Review Queue response | source checkout / registry alias |
 | `src/hermes_workflows/examples/reviewable_draft.py` | installed quickstart, `agent(...)` with deterministic `mock_output`, typed `ask(...)`, Review Queue request | `hermes-workflows run reviewable-draft --config .hermes/workflows.registry.json --id wf_reviewable_draft` |
 | `examples/bash_repo_health.py` | durable `bash(...)`, typed agent interpretation, typed human review | source checkout / registry alias |
 | `examples/parallel_research.py` | `parallel([... agent(...) ...])` fan-out/fan-in, aggregate review | source checkout / registry alias |
@@ -13,6 +17,14 @@ These examples are ordered as a launch curriculum. Start with the installed `rev
 | `examples/goal_revision_loop.py` | bounded `goal(do_fn, check_fn)` loop | source checkout / registry alias |
 | `examples/dynamic_workflow_return.py` | `agent(..., returns=Workflow)` returning generated workflow code, then `ctx.map_workflow(...)` child runs | source checkout / registry alias |
 | `examples/local_model_adapter_workflow.py` | `agent(..., model=...)` with fake-output fallback and local/Hermes runner configuration shape | source checkout / registry alias |
+
+## Advanced demos
+
+These are useful for presentations and product design, but too large for first-contact examples:
+
+- `examples/advanced/content_asset_lane.py`
+- `examples/advanced/coding_review_demo.py`
+- `examples/advanced/event_planning_demo.py`
 
 All launch-facing examples avoid direct `WorkflowEngine`, low-level `ctx.approval.request(...)`, and manual signal plumbing in the workflow body.
 
@@ -26,6 +38,22 @@ From a source checkout, a compact registry for the examples can use one default 
   "workflows": {
     "reviewable-draft": {
       "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow"
+    },
+    "typed-review": {
+      "workflow_ref": "examples/typed_review.py:typed_review_workflow",
+      "project_root": "."
+    },
+    "agent-workspace": {
+      "workflow_ref": "examples/agent_workspace.py:agent_workspace_workflow",
+      "project_root": "."
+    },
+    "prompt-file": {
+      "workflow_ref": "examples/prompt_file.py:prompt_file_workflow",
+      "project_root": "."
+    },
+    "artifact-review": {
+      "workflow_ref": "examples/artifact_review.py:artifact_review_workflow",
+      "project_root": "."
     },
     "bash-repo-health": {
       "workflow_ref": "examples/bash_repo_health.py:bash_repo_health_workflow",

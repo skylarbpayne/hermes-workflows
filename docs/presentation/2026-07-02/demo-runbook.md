@@ -76,7 +76,7 @@ hermes-workflows run coding-review \
   --project-root . \
   --db default \
   --id wf_july2_coding_review \
-  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","base_ref":"HEAD","worktree_path":"/tmp/hermes-workflows-july2-coding-worktree","branch_name":"demo/july2-coding-review","task":"Make a small, reviewable code change; do not commit, push, PR, or merge.","validation_command":"python -m py_compile examples/coding_review_demo.py && python -m pytest -q tests/test_launch_examples.py"}'
+  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","base_ref":"HEAD","worktree_path":"/tmp/hermes-workflows-july2-coding-worktree","branch_name":"demo/july2-coding-review","task":"Make a small, reviewable code change; do not commit, push, PR, or merge.","validation_command":"python -m py_compile examples/advanced/coding_review_demo.py && python -m pytest -q tests/test_launch_examples.py"}'
 
 hermes-workflows worker \
   --config docs/presentation/2026-07-02/workflows.registry.example.json \

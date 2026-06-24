@@ -61,6 +61,8 @@ def test_installed_reviewable_draft_quickstart_reaches_typed_review_queue(tmp_pa
 
 def test_launch_examples_reach_expected_review_queue_requests(tmp_path):
     cases = [
+        ("typed_review.py", "typed_review_workflow", "wf_typed_review", {"review_draft_brief"}),
+        ("artifact_review.py", "artifact_review_workflow", "wf_artifact_review", {"review_launch_checklist"}),
         ("bash_repo_health.py", "bash_repo_health_workflow", "wf_bash", {"review_repo_health"}),
         ("parallel_research.py", "parallel_research_workflow", "wf_parallel", {"review_research_packet"}),
         (
@@ -81,10 +83,31 @@ def test_launch_examples_reach_expected_review_queue_requests(tmp_path):
         assert expected_keys <= _review_keys(engine, workflow_id)
 
 
+def test_tiny_agent_examples_complete_without_provider_credentials(tmp_path):
+    cases = [
+        ("prompt_file.py", "prompt_file_workflow", "wf_prompt_file", {}),
+        (
+            "agent_workspace.py",
+            "agent_workspace_workflow",
+            "wf_agent_workspace",
+            {"workspace_dir": str(tmp_path / "workspace")},
+        ),
+    ]
+    (tmp_path / "workspace").mkdir()
+    for filename, attr, workflow_id, inputs in cases:
+        workflow_fn = _load_example(filename, attr)
+        engine = WorkflowEngine(tmp_path / f"{workflow_id}.sqlite")
+        engine.start(workflow_fn, inputs, workflow_id=workflow_id)
+
+        result = _drain(engine, workflow_id)
+
+        assert result.status == "completed"
+
+
 def test_content_and_event_planning_examples_reach_approval_gates(tmp_path):
     cases = [
-        ("content_asset_lane.py", "content_asset_lane_workflow", "wf_content_asset_lane", "select_content_topic"),
-        ("event_planning_demo.py", "event_planning_demo_workflow", "wf_event_planning", "approve_event_ops_packet"),
+        ("advanced/content_asset_lane.py", "content_asset_lane_workflow", "wf_content_asset_lane", "select_content_topic"),
+        ("advanced/event_planning_demo.py", "event_planning_demo_workflow", "wf_event_planning", "approve_event_ops_packet"),
     ]
     for filename, attr, workflow_id, expected_key in cases:
         workflow_fn = _load_example(filename, attr)
@@ -98,7 +121,7 @@ def test_content_and_event_planning_examples_reach_approval_gates(tmp_path):
 
 
 def test_content_asset_lane_includes_gemini_visual_generation_step():
-    source = (REPO_ROOT / "examples" / "content_asset_lane.py").read_text()
+    source = (REPO_ROOT / "examples" / "advanced" / "content_asset_lane.py").read_text()
 
     assert "gemini-nano-banana-2" in source
     assert "plan_blog_visual_elements" in source
