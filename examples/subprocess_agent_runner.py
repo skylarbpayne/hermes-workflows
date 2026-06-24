@@ -7,7 +7,7 @@ from hermes_workflows import SubprocessAgentRunner, WorkflowEngine, agent, workf
 
 
 @workflow
-async def subprocess_agent_runner_example(ctx, inputs):
+async def subprocess_agent_runner_example(inputs):
     return await agent(
         "summarize_item",
         prompt=f"Summarize {inputs['item']}",

@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow, workflow_id
 
 APPROVAL_KEY = "approve_email_triage_packet"
 APPROVER = "human:operator"
@@ -110,7 +110,7 @@ def dangerous_side_effects_zero(ledger: dict[str, int]) -> bool:
 
 
 @step
-async def fetch_email_triage_candidates(ctx: Any, inputs: dict[str, Any]) -> dict[str, Any]:
+async def fetch_email_triage_candidates(inputs: dict[str, Any]) -> dict[str, Any]:
     """Return bounded redacted candidate handles; never fetch live mail by default."""
 
     fixture = inputs.get("fixture", "synthetic")
@@ -142,7 +142,7 @@ async def fetch_email_triage_candidates(ctx: Any, inputs: dict[str, Any]) -> dic
 
 
 @step
-async def classify_email_triage_candidates(ctx: Any, candidate_packet: dict[str, Any]) -> dict[str, Any]:
+async def classify_email_triage_candidates(candidate_packet: dict[str, Any]) -> dict[str, Any]:
     classifications = []
     for thread in candidate_packet["candidate_threads"]:
         classification = _classify(thread)
@@ -176,7 +176,7 @@ async def classify_email_triage_candidates(ctx: Any, candidate_packet: dict[str,
 
 
 @step
-async def render_email_triage_approval_packet(ctx: Any, classified_packet: dict[str, Any]) -> dict[str, Any]:
+async def render_email_triage_approval_packet(classified_packet: dict[str, Any]) -> dict[str, Any]:
     counts = classified_packet["candidate_counts"]
     return {
         "title": "Email triage demo approval packet",
@@ -198,7 +198,6 @@ async def render_email_triage_approval_packet(ctx: Any, classified_packet: dict[
 
 @step
 async def perform_email_triage_demo_writebacks(
-    ctx: Any,
     approval_packet: dict[str, Any],
     decision: dict[str, Any],
     inputs: dict[str, Any],
@@ -220,7 +219,7 @@ async def perform_email_triage_demo_writebacks(
     ledger["local_artifacts_written"] = len(paths)
 
     receipt_packet = {
-        "workflow_id": ctx.workflow_id,
+        "workflow_id": workflow_id(),
         "workflow_ref": WORKFLOW_REF,
         "registry_name": inputs.get("_registry_name") or REGISTRY_NAME,
         "db_alias": inputs.get("db_alias") or DEFAULT_DB_ALIAS,
@@ -251,7 +250,7 @@ async def perform_email_triage_demo_writebacks(
         "approved_by": decision.get("by"),
         "approval_key": APPROVAL_KEY,
         "approval_source": decision.get("source"),
-        "workflow_id": ctx.workflow_id,
+        "workflow_id": workflow_id(),
         "workflow_ref": WORKFLOW_REF,
         "registry_name": receipt_packet["registry_name"],
         "db_alias": receipt_packet["db_alias"],
@@ -265,11 +264,11 @@ async def perform_email_triage_demo_writebacks(
 
 
 @workflow
-async def email_triage_workflow(ctx: Any, inputs: dict[str, Any]) -> dict[str, Any]:
-    candidates = await fetch_email_triage_candidates(ctx, inputs)
-    classified = await classify_email_triage_candidates(ctx, candidates)
-    packet = await render_email_triage_approval_packet(ctx, classified)
-    decision = await ctx.approval.request(
+async def email_triage_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
+    candidates = await fetch_email_triage_candidates(inputs)
+    classified = await classify_email_triage_candidates(candidates)
+    packet = await render_email_triage_approval_packet(classified)
+    decision = await approve(
         (
             "Approve email triage demo local proposal files? "
             f"{_counts_summary(packet['candidate_counts'])}; "
@@ -281,7 +280,7 @@ async def email_triage_workflow(ctx: Any, inputs: dict[str, Any]) -> dict[str, A
         allowed=["approve", "reject"],
         authority=["local_email_triage_proposal_writebacks_only"],
     )
-    return await perform_email_triage_demo_writebacks(ctx, packet, decision, inputs)
+    return await perform_email_triage_demo_writebacks(packet, decision, inputs)
 
 
 setattr(

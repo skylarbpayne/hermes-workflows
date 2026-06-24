@@ -2,66 +2,66 @@ from __future__ import annotations
 
 import sqlite3
 
-from hermes_workflows import Workflow, WorkflowEngine, agent, step, workflow
+from hermes_workflows import Workflow, WorkflowEngine, agent, map_workflow, step, wait_for, workflow
 from hermes_workflows.engine import JsonCodec
 
 
 @step
-async def produce_items(ctx, inputs):
+async def produce_items(inputs):
     return inputs["items"]
 
 
 @step
-async def analyze_generated_item(ctx, item):
+async def analyze_generated_item(item):
     return {"item_id": item["id"], "label": "STATIC"}
 
 
 @workflow
-async def process_item(ctx, item):
-    analysis = await analyze_generated_item(ctx, item)
+async def process_item(item):
+    analysis = await analyze_generated_item(item)
     return {"static": analysis}
 
 
 GENERATED_PROCESSOR_SOURCE = '''
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow
 
 RUNS = []
 
 @step
-async def analyze_generated_item(ctx, item):
+async def analyze_generated_item(item):
     RUNS.append(item["id"])
     return {"item_id": item["id"], "label": item["label"].upper()}
 
 @workflow
-async def process_item(ctx, item):
-    analysis = await analyze_generated_item(ctx, item)
+async def process_item(item):
+    analysis = await analyze_generated_item(item)
     return {"processed": analysis}
 '''
 
 
 WAITING_CHILD_SOURCE = '''
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 @workflow
-async def waiting_child(ctx, item):
-    payload = await ctx.wait_for("dynamic.ready", key=item["id"])
+async def waiting_child(item):
+    payload = await wait_for("dynamic.ready", key=item["id"])
     return {"payload": payload}
 '''
 
 
 SIGNAL_THEN_FAIL_CHILD_SOURCE = '''
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 @workflow
-async def signal_then_fail_child(ctx, item):
-    await ctx.wait_for("dynamic.ready", key=item["id"])
+async def signal_then_fail_child(item):
+    await wait_for("dynamic.ready", key=item["id"])
     raise RuntimeError("child exploded")
 '''
 
 
 @workflow
-async def dynamic_processor_pipeline(ctx, inputs):
-    items = await produce_items(ctx, inputs)
+async def dynamic_processor_pipeline(inputs):
+    items = await produce_items(inputs)
     processor = await agent(
         "build_processor",
         prompt="Write a Python workflow that processes one discovered item.",
@@ -77,8 +77,8 @@ async def dynamic_processor_pipeline(ctx, inputs):
 
 
 @workflow
-async def dynamic_processor_map_pipeline(ctx, inputs):
-    items = await produce_items(ctx, inputs)
+async def dynamic_processor_map_pipeline(inputs):
+    items = await produce_items(inputs)
     processor = await agent(
         "build_processor",
         prompt="Write a Python workflow that processes one discovered item.",
@@ -87,7 +87,7 @@ async def dynamic_processor_map_pipeline(ctx, inputs):
         mock_output={"source": GENERATED_PROCESSOR_SOURCE, "symbol": "process_item"},
     )
 
-    results = await ctx.map_workflow(
+    results = await map_workflow(
         processor,
         items,
         key_fn=lambda item: item["id"],
@@ -97,7 +97,7 @@ async def dynamic_processor_map_pipeline(ctx, inputs):
 
 
 @workflow
-async def dynamic_waiting_child_pipeline(ctx, inputs):
+async def dynamic_waiting_child_pipeline(inputs):
     processor = await agent(
         "build_waiting_child",
         prompt="Write a Python workflow that waits for a signal.",
@@ -109,7 +109,7 @@ async def dynamic_waiting_child_pipeline(ctx, inputs):
 
 
 @workflow
-async def dynamic_waiting_child_map_pipeline(ctx, inputs):
+async def dynamic_waiting_child_map_pipeline(inputs):
     processor = await agent(
         "build_waiting_child_map",
         prompt="Write a Python workflow that waits for a signal.",
@@ -117,7 +117,7 @@ async def dynamic_waiting_child_map_pipeline(ctx, inputs):
         returns=Workflow,
         mock_output={"source": WAITING_CHILD_SOURCE, "symbol": "waiting_child"},
     )
-    results = await ctx.map_workflow(
+    results = await map_workflow(
         processor,
         inputs["items"],
         key_fn=lambda item: item["id"],
@@ -127,7 +127,7 @@ async def dynamic_waiting_child_map_pipeline(ctx, inputs):
 
 
 @workflow
-async def dynamic_signal_then_fail_child_pipeline(ctx, inputs):
+async def dynamic_signal_then_fail_child_pipeline(inputs):
     processor = await agent(
         "build_signal_then_fail_child",
         prompt="Write a Python workflow that fails after a signal.",
@@ -139,7 +139,7 @@ async def dynamic_signal_then_fail_child_pipeline(ctx, inputs):
 
 
 @workflow
-async def live_generated_waiting_child_pipeline(ctx, inputs):
+async def live_generated_waiting_child_pipeline(inputs):
     processor = await agent(
         "build_live_waiting_child",
         prompt="Write a Python workflow that waits for a signal.",
@@ -267,10 +267,10 @@ def test_child_workflow_keys_are_collision_resistant_after_sanitizing(tmp_path):
 def test_workflow_json_decode_is_lazy_and_validates_source_hash():
     source = '''
 from definitely_missing_generated_dependency import nope
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 @workflow
-async def unreachable(ctx, inputs):
+async def unreachable(inputs):
     return inputs
 '''
     import hashlib
@@ -300,13 +300,13 @@ async def unreachable(ctx, inputs):
 
 def test_generated_source_validation_rejects_import_time_execution_shapes(tmp_path):
     unsafe_class_source = '''
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 class Boom:
     open("/tmp/hermes-workflows-should-not-exist", "w").write("boom")
 
 @workflow
-async def process(ctx, inputs):
+async def process(inputs):
     return inputs
 '''
     try:
@@ -317,17 +317,17 @@ async def process(ctx, inputs):
         raise AssertionError("class bodies must be rejected because they execute at import time")
 
     unsafe_decorator_source = '''
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 def make_decorator():
     raise RuntimeError("decorator ran")
 
 @make_decorator()
-async def process(ctx, inputs):
+async def process(inputs):
     return inputs
 
 @workflow
-async def fallback(ctx, inputs):
+async def fallback(inputs):
     return inputs
 '''
     try:
@@ -640,14 +640,14 @@ def test_unapproved_live_generated_workflow_does_not_start_child_until_approved(
 
 def test_generated_source_validation_rejects_decorator_shadowing(tmp_path):
     shadowed_decorator_source = '''
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow
 
 def workflow(fn):
     open("/tmp/hermes-workflows-shadowed-decorator", "w").write("boom")
     return fn
 
 @workflow
-async def process(ctx, inputs):
+async def process(inputs):
     return inputs
 '''
     try:
@@ -660,13 +660,13 @@ async def process(ctx, inputs):
 
 def test_generated_workflow_symbol_must_name_decorated_workflow(tmp_path):
     undecorated_symbol_source = '''
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
-async def helper(ctx, inputs):
+async def helper(inputs):
     return inputs
 
 @workflow
-async def real_workflow(ctx, inputs):
+async def real_workflow(inputs):
     return inputs
 '''
     try:

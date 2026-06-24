@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from hermes_workflows import Workflow, agent, workflow
+from hermes_workflows import Workflow, agent, map_workflow, workflow
 
 
 GENERATED_ITEM_PROCESSOR_SOURCE = '''
 from hermes_workflows import step, workflow
 
 @step
-async def normalize_launch_item(ctx, item):
+async def normalize_launch_item(item):
     title = str(item.get("title", "")).strip()
     owner = str(item.get("owner", "unassigned")).strip() or "unassigned"
     risk = str(item.get("risk", "unknown")).strip() or "unknown"
@@ -20,8 +20,8 @@ async def normalize_launch_item(ctx, item):
     }
 
 @workflow
-async def process_launch_item(ctx, item):
-    normalized = await normalize_launch_item(ctx, item)
+async def process_launch_item(item):
+    normalized = await normalize_launch_item(item)
     return {
         "id": normalized["id"],
         "summary": f"{normalized['title']} -> {normalized['owner']} ({normalized['launch_risk']})",
@@ -47,7 +47,7 @@ DEFAULT_ITEMS = [
 
 
 @workflow
-async def dynamic_workflow_return_workflow(ctx, inputs: dict) -> dict:
+async def dynamic_workflow_return_workflow(inputs: dict) -> dict:
     """Generate a workflow at runtime, then run it as durable child workflows.
 
     This is the compact launch example for dynamic workflows: an agent returns a
@@ -70,7 +70,7 @@ async def dynamic_workflow_return_workflow(ctx, inputs: dict) -> dict:
         mock_output={"source": GENERATED_ITEM_PROCESSOR_SOURCE, "symbol": "process_launch_item"},
     )
 
-    processed = await ctx.map_workflow(
+    processed = await map_workflow(
         processor,
         items,
         key_fn=lambda item: item["id"],

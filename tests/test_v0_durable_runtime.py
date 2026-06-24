@@ -1,23 +1,23 @@
 import pytest
 
-from hermes_workflows import WorkflowEngine, workflow, step
+from hermes_workflows import WorkflowEngine, step, wait_for, workflow
 
 
 @step
-async def collect_constraints(ctx, inputs):
+async def collect_constraints(inputs):
     raise AssertionError("step body should not run inside the decider")
 
 
 @step
-async def draft_options(ctx, constraints):
+async def draft_options(constraints):
     raise AssertionError("step body should not run inside the decider")
 
 
 @workflow
-async def trip_planning(ctx, inputs):
-    constraints = await collect_constraints(ctx, inputs)
-    options = await draft_options(ctx, constraints)
-    approval = await ctx.wait_for("approval.granted", key="approve_trip_plan")
+async def trip_planning(inputs):
+    constraints = await collect_constraints(inputs)
+    options = await draft_options(constraints)
+    approval = await wait_for("approval.granted", key="approve_trip_plan")
     return {"options": options, "approved_by": approval["by"]}
 
 

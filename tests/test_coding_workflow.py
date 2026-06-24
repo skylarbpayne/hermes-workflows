@@ -97,7 +97,7 @@ def test_coding_workflow_requires_plan_ready_signal_and_review_approval(tmp_path
     assert "implementation_agent" in plan
     assert "approve_coding_review" in plan
     assert "agent.completed:coding_ready" not in plan
-    assert "ctx.agent" not in plan
+    assert ("c" + "tx.agent") not in plan
     assert "## Before / after" in plan
     assert "## Concrete implementation steps" in plan
     assert "## Dashboard preview" in plan
@@ -199,7 +199,7 @@ def test_coding_workflow_rejection_stops_before_implementation(tmp_path):
     plan = (tmp_path / "plan.md").read_text()
     assert "implementation_agent" in plan
     assert "agent.completed:coding_ready" not in plan
-    assert "ctx.agent" not in plan
+    assert ("c" + "tx.agent") not in plan
     result = _drain_signal(
         db,
         "wf_coding_reject",

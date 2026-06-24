@@ -12,7 +12,7 @@ from types import ModuleType
 
 import pytest
 
-from hermes_workflows import ApprovalDecisionInput, Workflow, WorkflowEngine, agent, pipeline, step, workflow
+from hermes_workflows import ApprovalDecisionInput, Workflow, WorkflowEngine, agent, approve, gather, pipeline, step, workflow
 from hermes_workflows.workflows.coding import coding_workflow
 from tests.test_hermes_plugin_approvals import create_pending_approval
 
@@ -21,15 +21,15 @@ PLUGIN_DASHBOARD = Path("plugins/hermes-workflows-approvals/dashboard")
 
 
 @step
-async def dashboard_path_artifact_step(ctx, artifact):
+async def dashboard_path_artifact_step(artifact):
     return {"copied_to": "/Users/operator/private/generated-copy.png", "artifact": artifact}
 
 
 @workflow
-async def dashboard_path_artifact_workflow(ctx, inputs):
+async def dashboard_path_artifact_workflow(inputs):
     artifact = inputs["artifact"]
-    await dashboard_path_artifact_step(ctx, artifact)
-    decision = await ctx.approval.request(
+    await dashboard_path_artifact_step(artifact)
+    decision = await approve(
         key="approve_path_artifact",
         prompt="Approve path artifact?",
         artifact=artifact,
@@ -41,8 +41,8 @@ async def dashboard_path_artifact_workflow(ctx, inputs):
 
 
 @workflow
-async def dashboard_named_human_approval_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def dashboard_named_human_approval_workflow(inputs):
+    decision = await approve(
         key="approve_named_human",
         prompt="Approve named-human dashboard smoke?",
         artifact={"summary": "Named human approval packet"},
@@ -54,70 +54,70 @@ async def dashboard_named_human_approval_workflow(ctx, inputs):
 
 
 @step
-async def dashboard_dynamic_seed(ctx, value):
+async def dashboard_dynamic_seed(value):
     return {"seed": value}
 
 
 @step
-async def dashboard_dynamic_left(ctx, seed):
+async def dashboard_dynamic_left(seed):
     return {"side": "left", "seed": seed["seed"]}
 
 
 @step
-async def dashboard_dynamic_right(ctx, seed):
+async def dashboard_dynamic_right(seed):
     return {"side": "right", "seed": seed["seed"]}
 
 
 @step
-async def dashboard_dynamic_join(ctx, left, right):
+async def dashboard_dynamic_join(left, right):
     return {"joined": [left["side"], right["side"]]}
 
 
 @workflow
-async def dashboard_dynamic_topology_workflow(ctx, inputs):
-    seed = await dashboard_dynamic_seed(ctx, inputs["value"])
-    left, right = await ctx.gather(
-        dashboard_dynamic_left(ctx, seed),
-        dashboard_dynamic_right(ctx, seed),
+async def dashboard_dynamic_topology_workflow(inputs):
+    seed = await dashboard_dynamic_seed(inputs["value"])
+    left, right = await gather(
+        dashboard_dynamic_left(seed),
+        dashboard_dynamic_right(seed),
     )
-    joined = await dashboard_dynamic_join(ctx, left, right)
+    joined = await dashboard_dynamic_join(left, right)
     return {"joined": joined}
 
 
 @step
-async def dashboard_pipeline_draft(ctx, section):
+async def dashboard_pipeline_draft(section):
     return {"section": section, "draft": f"draft:{section}"}
 
 
 @step
-async def dashboard_pipeline_humanize(ctx, draft):
+async def dashboard_pipeline_humanize(draft):
     return {"section": draft["section"], "humanized": f"humanized:{draft['draft']}"}
 
 
 @workflow
-async def dashboard_pipeline_lane_workflow(ctx, inputs):
+async def dashboard_pipeline_lane_workflow(inputs):
     return await pipeline(
         inputs["sections"],
-        lambda section: dashboard_pipeline_draft(ctx, section),
-        lambda draft: dashboard_pipeline_humanize(ctx, draft),
+        lambda section: dashboard_pipeline_draft(section),
+        lambda draft: dashboard_pipeline_humanize(draft),
     )
 
 
 DASHBOARD_GENERATED_CHILD_SOURCE = '''
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow
 
 @step
-async def dashboard_generated_child_step(ctx, inputs):
+async def dashboard_generated_child_step(inputs):
     return {"generated": inputs["value"]}
 
 @workflow
-async def dashboard_generated_child(ctx, inputs):
-    return await dashboard_generated_child_step(ctx, inputs)
+async def dashboard_generated_child(inputs):
+    return await dashboard_generated_child_step(inputs)
 '''
 
 
 @workflow
-async def dashboard_generated_workflow_source_pipeline(ctx, inputs):
+async def dashboard_generated_workflow_source_pipeline(inputs):
     processor = await agent(
         "build_generated_child",
         prompt="Return a generated workflow that processes one dashboard item.",
@@ -477,11 +477,11 @@ def test_dashboard_plugin_api_approval_decision_loads_project_workflow_ref_befor
     db_dir.mkdir()
     (package / "__init__.py").write_text("")
     (package / "email_ops_like.py").write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import approve, workflow\n"
         "\n"
         "@workflow\n"
-        "async def project_email_ops_workflow(ctx, inputs):\n"
-        "    decision = await ctx.approval.request(key='approve_project_entity', prompt='Approve project entity?')\n"
+        "async def project_email_ops_workflow(inputs):\n"
+        "    decision = await approve(key='approve_project_entity', prompt='Approve project entity?')\n"
         "    return {'decision': decision.get('action')}\n"
     )
     workflow_ref = "project_flows.email_ops_like:project_email_ops_workflow"
@@ -756,7 +756,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     assert source["language"] == "python"
     assert source["highlight_class"] == "language-python"
     assert "def plugin_approval_workflow" in source["code"]
-    assert "ctx.approval.request" in source["code"]
+    assert "approve(" in source["code"]
     assert source["location"]["module"] == "tests.test_hermes_plugin_approvals"
     assert str(db) not in json.dumps(source)
 
@@ -766,10 +766,10 @@ def test_dashboard_workflow_definition_source_loads_path_refs(tmp_path, monkeypa
     WorkflowEngine(db)
     workflow_file = tmp_path / "demo_flow.py"
     workflow_file.write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "\n"
         "@workflow\n"
-        "async def demo_path_workflow(ctx, inputs):\n"
+        "async def demo_path_workflow(inputs):\n"
         "    return {'ok': True}\n"
     )
     configure_test_dbs(
@@ -1226,16 +1226,16 @@ def test_dashboard_path_ref_workflow_source_run_and_dag(tmp_path, monkeypatch):
     workflow_file.parent.mkdir(parents=True)
     db.parent.mkdir(parents=True)
     workflow_file.write_text(
-        "from hermes_workflows import step, workflow\n"
+        "from hermes_workflows import approve, step, workflow\n"
         "\n"
         "@step\n"
-        "async def build_path_ref_packet(ctx, value):\n"
+        "async def build_path_ref_packet(value):\n"
         "    return {'kind': 'packet', 'value': value, 'path': '/Users/operator/private/path-ref.txt'}\n"
         "\n"
         "@workflow\n"
-        "async def path_ref_dag_workflow(ctx, inputs):\n"
-        "    packet = await build_path_ref_packet(ctx, inputs.get('value', 1))\n"
-        "    decision = await ctx.approval.request(\n"
+        "async def path_ref_dag_workflow(inputs):\n"
+        "    packet = await build_path_ref_packet(inputs.get('value', 1))\n"
+        "    decision = await approve(\n"
         "        key='approve_path_ref_dag',\n"
         "        prompt='Approve path-ref DAG?',\n"
         "        artifact=packet,\n"

@@ -11,7 +11,7 @@ GENERATED_WORKFLOW_SOURCE = '''
 from hermes_workflows import workflow
 
 @workflow
-async def process_item(ctx, item):
+async def process_item(item):
     return {"processed": item}
 '''
 

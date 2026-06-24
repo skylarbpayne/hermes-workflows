@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
-from hermes_workflows import step, workflow
+from hermes_workflows import step, workflow, workflow_id
 
 
 def _run(command: List[str] | str, *, cwd: Path, timeout: int = 300, shell: bool = False) -> Dict[str, Any]:
@@ -42,7 +42,7 @@ def _write(path: Path, content: str) -> None:
 
 
 @step
-async def inspect_coding_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def inspect_coding_repo(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     if not (repo / ".git").exists():
         raise ValueError(f"not a git repo: {repo}")
@@ -111,7 +111,7 @@ async def inspect_coding_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def write_coding_plan(ctx, inputs: Dict[str, Any], repo_context: Dict[str, Any]) -> Dict[str, Any]:
+async def write_coding_plan(inputs: Dict[str, Any], repo_context: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(repo_context["repo_path"])
     plan_path = _artifact_path(inputs, "plan_path", repo, "coding-plan.md")
     verification = inputs.get("verification_commands") or ["pytest -q"]
@@ -167,7 +167,7 @@ async def write_coding_plan(ctx, inputs: Dict[str, Any], repo_context: Dict[str,
 
 
 @step
-async def collect_coding_evidence(ctx, inputs: Dict[str, Any], repo_context: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+async def collect_coding_evidence(inputs: Dict[str, Any], repo_context: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(repo_context["repo_path"])
     evidence_path = _artifact_path(inputs, "evidence_path", repo, "coding-evidence.md")
     commands = inputs.get("verification_commands") or ["pytest -q"]
@@ -225,7 +225,6 @@ Command: `git status --short`
 
 @step
 async def write_coding_review_packet(
-    ctx,
     inputs: Dict[str, Any],
     repo_context: Dict[str, Any],
     plan: Dict[str, Any],
@@ -273,14 +272,14 @@ This packet should save operator time by collecting repo state, plan, verificati
 
 
 @workflow
-async def coding_task_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
-    repo_context = await inspect_coding_repo(ctx, inputs)
-    plan = await write_coding_plan(ctx, inputs, repo_context)
-    evidence = await collect_coding_evidence(ctx, inputs, repo_context, plan)
-    review_packet = await write_coding_review_packet(ctx, inputs, repo_context, plan, evidence)
+async def coding_task_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    repo_context = await inspect_coding_repo(inputs)
+    plan = await write_coding_plan(inputs, repo_context)
+    evidence = await collect_coding_evidence(inputs, repo_context, plan)
+    review_packet = await write_coding_review_packet(inputs, repo_context, plan, evidence)
     return {
         "kind": "coding_task_result",
-        "workflow_id": ctx.workflow_id,
+        "workflow_id": workflow_id(),
         "task": inputs["task"],
         "repo_path": repo_context["repo_path"],
         "ready_for_pr": review_packet["ready_for_pr"],

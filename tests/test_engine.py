@@ -1,4 +1,4 @@
-from hermes_workflows import WorkflowEngine, agent, workflow
+from hermes_workflows import WorkflowEngine, agent, approve, workflow
 
 
 def human_source(message_id="msg-1"):
@@ -11,8 +11,8 @@ def human_source(message_id="msg-1"):
 
 
 @workflow
-async def approval_then_agent_workflow(ctx, inputs):
-    decision = await ctx.approve(
+async def approval_then_agent_workflow(inputs):
+    decision = await approve(
         "Approve plan?",
         key="approve_plan",
         artifact={"goal": inputs.get("goal", "demo")},
@@ -108,8 +108,8 @@ def test_internal_signal_and_wait_records_remain_events_not_public_steps(tmp_pat
 
 
 @workflow
-async def duplicate_public_step_key_workflow(ctx, inputs):
-    decision = await ctx.approve(
+async def duplicate_public_step_key_workflow(inputs):
+    decision = await approve(
         "Approve overloaded key?",
         key="shared_step",
         approver="human:skylar",

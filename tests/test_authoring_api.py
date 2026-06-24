@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, workflow
+from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, workflow, workflow_id
 
 
 @dataclass
@@ -49,7 +49,44 @@ class AngleChoice:
     rationale: str
 
 
+@dataclass
+class TypedWorkflowInput:
+    topic: str
+    count: int = 1
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TypedUnionWorkflowInput:
+    count: int | None
+
+
+@dataclass
+class TypedContextWorkflowInput:
+    topic: str
+    enabled: bool = False
+
+
 PROMPT_VERSION = "v1"
+
+
+@workflow
+async def typed_input_workflow(inputs: TypedWorkflowInput):
+    assert isinstance(inputs, TypedWorkflowInput)
+    return {"topic": inputs.topic, "count": inputs.count, "tags": inputs.tags}
+
+
+@workflow
+async def typed_union_input_workflow(inputs: TypedUnionWorkflowInput):
+    assert isinstance(inputs, TypedUnionWorkflowInput)
+    return {"count": inputs.count, "type": type(inputs.count).__name__}
+
+
+@workflow
+async def typed_context_input_workflow(inputs: TypedContextWorkflowInput):
+    assert workflow_id()
+    assert isinstance(inputs, TypedContextWorkflowInput)
+    return {"topic": inputs.topic, "enabled": inputs.enabled}
 
 
 @workflow
@@ -181,6 +218,61 @@ def test_agent_and_ask_do_not_accept_context_keyword():
         agent("research", prompt="Research", input={"topic": "x"}, **legacy_kwargs)
     with pytest.raises(TypeError, match="context"):
         ask("Review", key="review", input={"draft": "x"}, **legacy_kwargs)
+
+
+def test_workflow_coerces_raw_json_to_typed_dataclass_input(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(
+        typed_input_workflow,
+        {"topic": "typed workflows", "count": "3", "tags": ["agent", "runtime"]},
+        workflow_id="wf_typed_input",
+    )
+
+    assert result.status == "completed"
+    assert result.result == {"topic": "typed workflows", "count": 3, "tags": ["agent", "runtime"]}
+
+
+def test_workflow_coerces_pep604_union_fields(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(
+        typed_union_input_workflow,
+        {"count": "3"},
+        workflow_id="wf_typed_union_input",
+    )
+
+    assert result.status == "completed"
+    assert result.result == {"count": 3, "type": "int"}
+
+
+def test_workflow_coerces_typed_input_for_legacy_ctx_signature(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(
+        typed_context_input_workflow,
+        {"topic": "context typed", "enabled": 1},
+        workflow_id="wf_typed_context_input",
+    )
+
+    assert result.status == "completed"
+    assert result.result == {"topic": "context typed", "enabled": True}
+
+
+def test_workflow_input_parser_rejects_missing_required_fields(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(typed_input_workflow, {"count": 2}, workflow_id="wf_missing_typed_input")
+
+    assert result.status == "failed"
+    assert "missing required workflow input field: topic" in (result.error or "")
+    status = engine.workflow_status("wf_missing_typed_input")
+    assert status["status"] == "failed"
+    assert "missing required workflow input field: topic" in (status["error"] or "")
 
 
 def test_agent_prompt_input_are_sent_to_runner_and_typed_output_replays(tmp_path):

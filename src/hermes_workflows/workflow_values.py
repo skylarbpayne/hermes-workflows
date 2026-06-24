@@ -251,12 +251,24 @@ def _is_allowed_decorator(decorator: ast.AST) -> bool:
     return False
 
 
+_GENERATED_WORKFLOW_IMPORTS = {
+    "approve",
+    "approve_many",
+    "gather",
+    "map_workflow",
+    "start_child",
+    "step",
+    "wait_for",
+    "workflow",
+}
+
+
 def _validate_generated_import(node: ast.ImportFrom) -> None:
     if node.module != "hermes_workflows" or node.level != 0:
-        raise ValueError("generated workflow modules may only import workflow/step from hermes_workflows")
+        raise ValueError("generated workflow modules may only import workflow authoring primitives from hermes_workflows")
     for alias in node.names:
-        if alias.name not in {"workflow", "step"} or alias.asname is not None:
-            raise ValueError("generated workflow modules may only import workflow and step without aliases")
+        if alias.name not in _GENERATED_WORKFLOW_IMPORTS or alias.asname is not None:
+            raise ValueError("generated workflow modules may only import approved workflow authoring primitives without aliases")
 
 
 def _first_workflow_symbol(source: str) -> str | None:

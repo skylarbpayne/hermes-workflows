@@ -308,6 +308,10 @@ def ask(
     return AskCall(prompt, key=key, input=input, returns=returns, approver=approver, timeout=timeout)
 
 
+async def gather(*calls: Any) -> list[Any]:
+    return await current_context().gather(*calls)
+
+
 async def parallel(calls: Iterable[Any], *, limit: int | None = None) -> list[Any]:
     ctx = current_context()
     parallel_index = getattr(ctx, "_authoring_parallel_call_count", 0)
@@ -368,6 +372,14 @@ async def goal(
     return value
 
 
+def _authority_payload(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return dict(value)
+    return list(value)
+
+
 async def approve(
     prompt: str,
     *,
@@ -375,19 +387,72 @@ async def approve(
     artifact: Any = None,
     approver: str = "human",
     allowed: Sequence[str] | None = None,
-    authority: Sequence[str] | None = None,
+    authority: Any = None,
     timeout: str | None = None,
+    feedback_loop: bool = False,
 ) -> ApprovalDecision:
-    ctx = current_context()
-    return await ctx.approve(
+    runtime_context = current_context()
+    return await runtime_context.approve(
         prompt,
         key=key,
         artifact=artifact,
         approver=approver,
         allowed=list(allowed) if allowed is not None else None,
-        authority=list(authority) if authority is not None else None,
+        authority=_authority_payload(authority),
         timeout=timeout,
+        feedback_loop=feedback_loop,
     )
+
+
+async def approve_many(
+    requests: Sequence[Mapping[str, Any]],
+    *,
+    approver: str = "human",
+    allowed: Sequence[str] | None = None,
+    authority: Any = None,
+    timeout: str | None = None,
+    feedback_loop: bool = False,
+) -> list[dict[str, Any]]:
+    runtime_context = current_context()
+    return await runtime_context.approval.request_many(
+        list(requests),
+        approver=approver,
+        allowed=list(allowed) if allowed is not None else None,
+        authority=_authority_payload(authority),
+        timeout=timeout,
+        feedback_loop=feedback_loop,
+    )
+
+
+async def wait_for(signal_type: str, *, key: str) -> Any:
+    return await current_context().wait_for(signal_type, key=key)
+
+
+async def start_child(workflow_ref: Any, inputs: Any, *, key: str | None = None, group: str | None = None, block: bool = True) -> Any:
+    return await current_context().start_child(workflow_ref, inputs, key=key, group=group, block=block)
+
+
+async def map_workflow(
+    workflow_ref: Any,
+    items: Sequence[Any],
+    *,
+    key_fn: Callable[[Any], str],
+    concurrency: int | None = None,
+) -> list[Any]:
+    return await current_context().map_workflow(workflow_ref, list(items), key_fn=key_fn, concurrency=concurrency)
+
+
+def workflow_id() -> str:
+    return str(current_context().workflow_id)
+
+
+def workflow_status(workflow_id: str, *, recent_events: int = 20) -> dict[str, Any]:
+    return current_context().engine.workflow_status(workflow_id, recent_events=recent_events)
+
+
+def cancel_workflow(workflow_id: str | None = None, *, reason: str | None = None) -> None:
+    runtime_context = current_context()
+    runtime_context.engine.cancel_workflow(workflow_id or runtime_context.workflow_id, reason=reason)
 
 
 async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:

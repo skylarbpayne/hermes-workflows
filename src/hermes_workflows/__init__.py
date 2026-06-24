@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .authoring import agent, ask, goal, parallel, pipeline
+from .authoring import agent, approve, approve_many, ask, cancel_workflow, gather, goal, map_workflow, parallel, pipeline, start_child, wait_for, workflow_id, workflow_status
 from .bash import bash
 from .decorators import workflow
 from .workflow_values import Workflow
@@ -24,12 +24,21 @@ from . import prompts as _prompts  # noqa: F401
 __all__ = [
     "Workflow",
     "agent",
+    "approve",
+    "approve_many",
     "ask",
     "bash",
+    "cancel_workflow",
+    "gather",
     "goal",
+    "map_workflow",
     "parallel",
     "pipeline",
+    "start_child",
+    "wait_for",
     "workflow",
+    "workflow_id",
+    "workflow_status",
 ]
 
 _ADVANCED_EXPORTS: dict[str, tuple[str, str]] = {

@@ -1,11 +1,11 @@
 import pytest
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, approve, step, wait_for, workflow
 
 
 @workflow
-async def approval_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def approval_workflow(inputs):
+    decision = await approve(
         "Approve the test plan?",
         key="approve_test_plan",
         artifact={"plan": "test"},
@@ -17,14 +17,14 @@ async def approval_workflow(ctx, inputs):
 
 
 @step
-async def prepare_approval_artifact(ctx, inputs):
+async def prepare_approval_artifact(inputs):
     return {"plan": inputs.get("plan", "test")}
 
 
 @workflow
-async def approval_after_step_workflow(ctx, inputs):
-    artifact = await prepare_approval_artifact(ctx, inputs)
-    decision = await ctx.approval.request(
+async def approval_after_step_workflow(inputs):
+    artifact = await prepare_approval_artifact(inputs)
+    decision = await approve(
         "Approve the prepared test plan?",
         key="approve_test_plan",
         artifact=artifact,
@@ -34,19 +34,19 @@ async def approval_after_step_workflow(ctx, inputs):
 
 
 @workflow
-async def approval_then_wait_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def approval_then_wait_workflow(inputs):
+    decision = await approve(
         "Approve before waiting for follow-up?",
         key="approve_test_plan",
         artifact={"plan": "test"},
         approver="human:skylar",
     )
-    follow_up = await ctx.wait_for("followup.ready", key="continue")
+    follow_up = await wait_for("followup.ready", key="continue")
     return {"decision": decision, "follow_up": follow_up}
 
 
 @workflow
-async def immediate_workflow(ctx, inputs):
+async def immediate_workflow(inputs):
     return {"ok": True}
 
 

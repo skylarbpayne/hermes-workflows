@@ -1,12 +1,12 @@
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step, workflow
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, approve, approve_many, step, workflow, workflow_id
 
 
 STEP_RUNS = []
 
 
 @step
-async def compose_trip_plan(ctx, inputs):
-    STEP_RUNS.append({"step": "compose_trip_plan", "inputs": inputs, "workflow_id": ctx.workflow_id})
+async def compose_trip_plan(inputs):
+    STEP_RUNS.append({"step": "compose_trip_plan", "inputs": inputs, "workflow_id": workflow_id()})
     return {
         "summary": f"Trip plan for {inputs['destination']}",
         "gesture": "Reserve one quiet dinner slot and pick up a small gift before travel day.",
@@ -14,7 +14,7 @@ async def compose_trip_plan(ctx, inputs):
 
 
 @step
-async def package_trip_plan(ctx, plan, decision):
+async def package_trip_plan(plan, decision):
     STEP_RUNS.append({"step": "package_trip_plan", "plan": plan, "decision": decision})
     return {
         "package": plan,
@@ -24,9 +24,9 @@ async def package_trip_plan(ctx, plan, decision):
 
 
 @workflow
-async def approval_trip_workflow(ctx, inputs):
-    plan = await compose_trip_plan(ctx, inputs)
-    decision = await ctx.approval.request(
+async def approval_trip_workflow(inputs):
+    plan = await compose_trip_plan(inputs)
+    decision = await approve(
         "Approve trip plan before packaging?",
         key="approve_trip_plan",
         artifact=plan,
@@ -35,12 +35,12 @@ async def approval_trip_workflow(ctx, inputs):
     )
     if decision["action"] != "approve":
         return {"ready": False, "decision": decision}
-    return await package_trip_plan(ctx, plan, decision)
+    return await package_trip_plan(plan, decision)
 
 
 @workflow
-async def bulk_approval_workflow(ctx, inputs):
-    decisions = await ctx.approval.request_many(
+async def bulk_approval_workflow(inputs):
+    decisions = await approve_many(
         [
             {
                 "prompt": "Approve entity A?",
@@ -54,6 +54,7 @@ async def bulk_approval_workflow(ctx, inputs):
             },
         ],
         approver="human:skylar",
+        authority={"scope": "bulk"},
     )
     return {"decisions": decisions}
 
@@ -70,6 +71,10 @@ def test_request_many_emits_every_atomic_approval_before_waiting(tmp_path):
     waits = [event for event in events if event["type"] == "WaitRequested"]
     assert [event["payload"]["key"] for event in approvals] == ["entity_a", "entity_b"]
     assert [event["payload"]["prompt"] for event in approvals] == ["Approve entity A?", "Approve entity B?"]
+    assert [event["payload"]["authority"] for event in approvals] == [
+        {"scope": "bulk"},
+        {"scope": "bulk"},
+    ]
     assert {event["payload"]["key"] for event in waits} == {"entity_a", "entity_b"}
 
     active = engine.list_approvals(status="waiting")

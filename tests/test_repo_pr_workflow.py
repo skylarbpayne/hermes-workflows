@@ -436,7 +436,6 @@ def test_check_watcher_waits_for_github_to_report_new_branch_checks(tmp_path, mo
     step_body = getattr(pr_module.watch_pull_request_checks, "__step_body__")
     result = asyncio.run(
         step_body(
-            None,
             {
                 "repo_path": str(tmp_path),
                 "watch_checks": True,

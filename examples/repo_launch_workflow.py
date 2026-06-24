@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow
 
 
 def _run(command: list[str], *, cwd: Path, timeout: int = 120) -> Dict[str, Any]:
@@ -31,7 +31,7 @@ def _format_approval_source(decision: Dict[str, Any]) -> str:
 
 
 @step
-async def inspect_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def inspect_repo(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     if not repo.exists():
         raise FileNotFoundError(f"repo_path does not exist: {repo}")
@@ -54,14 +54,14 @@ async def inspect_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def run_repo_tests(ctx, repo_info: Dict[str, Any]) -> Dict[str, Any]:
+async def run_repo_tests(repo_info: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(repo_info["repo_path"])
     result = _run(["pytest", "-q"], cwd=repo, timeout=180)
     return result
 
 
 @step
-async def build_launch_packet(ctx, repo_info: Dict[str, Any], tests: Dict[str, Any]) -> Dict[str, Any]:
+async def build_launch_packet(repo_info: Dict[str, Any], tests: Dict[str, Any]) -> Dict[str, Any]:
     blockers = []
     if not repo_info["clean"]:
         blockers.append("git working tree is not clean")
@@ -78,7 +78,7 @@ async def build_launch_packet(ctx, repo_info: Dict[str, Any], tests: Dict[str, A
 
 
 @step
-async def write_launch_report(ctx, packet: Dict[str, Any], decision: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def write_launch_report(packet: Dict[str, Any], decision: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
     report_path = Path(inputs["report_path"]).expanduser().resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     contents = f"""# Repo launch packet: {packet['project']}
@@ -114,11 +114,11 @@ Use this packet as the approval checkpoint before wiring the workflow to any hig
 
 
 @workflow
-async def repo_launch_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
-    repo_info = await inspect_repo(ctx, inputs)
-    tests = await run_repo_tests(ctx, repo_info)
-    packet = await build_launch_packet(ctx, repo_info, tests)
-    decision = await ctx.approval.request(
+async def repo_launch_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    repo_info = await inspect_repo(inputs)
+    tests = await run_repo_tests(repo_info)
+    packet = await build_launch_packet(repo_info, tests)
+    decision = await approve(
         f"Approve launch packet for {packet['project']}?",
         key="approve_repo_launch",
         artifact=packet,
@@ -128,5 +128,5 @@ async def repo_launch_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
     )
     if decision.get("action") != "approve":
         return {"ready": False, "packet": packet, "decision": decision}
-    report = await write_launch_report(ctx, packet, decision, inputs)
+    report = await write_launch_report(packet, decision, inputs)
     return {"ready": True, "packet": packet, **report}

@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from hermes_workflows import WorkflowEngine, WorkflowRegistry, WorkflowWorkerService, step, workflow
+from hermes_workflows import WorkflowEngine, WorkflowRegistry, WorkflowWorkerService, gather, step, wait_for, workflow
 from hermes_workflows.engine import WorkflowContext, WorkflowWaiting
 
 
@@ -16,70 +16,87 @@ SHOULD_FAIL_STALE = False
 
 
 @step
-async def worker_left(ctx, value):
+async def worker_left(value):
     RUNS.append(("left", value))
     return {"side": "left", "value": value}
 
 
 @step
-async def worker_right(ctx, value):
+async def worker_right(value):
     RUNS.append(("right", value))
     return {"side": "right", "value": value}
 
 
 @step
-async def worker_boom(ctx, value):
+async def worker_boom(value):
     raise RuntimeError(f"boom {value}")
 
 
 @step
-async def worker_stale_sensitive(ctx):
+async def worker_stale_sensitive():
     if SHOULD_FAIL_STALE:
         raise RuntimeError("stale worker should not win")
     return "fresh result"
 
 
 @step
-async def worker_slow_lease_probe(ctx):
+async def worker_slow_lease_probe(context):
     key = "step:worker_slow_lease_probe:0"
-    row = command_row(ctx.engine.db_path, key)
+    row = command_row(context.engine.db_path, key)
     assert row is not None
     before = row["lease_expires_at"]
     time.sleep(1.5)
-    row = command_row(ctx.engine.db_path, key)
+    row = command_row(context.engine.db_path, key)
     assert row is not None
     during = row["lease_expires_at"]
     LEASE_OBSERVATIONS.append((before, during))
     return "slow result"
 
 
-@workflow
-async def worker_slow_lease_workflow(ctx, inputs):
-    return await worker_slow_lease_probe(ctx)
+@step
+async def worker_legacy_context_named_handle(runtime_handle, value):
+    return {"workflow_id": runtime_handle.workflow_id, "value": value}
+
+
+@step
+async def worker_no_context_varargs(*values):
+    return list(values)
 
 
 @workflow
-async def worker_gather_workflow(ctx, inputs):
-    left, right = await ctx.gather(
-        worker_left(ctx, inputs["left"]),
-        worker_right(ctx, inputs["right"]),
+async def worker_context_compat_workflow(inputs):
+    legacy = await worker_legacy_context_named_handle(inputs["value"])
+    varargs = await worker_no_context_varargs(1, 2, 3)
+    return {"legacy": legacy, "varargs": varargs}
+
+
+@workflow
+async def worker_slow_lease_workflow(inputs):
+    return await worker_slow_lease_probe()
+
+
+@workflow
+async def worker_gather_workflow(inputs):
+    left, right = await gather(
+        worker_left(inputs["left"]),
+        worker_right(inputs["right"]),
     )
     return {"left": left, "right": right}
 
 
 @workflow
-async def worker_failure_workflow(ctx, inputs):
-    return await worker_boom(ctx, inputs["value"])
+async def worker_failure_workflow(inputs):
+    return await worker_boom(inputs["value"])
 
 
 @workflow
-async def worker_stale_workflow(ctx, inputs):
-    return await worker_stale_sensitive(ctx)
+async def worker_stale_workflow(inputs):
+    return await worker_stale_sensitive()
 
 
 @workflow
-async def worker_signal_wait_workflow(ctx, inputs):
-    signal = await ctx.wait_for("go", key="k")
+async def worker_signal_wait_workflow(inputs):
+    signal = await wait_for("go", key="k")
     return {"signal": signal}
 
 
@@ -103,6 +120,19 @@ def command_rows(db):
         ]
     finally:
         con.close()
+
+
+def test_worker_preserves_legacy_step_context_and_new_varargs_steps(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(worker_context_compat_workflow, {"value": "ok"}, workflow_id="wf_context_compat")
+
+    assert result.status == "completed"
+    assert result.result == {
+        "legacy": {"workflow_id": "wf_context_compat", "value": "ok"},
+        "varargs": [1, 2, 3],
+    }
 
 
 def test_start_enqueues_workflow_run_without_inline_step_requests(tmp_path):
@@ -444,12 +474,12 @@ CLI_WORKFLOW_MODULE = '''
 from hermes_workflows import step, workflow
 
 @step
-async def make_worker_plan(ctx, inputs):
+async def make_worker_plan(inputs):
     return {"summary": f"Plan for {inputs['destination']}"}
 
 @workflow
-async def cli_worker_workflow(ctx, inputs):
-    plan = await make_worker_plan(ctx, inputs)
+async def cli_worker_workflow(inputs):
+    plan = await make_worker_plan(inputs)
     return {"plan": plan}
 '''
 

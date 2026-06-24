@@ -7,19 +7,27 @@ def test_top_level_public_facade_teaches_authoring_primitives_only() -> None:
     assert set(hermes_workflows.__all__) == {
         "Workflow",
         "agent",
+        "approve",
+        "approve_many",
         "ask",
         "bash",
+        "cancel_workflow",
+        "gather",
         "goal",
+        "map_workflow",
         "parallel",
         "pipeline",
+        "start_child",
+        "wait_for",
         "workflow",
+        "workflow_id",
+        "workflow_status",
     }
     assert "WorkflowEngine" not in hermes_workflows.__all__
     assert "WorkflowWorkerService" not in hermes_workflows.__all__
     assert "ApprovalDecisionInput" not in hermes_workflows.__all__
     assert "OperatorStepView" not in hermes_workflows.__all__
     assert "step" not in hermes_workflows.__all__
-    assert "approve" not in hermes_workflows.__all__
 
 
 def test_top_level_dir_hides_advanced_compatibility_shims() -> None:
@@ -31,7 +39,6 @@ def test_top_level_dir_hides_advanced_compatibility_shims() -> None:
     assert "ApprovalDecisionInput" not in visible
     assert "OperatorStepView" not in visible
     assert "step" not in visible
-    assert "approve" not in visible
 
 
 def test_advanced_top_level_imports_remain_compatibility_shims() -> None:

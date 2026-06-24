@@ -4,11 +4,11 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, approve, step, workflow
 
 
 @step
-async def collect_trip_context(ctx, inputs):
+async def collect_trip_context(inputs):
     return {
         "destination": inputs["destination"],
         "constraints": ["protect deep work", "avoid red-eye flights"],
@@ -17,7 +17,7 @@ async def collect_trip_context(ctx, inputs):
 
 
 @step
-async def draft_trip_plan(ctx, context):
+async def draft_trip_plan(context):
     return {
         "summary": f"Draft plan for {context['destination']}",
         "hotel_bias": "walkable boutique hotel",
@@ -27,7 +27,7 @@ async def draft_trip_plan(ctx, context):
 
 
 @step
-async def package_after_approval(ctx, plan, decision):
+async def package_after_approval(plan, decision):
     return {
         "ready_for_booking_prep": True,
         "approved_by": decision["by"],
@@ -37,10 +37,10 @@ async def package_after_approval(ctx, plan, decision):
 
 
 @workflow
-async def first_real_trip_workflow(ctx, inputs):
-    context = await collect_trip_context(ctx, inputs)
-    plan = await draft_trip_plan(ctx, context)
-    decision = await ctx.approval.request(
+async def first_real_trip_workflow(inputs):
+    context = await collect_trip_context(inputs)
+    plan = await draft_trip_plan(context)
+    decision = await approve(
         "Approve this trip plan for packaging?",
         key="approve_trip_plan",
         artifact=plan,
@@ -50,7 +50,7 @@ async def first_real_trip_workflow(ctx, inputs):
     )
     if decision["action"] != "approve":
         return {"ready_for_booking_prep": False, "decision": decision, "plan": plan}
-    return await package_after_approval(ctx, plan, decision)
+    return await package_after_approval(plan, decision)
 
 
 def main() -> None:

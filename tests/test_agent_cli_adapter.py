@@ -404,7 +404,7 @@ def test_agent_cli_adapter_timeout_covers_prompt_write_to_nonreading_provider():
 
 
 @workflow
-async def adapter_generated_workflow_pipeline(ctx, inputs):
+async def adapter_generated_workflow_pipeline(inputs):
     processor = await agent(
         "build_processor",
         prompt=f"WORKFLOW_OUTPUT for {inputs['kind']} items.",

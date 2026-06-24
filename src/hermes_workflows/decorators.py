@@ -28,31 +28,32 @@ def registration_namespace(namespace: str):
 
 
 class DurableStepCall:
-    """Awaitable placeholder for a durable step invocation.
-
-    Direct `await step(ctx, ...)` still works, while `ctx.gather(...)` can inspect
-    multiple calls and enqueue all missing steps before the workflow exits.
-    """
+    """Awaitable placeholder for a durable step invocation."""
 
     __durable_step_call__ = True
 
     def __init__(
         self,
-        ctx: Any,
+        runtime_context: Any | None,
         step_name: str,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
         payload_builder: Callable[[], dict[str, Any]] | None = None,
     ):
-        self.ctx = ctx
+        self.runtime_context = runtime_context
         self.step_name = step_name
         self.args = args
         self.kwargs = kwargs
         self.payload_builder = payload_builder
 
     def __await__(self) -> Generator[Any, None, Any]:
-        return self.ctx.run_step(
+        runtime_context = self.runtime_context
+        if runtime_context is None:
+            from .authoring import current_context
+
+            runtime_context = current_context()
+        return runtime_context.run_step(
             self.step_name,
             self.args,
             self.kwargs,
@@ -75,6 +76,9 @@ def workflow(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]
 
     workflow_name = f"{_REGISTRATION_NAMESPACE}:{fn.__name__}" if _REGISTRATION_NAMESPACE else fn.__name__
     setattr(fn, "__workflow_name__", workflow_name)
+    from .input_parsing import workflow_input_type
+
+    setattr(fn, "__workflow_input_type__", workflow_input_type(fn))
 
     def run(argv: list[str] | None = None) -> int:
         from .runner_api import workflow_run_cli
@@ -99,12 +103,21 @@ def step(fn: Callable[..., Awaitable[Any]]) -> Callable[..., DurableStepCall]:
     _STEP_REGISTRY[step_name] = fn
 
     @wraps(fn)
-    def wrapper(ctx: Any, *args: Any, **kwargs: Any) -> DurableStepCall:
-        return DurableStepCall(ctx, step_name, args, kwargs)
+    def wrapper(*args: Any, **kwargs: Any) -> DurableStepCall:
+        runtime_context = None
+        call_args = args
+        if args and _looks_like_workflow_context(args[0]):
+            runtime_context = args[0]
+            call_args = args[1:]
+        return DurableStepCall(runtime_context, step_name, call_args, kwargs)
 
     setattr(wrapper, "__step_name__", step_name)
     setattr(wrapper, "__step_body__", fn)
     return wrapper
+
+
+def _looks_like_workflow_context(value: Any) -> bool:
+    return hasattr(value, "run_step") and hasattr(value, "workflow_id")
 
 
 def get_step_body(step_name: str) -> Callable[..., Any]:
