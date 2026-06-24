@@ -965,6 +965,72 @@ def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
     assert audio["reference"] == {"type": "url", "href": "https://example.invalid/review.mp3"}
 
 
+def test_dashboard_artifact_render_descriptors_cover_special_artifact_types():
+    api = load_dashboard_api()
+
+    html = api._artifact_descriptor({"kind": "html", "html": "<h1>Hi</h1>"})
+    assert html["kind"] == "html"
+    assert html["render"] == "inline-html"
+    assert html["media_type"] == "text/html"
+
+    image = api._artifact_descriptor({"kind": "image", "url": "https://example.invalid/chart.png", "media_type": "image/png"})
+    assert image["kind"] == "image"
+    assert image["render"] == "media-reference"
+    assert image["reference"] == {"type": "url", "href": "https://example.invalid/chart.png"}
+
+    video = api._artifact_descriptor({"kind": "video", "url": "https://example.invalid/demo.mp4", "media_type": "video/mp4"})
+    assert video["kind"] == "video"
+    assert video["render"] == "media-reference"
+
+    diff = api._artifact_descriptor({"kind": "diff", "diff": "-old\n+new"})
+    assert diff["kind"] == "diff"
+    assert diff["render"] == "inline-diff"
+
+    custom = api._artifact_descriptor({"kind": "chart", "renderer": "acme.chart.v1", "data": [1, 2]})
+    assert custom["kind"] == "chart"
+    assert custom["render"] == "custom-render"
+    assert custom["reference"] == {"type": "custom_renderer", "renderer": "acme.chart.v1"}
+
+
+def test_dashboard_frontend_renders_special_artifact_types_without_serving_private_files():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "function MarkdownArtifactPreview" in index_js
+    assert "function HtmlArtifactPreview" in index_js
+    assert "sandbox: \"\"" in index_js
+    assert "srcDoc" in index_js
+    assert "dangerouslySetInnerHTML" not in index_js
+    assert "function MediaArtifactPreview" in index_js
+    assert 'e("img"' in index_js
+    assert 'e("audio"' in index_js
+    assert 'e("video"' in index_js
+    assert "function FileReferencePreview" in index_js
+    assert 'render.render === "file-reference"' in index_js
+    assert 'render.render === "media-reference"' in index_js
+    assert "Local/private files are not served by the dashboard" in index_js
+    assert ".hwf-html-preview" in style_css
+    assert ".hwf-media-image" in style_css
+    assert ".hwf-media-audio" in style_css
+    assert ".hwf-media-video" in style_css
+    assert ".hwf-file-reference" in style_css
+
+
+def test_dashboard_frontend_exposes_custom_artifact_renderer_fallback_and_diff_preview():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "custom-render" in index_js
+    assert "artifactRenderers" in index_js
+    assert "registerArtifactRenderer" in index_js
+    assert "CustomArtifactFallback" in index_js
+    assert "inline-diff" in index_js
+    assert "function DiffPreview" in index_js
+    assert "hwf-diff-added" in style_css
+    assert "hwf-diff-removed" in style_css
+    assert "hwf-diff-hunk" in style_css
+
+
 def test_dashboard_run_dag_derives_dynamic_fanout_topology_from_run_events(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db).run_until_idle(
