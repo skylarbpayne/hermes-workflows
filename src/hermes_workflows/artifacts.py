@@ -13,11 +13,14 @@ ArtifactRenderMode = Literal[
     "inline-json",
     "inline-text",
     "inline-markdown",
+    "inline-html",
+    "inline-diff",
     "python-source",
     "media-reference",
     "file-reference",
     "external-link",
     "external-reference",
+    "custom-render",
     "none",
 ]
 
@@ -168,6 +171,116 @@ def JsonArtifact(
     )
 
 
+def HtmlArtifact(
+    title: str,
+    html: str,
+    *,
+    artifact_id: str | None = None,
+    description: str | None = None,
+    tags: tuple[str, ...] = (),
+    source: JsonObject | None = None,
+) -> Artifact:
+    return _artifact(
+        kind="html",
+        title=title,
+        value=html,
+        render=ArtifactRender("inline-html", media_type="text/html"),
+        artifact_id=artifact_id,
+        description=description,
+        tags=tags,
+        source=source,
+    )
+
+
+def DiffArtifact(
+    title: str,
+    diff: str,
+    *,
+    artifact_id: str | None = None,
+    description: str | None = None,
+    tags: tuple[str, ...] = (),
+    source: JsonObject | None = None,
+) -> Artifact:
+    return _artifact(
+        kind="diff",
+        title=title,
+        value=diff,
+        render=ArtifactRender("inline-diff", media_type="text/x-diff"),
+        artifact_id=artifact_id,
+        description=description,
+        tags=tags,
+        source=source,
+    )
+
+
+def ImageArtifact(
+    title: str,
+    src: str,
+    *,
+    media_type: str | None = None,
+    artifact_id: str | None = None,
+    description: str | None = None,
+    tags: tuple[str, ...] = (),
+    source: JsonObject | None = None,
+) -> Artifact:
+    return _media_artifact("image", title, src, media_type=media_type or mimetypes.guess_type(src)[0] or "image/*", artifact_id=artifact_id, description=description, tags=tags, source=source)
+
+
+def AudioArtifact(
+    title: str,
+    src: str,
+    *,
+    media_type: str | None = None,
+    artifact_id: str | None = None,
+    description: str | None = None,
+    tags: tuple[str, ...] = (),
+    source: JsonObject | None = None,
+) -> Artifact:
+    return _media_artifact("audio", title, src, media_type=media_type or mimetypes.guess_type(src)[0] or "audio/*", artifact_id=artifact_id, description=description, tags=tags, source=source)
+
+
+def VideoArtifact(
+    title: str,
+    src: str,
+    *,
+    media_type: str | None = None,
+    artifact_id: str | None = None,
+    description: str | None = None,
+    tags: tuple[str, ...] = (),
+    source: JsonObject | None = None,
+) -> Artifact:
+    return _media_artifact("video", title, src, media_type=media_type or mimetypes.guess_type(src)[0] or "video/*", artifact_id=artifact_id, description=description, tags=tags, source=source)
+
+
+def CustomArtifact(
+    title: str,
+    kind: str,
+    value: object,
+    *,
+    render: ArtifactRenderMode = "inline-json",
+    media_type: str | None = None,
+    renderer: str | None = None,
+    renderer_props: JsonObject | None = None,
+    artifact_id: str | None = None,
+    description: str | None = None,
+    tags: tuple[str, ...] = (),
+    source: JsonObject | None = None,
+) -> Artifact:
+    reference: JsonObject = {}
+    if render == "custom-render":
+        reference = {"renderer": renderer or kind, "props": renderer_props or {}}
+    return _artifact(
+        kind=kind,
+        title=title,
+        value=to_json_value(value),
+        render=ArtifactRender(render, media_type=media_type, reference=reference),
+        artifact_id=artifact_id,
+        description=description,
+        tags=tags,
+        source=source,
+    )
+
+
 def FileArtifact(
     title: str,
     path: str,
@@ -285,6 +398,25 @@ def normalize_artifact(value: object, *, title: str | None = None) -> Artifact |
             return MarkdownArtifact(title or str(value.get("title") or "Markdown artifact"), str(value.get("markdown") or value.get("content") or ""))
         if render == "inline-text":
             return TextArtifact(title or str(value.get("title") or "Text artifact"), str(value.get("text") or value.get("content") or ""))
+        if render == "inline-html":
+            return HtmlArtifact(title or str(value.get("title") or "HTML artifact"), str(value.get("html") or value.get("content") or ""))
+        if render == "inline-diff":
+            return DiffArtifact(title or str(value.get("title") or "Diff artifact"), str(value.get("diff") or value.get("patch") or value.get("content") or ""))
+        if render == "custom-render":
+            raw_reference = descriptor.get("reference")
+            reference = raw_reference if isinstance(raw_reference, dict) else {}
+            raw_renderer = reference.get("renderer")
+            renderer = raw_renderer if isinstance(raw_renderer, str) else kind
+            raw_props = reference.get("props")
+            props = raw_props if isinstance(raw_props, dict) else None
+            return CustomArtifact(
+                title or str(value.get("title") or f"{kind.title()} artifact"),
+                kind,
+                value,
+                render="custom-render",
+                renderer=renderer,
+                renderer_props=props,
+            )
         if render in {"file-reference", "media-reference", "external-link", "external-reference"}:
             ref = descriptor.get("reference")
             if isinstance(ref, dict) and isinstance(ref.get("href"), str):
@@ -341,7 +473,8 @@ def artifact_descriptor(artifact: object) -> JsonObject:
         media_type = artifact.get("media_type") or artifact.get("mime_type") or artifact.get("content_type")
         media_type = str(media_type) if media_type else None
         explicit_kind = str(artifact.get("kind") or artifact.get("type") or "").lower()
-        kind = _artifact_kind_from_media_type(media_type) or (explicit_kind if explicit_kind in {"text", "json", "markdown", "image", "audio", "video", "file", "link"} else "json")
+        allowed_kinds = {"text", "json", "markdown", "html", "diff", "image", "audio", "video", "file", "link"}
+        kind = _artifact_kind_from_media_type(media_type) or (explicit_kind if explicit_kind in allowed_kinds else "json")
         ref = None
         ref_key = None
         for key in ("url", "uri", "href", "path", "file_path", "local_path"):
@@ -366,9 +499,16 @@ def artifact_descriptor(artifact: object) -> JsonObject:
             }
         if kind == "markdown" or "markdown" in artifact:
             return {**descriptor, "kind": "markdown", "render": "inline-markdown", "media_type": media_type}
+        if kind == "html" or "html" in artifact:
+            return {**descriptor, "kind": "html", "render": "inline-html", "media_type": media_type or "text/html"}
+        if kind == "diff" or "diff" in artifact or "patch" in artifact:
+            return {**descriptor, "kind": "diff", "render": "inline-diff", "media_type": media_type or "text/x-diff"}
         if kind == "text" or "text" in artifact:
             return {**descriptor, "kind": "text", "render": "inline-text", "media_type": media_type}
-        return {**descriptor, "kind": kind, "render": "inline-json", "media_type": media_type}
+        renderer = artifact.get("renderer") or artifact.get("renderer_id")
+        if isinstance(renderer, str) and renderer.strip():
+            return {**descriptor, "kind": explicit_kind or kind, "render": "custom-render", "media_type": media_type, "reference": {"type": "custom_renderer", "renderer": renderer.strip()}}
+        return {**descriptor, "kind": explicit_kind or kind, "render": "inline-json", "media_type": media_type}
     return descriptor
 
 
@@ -425,6 +565,36 @@ def workflow_source_preview(value: object) -> JsonObject | None:
     }
 
 
+def _media_artifact(
+    kind: str,
+    title: str,
+    src: str,
+    *,
+    media_type: str | None,
+    artifact_id: str | None,
+    description: str | None,
+    tags: tuple[str, ...],
+    source: JsonObject | None,
+) -> Artifact:
+    if _is_safe_external_url(src):
+        render = ArtifactRender("media-reference", media_type=media_type, reference={"type": "url", "href": src})
+        value = {"url": src}
+    else:
+        guessed_type = media_type or mimetypes.guess_type(src)[0]
+        render = ArtifactRender("file-reference", media_type=guessed_type, reference={"type": "local_path", "field": "path", "href": src})
+        value = {"path": src}
+    return _artifact(
+        kind=kind,
+        title=title,
+        value=value,
+        render=render,
+        artifact_id=artifact_id,
+        description=description,
+        tags=tags,
+        source=source,
+    )
+
+
 def _artifact(
     *,
     kind: str,
@@ -470,6 +640,10 @@ def _descriptor_from_render(kind: str, render: ArtifactRender) -> JsonObject:
         descriptor["render"] = "inline-json"
         descriptor.pop("reference", None)
         return descriptor
+    if mode == "custom-render" and not reference:
+        descriptor["warning"] = "Custom artifact renderer missing a safe renderer id; falling back to inline JSON."
+        descriptor["render"] = "inline-json"
+        return descriptor
     if mode == "file-reference":
         descriptor["warning"] = "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline."
     if mode == "python-source":
@@ -486,6 +660,16 @@ def _safe_render_mode(mode: str) -> ArtifactRenderMode:
 
 
 def _safe_reference(mode: str, reference: JsonObject) -> JsonObject:
+    if mode == "custom-render":
+        raw_renderer = reference.get("renderer")
+        renderer = raw_renderer if isinstance(raw_renderer, str) else None
+        if not renderer or not renderer.strip():
+            return {}
+        payload: dict[str, JsonValue] = {"type": "custom_renderer", "renderer": renderer.strip()}
+        props = reference.get("props")
+        if isinstance(props, dict) and props:
+            payload["props"] = to_json_value(props)
+        return payload
     href = reference.get("href") if isinstance(reference, dict) else None
     if not isinstance(href, str) or not href.strip():
         return {}
@@ -522,6 +706,10 @@ def _artifact_kind_from_media_type(media_type: str | None) -> str | None:
         return major
     if media_type in {"text/markdown", "application/markdown"}:
         return "markdown"
+    if media_type == "text/html":
+        return "html"
+    if media_type in {"text/x-diff", "text/x-patch"} or media_type.endswith("/x-diff") or media_type.endswith("/x-patch"):
+        return "diff"
     if media_type.startswith("text/"):
         return "text"
     if media_type == "application/json":

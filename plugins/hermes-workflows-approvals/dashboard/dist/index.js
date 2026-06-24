@@ -18,6 +18,15 @@
   const Button = components.Button || "button";
   const Input = components.Input || "input";
   const API = "/api/plugins/hermes-workflows-approvals";
+  const artifactRenderers = {};
+
+  function registerArtifactRenderer(name, renderer) {
+    if (typeof name === "string" && name.trim() && typeof renderer === "function") artifactRenderers[name.trim()] = renderer;
+  }
+
+  window.__HERMES_WORKFLOWS_ARTIFACT_RENDERERS__ = window.__HERMES_WORKFLOWS_ARTIFACT_RENDERERS__ || {};
+  window.__HERMES_WORKFLOWS_ARTIFACT_RENDERERS__.register = registerArtifactRenderer;
+  window.__HERMES_WORKFLOWS_ARTIFACT_RENDERERS__.renderers = artifactRenderers;
 
   function e(type, props) {
     const children = Array.prototype.slice.call(arguments, 2);
@@ -100,15 +109,127 @@
       return e(GeneratedPythonWorkflowPreview, { value: value });
     }
     if (render.render === "inline-markdown") {
-      const markdown = value && typeof value === "object" ? value.markdown : value;
-      if (typeof markdown === "string" && markdown.trim()) {
-        return e("pre", { className: "hwf-markdown-preview" }, markdown);
-      }
+      const markdown = value && typeof value === "object" ? (value.markdown || value.content) : value;
+      if (typeof markdown === "string" && markdown.trim()) return e(MarkdownArtifactPreview, { markdown: markdown });
+    }
+    if (render.render === "inline-html") {
+      const html = value && typeof value === "object" ? (value.html || value.content) : value;
+      if (typeof html === "string" && html.trim()) return e(HtmlArtifactPreview, { html: html });
+    }
+    if (render.render === "inline-diff") {
+      const diff = value && typeof value === "object" ? (value.diff || value.patch || value.content) : value;
+      if (typeof diff === "string" && diff.trim()) return e(DiffPreview, { diff: diff });
     }
     if (render.render === "inline-text" && typeof value === "string") {
       return e("pre", { className: "hwf-text-preview" }, value);
     }
+    if (render.render === "media-reference") return e(MediaArtifactPreview, { render: render });
+    if (render.render === "file-reference") return e(FileReferencePreview, { render: render });
+    if (render.render === "external-link" || render.render === "external-reference") return e(ExternalReferencePreview, { render: render });
+    if (render.render === "custom-render") return e(CustomArtifactPreview, { render: render, value: value });
     return null;
+  }
+
+  function MarkdownArtifactPreview(props) {
+    const lines = String(props.markdown || "").split(/\r?\n/);
+    const nodes = [];
+    let inCode = false;
+    let code = [];
+    function flushCode(i) {
+      if (code.length) nodes.push(e("pre", { key: "code-" + i, className: "hwf-markdown-code" }, code.join("\n")));
+      code = [];
+    }
+    lines.forEach(function (line, i) {
+      if (line.trim().startsWith("```")) {
+        if (inCode) flushCode(i);
+        inCode = !inCode;
+        return;
+      }
+      if (inCode) { code.push(line); return; }
+      if (/^###\s+/.test(line)) nodes.push(e("h4", { key: i }, line.replace(/^###\s+/, "")));
+      else if (/^##\s+/.test(line)) nodes.push(e("h3", { key: i }, line.replace(/^##\s+/, "")));
+      else if (/^#\s+/.test(line)) nodes.push(e("h2", { key: i }, line.replace(/^#\s+/, "")));
+      else if (/^[-*]\s+/.test(line)) nodes.push(e("div", { key: i, className: "hwf-markdown-list-item" }, "• ", line.replace(/^[-*]\s+/, "")));
+      else if (line.trim()) nodes.push(e("p", { key: i }, line));
+      else nodes.push(e("br", { key: i }));
+    });
+    flushCode("end");
+    return e("div", { className: "hwf-markdown-preview" }, nodes);
+  }
+
+  function HtmlArtifactPreview(props) {
+    return e("div", { className: "hwf-html-preview" },
+      e("div", { className: "hwf-muted" }, "Sandboxed HTML preview"),
+      e("iframe", { sandbox: "", srcDoc: String(props.html || ""), title: "HTML artifact preview" }));
+  }
+
+  function DiffPreview(props) {
+    return e("pre", { className: "hwf-diff-preview" },
+      String(props.diff || "").split(/\r?\n/).map(function (line, i) {
+        let cls = "hwf-diff-line";
+        if (line.startsWith("@@")) cls += " hwf-diff-hunk";
+        else if (line.startsWith("+") && !line.startsWith("+++")) cls += " hwf-diff-added";
+        else if (line.startsWith("-") && !line.startsWith("---")) cls += " hwf-diff-removed";
+        return e("code", { key: i, className: cls }, line + "\n");
+      }));
+  }
+
+  function referenceHref(render) {
+    return render && render.reference && typeof render.reference.href === "string" ? render.reference.href : "";
+  }
+
+  function isSafeHttpUrl(href) {
+    try { const parsed = new URL(href); return parsed.protocol === "http:" || parsed.protocol === "https:"; } catch (_err) { return false; }
+  }
+
+  function MediaArtifactPreview(props) {
+    const render = props.render || {};
+    const href = referenceHref(render);
+    if (!isSafeHttpUrl(href)) return e(FileReferencePreview, { render: render });
+    const kind = render.kind;
+    if (kind === "image") return e("div", { className: "hwf-media-preview" }, e("img", { className: "hwf-media-image", src: href, alt: "Artifact image preview" }));
+    if (kind === "audio") return e("div", { className: "hwf-media-preview" }, e("audio", { className: "hwf-media-audio", controls: true, src: href }));
+    if (kind === "video") return e("div", { className: "hwf-media-preview" }, e("video", { className: "hwf-media-video", controls: true, src: href }));
+    return e(ExternalReferencePreview, { render: render });
+  }
+
+  function FileReferencePreview(props) {
+    const render = props.render || {};
+    const href = referenceHref(render);
+    return e("div", { className: "hwf-file-reference" },
+      e("strong", null, "File artifact"),
+      render.media_type && e(Pill, { label: render.media_type }),
+      href && e("code", null, href),
+      e("div", { className: "hwf-muted" }, "Local/private files are not served by the dashboard."));
+  }
+
+  function ExternalReferencePreview(props) {
+    const render = props.render || {};
+    const href = referenceHref(render);
+    if (!isSafeHttpUrl(href)) return null;
+    return e("div", { className: "hwf-external-reference" }, e("a", { href: href, target: "_blank", rel: "noreferrer" }, href));
+  }
+
+  function CustomArtifactPreview(props) {
+    const render = props.render || {};
+    const ref = render.reference || {};
+    const rendererId = ref.renderer;
+    const custom = rendererId && artifactRenderers[rendererId];
+    if (custom) {
+      try { return custom({ render: render, value: props.value, React: React, e: e }); }
+      catch (err) { return e(CustomArtifactFallback, { render: render, value: props.value, error: err.message || String(err) }); }
+    }
+    return e(CustomArtifactFallback, { render: render, value: props.value });
+  }
+
+  function CustomArtifactFallback(props) {
+    const render = props.render || {};
+    const ref = render.reference || {};
+    return e("div", { className: "hwf-custom-render-fallback" },
+      e("strong", null, "Custom artifact renderer"),
+      ref.renderer && e(Pill, { label: ref.renderer }),
+      props.error && e("div", { className: "hwf-bad" }, props.error),
+      e("pre", null, pretty(props.value)));
   }
 
   function artifactInlineValue(value) {

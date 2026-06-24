@@ -439,14 +439,93 @@
 }
 
 .hwf-markdown-preview,
-.hwf-text-preview {
+.hwf-text-preview,
+.hwf-html-preview,
+.hwf-media-preview,
+.hwf-file-reference,
+.hwf-external-reference,
+.hwf-custom-render-fallback,
+.hwf-diff-preview {
   margin: 0.75rem 0;
   line-height: 1.45;
   background: color-mix(in srgb, var(--hwf-surface), var(--color-primary) 4%);
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  padding: 0.75rem;
 }
 
 .hwf-markdown-preview {
   max-height: 30rem;
+  overflow: auto;
+}
+
+.hwf-markdown-preview h2,
+.hwf-markdown-preview h3,
+.hwf-markdown-preview h4,
+.hwf-markdown-preview p {
+  margin: 0.35rem 0;
+}
+
+.hwf-markdown-list-item {
+  margin: 0.2rem 0 0.2rem 0.5rem;
+}
+
+.hwf-markdown-code {
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
+.hwf-html-preview iframe {
+  width: 100%;
+  min-height: 16rem;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-sm, 0.375rem);
+  background: white;
+}
+
+.hwf-media-image,
+.hwf-media-video {
+  max-width: 100%;
+  max-height: 30rem;
+  border-radius: var(--radius-sm, 0.375rem);
+}
+
+.hwf-media-audio {
+  width: 100%;
+}
+
+.hwf-file-reference,
+.hwf-external-reference,
+.hwf-custom-render-fallback {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.hwf-file-reference code {
+  overflow-wrap: anywhere;
+}
+
+.hwf-diff-preview {
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
+.hwf-diff-line {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.hwf-diff-added {
+  color: var(--hwf-ok);
+}
+
+.hwf-diff-removed {
+  color: var(--hwf-bad);
+}
+
+.hwf-diff-hunk {
+  color: var(--hwf-warn);
+  font-weight: 700;
 }
 
 .hwf-code-block {
