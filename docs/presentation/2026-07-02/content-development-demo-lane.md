@@ -13,7 +13,7 @@ Live narrative line: "The agent can write the launch assets, but the workflow ow
 
 ## Primary workflow example
 
-Target file: `examples/content_asset_lane.py`. The code block below is historical shape notes; the runnable example is the source of truth.
+Target file: `examples/advanced/content_asset_lane.py`. The code block below is historical shape notes; the runnable example is the source of truth.
 
 ```python
 from __future__ import annotations
@@ -251,11 +251,11 @@ Hard rule for the demo: do not implement `publish_content_packet` with real adap
 
 ## Likely repo files to implement
 
-- `examples/content_asset_lane.py` — main runnable demo with mock outputs.
+- `examples/advanced/content_asset_lane.py` — main runnable demo with mock outputs.
 - `tests/test_launch_examples.py` — asserts the workflow reaches `select_content_topic`; deeper approval-path tests can cover outline/section/packet gates when needed.
 - `docs/presentation/2026-07-02/workflows.registry.example.json` — add alias `content-asset-lane` with `python_paths: ["src", "."]`.
 - `docs/presentation/2026-07-02/demo-runbook.md` — add optional Demo 3 commands for the content lane.
-- `docs/presentation/2026-07-02/public-examples-map.md` — add row for `examples/content_asset_lane.py` proving multi-asset content workflows.
+- `docs/presentation/2026-07-02/public-examples-map.md` — add row for `examples/advanced/content_asset_lane.py` proving multi-asset content workflows.
 - `docs/presentation/2026-07-02/artifact-manifest.md` — add content-lane generated artifacts and approval receipts after smoke run.
 - Optional after public API polish: `src/hermes_workflows/examples/content_asset_lane.py` if this should ship as an installed quickstart, not just a July 2 repo example.
 
