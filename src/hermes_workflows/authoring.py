@@ -7,10 +7,11 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 import ast
-from typing import Any, Callable, Generic, Literal, TypeVar, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Generic, Literal, TypeVar, get_args, get_origin, get_type_hints
 
 from .approvals import ApprovalDecision
 from .engine import PendingStep
+from .types import to_json_value
 
 T = TypeVar("T")
 _MISSING = object()
@@ -612,16 +613,25 @@ def _safe_dataclass_type_hints(dataclass_type: type[Any]) -> dict[str, Any]:
     """
 
     try:
-        return get_type_hints(dataclass_type)
+        return get_type_hints(dataclass_type, include_extras=True)
+    except TypeError:
+        try:
+            return get_type_hints(dataclass_type)
+        except Exception:
+            return dict(getattr(dataclass_type, "__annotations__", {}))
     except Exception:
-        return {}
+        return dict(getattr(dataclass_type, "__annotations__", {}))
 
 
 def _field_schema_descriptor(field: Any, *, annotation: Any) -> dict[str, Any]:
+    description = _field_description(field, annotation=annotation)
+    annotation = _strip_annotated(annotation)
     origin = get_origin(annotation)
     args = get_args(annotation)
     required = field.default is MISSING and field.default_factory is MISSING
     descriptor: dict[str, Any] = {"name": field.name, "kind": "scalar", "required": required}
+    if description:
+        descriptor["description"] = description
     literal_options = _literal_options(annotation)
     if origin is Literal or literal_options:
         descriptor["kind"] = "choice"
@@ -636,6 +646,75 @@ def _field_schema_descriptor(field: Any, *, annotation: Any) -> dict[str, Any]:
     else:
         descriptor["kind"] = "object"
     return descriptor
+
+
+def _strip_annotated(annotation: Any) -> Any:
+    if get_origin(annotation) is Annotated:
+        args = get_args(annotation)
+        return args[0] if args else Any
+    if isinstance(annotation, str):
+        parts = _annotated_string_args(annotation)
+        if parts:
+            return parts[0]
+    return annotation
+
+
+def _field_description(field: Any, *, annotation: Any) -> str | None:
+    metadata_description = field.metadata.get("description") if getattr(field, "metadata", None) else None
+    if isinstance(metadata_description, str) and metadata_description.strip():
+        return metadata_description.strip()
+    if get_origin(annotation) is Annotated:
+        for item in get_args(annotation)[1:]:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            description = getattr(item, "description", None)
+            if isinstance(description, str) and description.strip():
+                return description.strip()
+    if isinstance(annotation, str):
+        for item in _annotated_string_args(annotation)[1:]:
+            try:
+                value = ast.literal_eval(item)
+            except Exception:
+                continue
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _annotated_string_args(annotation: str) -> list[str]:
+    text = annotation.strip()
+    if not (text.startswith("Annotated[") or text.startswith("typing.Annotated[")) or not text.endswith("]"):
+        return []
+    inner = text[text.index("[") + 1 : -1]
+    return _split_top_level_args(inner)
+
+
+def _split_top_level_args(value: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quote = None
+    escape = False
+    for index, char in enumerate(value):
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in "[({":
+            depth += 1
+        elif char in "])}":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
 
 
 def _literal_options(annotation: Any) -> list[Any]:
@@ -654,6 +733,9 @@ def _literal_options(annotation: Any) -> list[Any]:
 
 def _is_text_annotation(annotation: Any) -> bool:
     if annotation is str:
+        return True
+    args = get_args(annotation)
+    if args and str in args and type(None) in args:
         return True
     if not isinstance(annotation, str):
         return False
@@ -684,15 +766,7 @@ def _default_item_key(value: Any) -> Any:
 
 
 def _jsonable(value: Any) -> Any:
-    if isinstance(value, ApprovalDecision):
-        return _jsonable(value.to_dict())
-    if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_jsonable(item) for item in value]
-    return value
+    return to_json_value(value)
 
 
 def _sha256_text(value: str) -> str:

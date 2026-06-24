@@ -4,13 +4,11 @@ import hashlib
 import inspect
 import json
 import re
-from collections.abc import Mapping
-from dataclasses import is_dataclass
 from typing import Any
 
-from .approvals import ApprovalDecision
 from .decorators import step
-from .workflow_values import Workflow, workflow_from_agent_output
+from .types import to_json_value
+from .workflow_values import workflow_from_agent_output
 
 _PLACEHOLDER = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}")
 
@@ -135,18 +133,8 @@ def _sha256_json(value: Any) -> str:
 
 
 def _json_roundtrip(value: Any) -> Any:
-    return json.loads(json.dumps(_jsonable(value), sort_keys=True))
+    return json.loads(json.dumps(to_json_value(value), sort_keys=True))
 
 
 def _jsonable(value: Any) -> Any:
-    if isinstance(value, Workflow):
-        return value.to_json()
-    if isinstance(value, ApprovalDecision):
-        return _jsonable(value.to_dict())
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if is_dataclass(value) and not isinstance(value, type):
-        return {str(key): _jsonable(item) for key, item in value.__dict__.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
+    return to_json_value(value)

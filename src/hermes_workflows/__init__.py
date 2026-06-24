@@ -58,6 +58,11 @@ _ADVANCED_EXPORTS: dict[str, tuple[str, str]] = {
     "AgentRunnerError": ("hermes_workflows.runners", "AgentRunnerError"),
     "SubprocessAgentRunner": ("hermes_workflows.runners", "SubprocessAgentRunner"),
     "WorkflowWorkerService": ("hermes_workflows.worker_service", "WorkflowWorkerService"),
+    "JsonObject": ("hermes_workflows.types", "JsonObject"),
+    "JsonScalar": ("hermes_workflows.types", "JsonScalar"),
+    "JsonValue": ("hermes_workflows.types", "JsonValue"),
+    "to_json_object": ("hermes_workflows.types", "to_json_object"),
+    "to_json_value": ("hermes_workflows.types", "to_json_value"),
 }
 
 
