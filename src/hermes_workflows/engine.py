@@ -680,9 +680,7 @@ class WorkflowEngine:
                     prompt=summary.get("prompt"),
                     artifact=summary.get("artifact"),
                     schema=summary.get("schema"),
-                    approver=summary.get("approver"),
                     allowed=list(summary.get("allowed") or []),
-                    authority=summary.get("authority"),
                     timeout=summary.get("timeout"),
                     waiting_on=row["waiting_on"],
                     requested_seq=summary.get("requested_seq"),
@@ -766,13 +764,7 @@ class WorkflowEngine:
         if not is_human_input and payload.get("action") not in allowed:
             raise ValueError(f"operator step {key} action is not allowed: {payload.get('action')}")
 
-        _validate_operator_source(
-            key,
-            str(request_payload.get("approver") or "human"),
-            payload,
-            source,
-            require_decision_by=not is_human_input,
-        )
+        _validate_operator_source(key, payload, source)
 
     def _validate_approval_decision_signal(self, workflow_id: str, key: str, payload: Any, source: Any, idempotency_key: str, **kwargs: Any) -> None:
         self._validate_operator_response_signal(
@@ -1472,25 +1464,17 @@ class WorkflowEngine:
             validation_error = None
             if decision_event is not None:
                 try:
-                    _validate_approval_source(
-                        str(key),
-                        str(payload.get("approver") or "human"),
-                        decision or {},
-                        source,
-                        require_decision_by=payload.get("kind") != "human_input.request.v1",
-                    )
+                    _validate_operator_source(str(key), decision or {}, source)
                 except ValueError as exc:
                     status = "invalid_decision"
                     validation_error = str(exc)
             summary = {
                 "key": key,
                 "status": status,
-                "approver": payload.get("approver"),
                 "prompt": payload.get("prompt"),
                 "artifact": payload.get("artifact"),
                 "schema": payload.get("schema"),
                 "allowed": payload.get("allowed") or ["approve", "reject"],
-                "authority": payload.get("authority"),
                 "timeout": payload.get("timeout"),
                 "requested_seq": event.get("seq"),
                 "decision": decision,
@@ -1553,7 +1537,6 @@ class WorkflowEngine:
                     item.setdefault("artifact", request.get("artifact"))
                     item.setdefault("schema", request.get("schema"))
                     item.setdefault("schema_descriptor", request.get("schema_descriptor"))
-                    item.setdefault("approver", request.get("approver"))
                     item.setdefault("timeout", request.get("timeout"))
             operator_steps.append(item)
         return operator_steps
@@ -3097,8 +3080,6 @@ class WorkflowContext:
                 "agent_request": provenance.get("request"),
                 "agent_response": provenance.get("response"),
             },
-            approver="human:skylar",
-            authority=["run_generated_python_workflow"],
             allowed=["approve", "reject"],
         )
         if decision.get("action") != "approve":
@@ -3189,9 +3170,7 @@ class WorkflowContext:
         *,
         key: str | None = None,
         artifact: Any = None,
-        approver: str = "human",
         allowed: Optional[List[str]] = None,
-        authority: Optional[List[str]] = None,
         timeout: Optional[str] = None,
         feedback_loop: bool = False,
     ) -> ApprovalDecision:
@@ -3201,9 +3180,7 @@ class WorkflowContext:
             prompt,
             key=key,
             artifact=artifact,
-            approver=approver,
             allowed=allowed,
-            authority=authority,
             timeout=timeout,
             feedback_loop=feedback_loop,
         )
@@ -3216,7 +3193,6 @@ class WorkflowContext:
         artifact: Any = None,
         assignee: str | None = None,
         instructions: str | None = None,
-        authority: Optional[List[str]] = None,
         block: bool = True,
         public_name: str | None = None,
         public_label: str | None = None,
@@ -3238,7 +3214,6 @@ class WorkflowContext:
             "artifact": artifact,
             "assignee": assignee,
             "instructions": instructions,
-            "authority": authority or [],
             "signal_type": signal_type,
             "public_name": public_name or assignee or agent_key,
             "public_label": public_label or public_name or assignee or agent_key,
@@ -3280,7 +3255,6 @@ class WorkflowContext:
         artifact: Any = None,
         schema: str = "json",
         schema_descriptor: Optional[dict[str, Any]] = None,
-        approver: str = "human",
         timeout: Optional[str] = None,
         block: bool = True,
     ) -> Any:
@@ -3292,7 +3266,6 @@ class WorkflowContext:
             artifact=artifact,
             schema=schema,
             schema_descriptor=schema_descriptor,
-            approver=approver,
             timeout=timeout,
             block=block,
         )
@@ -3334,18 +3307,14 @@ class ApprovalClient:
         *,
         key: str,
         artifact: Any = None,
-        approver: str = "human",
         allowed: Optional[List[str]] = None,
-        authority: Optional[List[str]] = None,
         timeout: Optional[str] = None,
     ) -> Dict[str, Any]:
         return {
             "prompt": prompt,
             "key": key,
             "artifact": artifact,
-            "approver": approver,
             "allowed": allowed or ["approve", "reject"],
-            "authority": authority or [],
             "timeout": timeout,
         }
 
@@ -3380,11 +3349,11 @@ class ApprovalClient:
     def _operator_response_event(self, key: str) -> Optional[Any]:
         return self.ctx._last_event("SignalReceived", f"signal:operator.response:{key}")
 
-    def _validate_decision(self, *, key: str, approver: str, allowed: List[str], decision_event: Dict[str, Any]) -> ApprovalDecision:
+    def _validate_decision(self, *, key: str, allowed: List[str], decision_event: Dict[str, Any]) -> ApprovalDecision:
         decision = decision_event["payload"]
         if decision.get("action") not in allowed:
             raise ValueError(f"approval {key} action is not allowed: {decision.get('action')}")
-        source = _validate_approval_source(key, approver, decision, decision_event.get("source"))
+        source = _validate_approval_source(key, decision, decision_event.get("source"))
         return ApprovalDecision(
             action=str(decision.get("action") or ""),
             by=str(decision.get("by") or ""),
@@ -3402,9 +3371,7 @@ class ApprovalClient:
         *,
         key: str | None = None,
         artifact: Any = None,
-        approver: str = "human",
         allowed: Optional[List[str]] = None,
-        authority: Optional[List[str]] = None,
         timeout: Optional[str] = None,
         feedback_loop: bool = False,
     ) -> ApprovalDecision:
@@ -3417,9 +3384,7 @@ class ApprovalClient:
                 prompt,
                 key=key,
                 artifact=artifact,
-                approver=approver,
                 allowed=allowed_values,
-                authority=authority,
                 timeout=timeout,
             )
             with self.ctx.engine._connect() as con:
@@ -3431,7 +3396,7 @@ class ApprovalClient:
         if decision_event is None:
             return await self.ctx.wait_for("approval.decision", key=key)
 
-        return self._validate_decision(key=key, approver=approver, allowed=allowed_values, decision_event=decision_event)
+        return self._validate_decision(key=key, allowed=allowed_values, decision_event=decision_event)
 
     async def request_input(
         self,
@@ -3441,7 +3406,6 @@ class ApprovalClient:
         artifact: Any = None,
         schema: str = "json",
         schema_descriptor: Optional[dict[str, Any]] = None,
-        approver: str = "human",
         timeout: Optional[str] = None,
         block: bool = True,
     ) -> Any:
@@ -3457,9 +3421,7 @@ class ApprovalClient:
             "artifact": artifact,
             "schema": schema,
             "schema_descriptor": schema_descriptor,
-            "approver": approver,
             "allowed": None,
-            "authority": [],
             "timeout": timeout,
         }
         if self.ctx._last_event("ApprovalRequested", event_key) is None:
@@ -3475,22 +3437,14 @@ class ApprovalClient:
             return await self.ctx.wait_for("operator.response", key=key)
 
         raw_payload = decision_event["payload"]
-        _validate_operator_source(
-            key,
-            approver,
-            raw_payload if isinstance(raw_payload, dict) else {},
-            decision_event.get("source"),
-            require_decision_by=False,
-        )
+        _validate_operator_source(key, raw_payload if isinstance(raw_payload, dict) else {}, decision_event.get("source"))
         return raw_payload
 
     async def request_many(
         self,
         requests: List[Dict[str, Any]],
         *,
-        approver: str = "human",
         allowed: Optional[List[str]] = None,
-        authority: Any = None,
         timeout: Optional[str] = None,
         feedback_loop: bool = False,
     ) -> List[Dict[str, Any]]:
@@ -3517,19 +3471,15 @@ class ApprovalClient:
                 raise ValueError(f"duplicate approval key in request_many: {key}")
             seen_keys.add(key)
             request_allowed = list(request.get("allowed") or allowed or ["approve", "reject"])
-            request_approver = str(request.get("approver") or approver)
             normalized.append(
                 {
                     "key": key,
-                    "approver": request_approver,
                     "allowed": request_allowed,
                     "payload": self._payload(
                         str(request.get("prompt") or "Review approval?"),
                         key=key,
                         artifact=request.get("artifact"),
-                        approver=request_approver,
                         allowed=request_allowed,
-                        authority=_approval_authority_payload(request.get("authority") if "authority" in request else authority),
                         timeout=request.get("timeout") or timeout,
                     ),
                 }
@@ -3563,7 +3513,6 @@ class ApprovalClient:
                 continue
             decision = self._validate_decision(
                 key=item["key"],
-                approver=item["approver"],
                 allowed=item["allowed"],
                 decision_event=decision_event,
             )
@@ -3574,15 +3523,7 @@ class ApprovalClient:
         return decisions
 
 
-_OPERATOR_SOURCE_ALLOWLIST = ("kind", "id", "channel", "message_url", "message_id", "event_id")
-
-
-def _approval_authority_payload(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        return dict(value)
-    return list(value)
+_OPERATOR_SOURCE_ALLOWLIST = ("channel", "message_url", "message_id", "event_id")
 
 
 def _normalize_approval_decision_payload(payload: Any) -> Any:
@@ -3626,33 +3567,20 @@ def _sanitize_approval_text(value: str) -> str:
 
 def _validate_operator_source(
     key: str,
-    approver: str,
     decision: Dict[str, Any],
     source: Any,
-    *,
-    require_decision_by: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    if not approver.startswith("human"):
-        return source if isinstance(source, dict) else None
+    """Validate decision provenance without request-time identities."""
 
-    if not isinstance(source, dict) or source.get("kind") != "human":
-        raise ValueError(f"operator step {key} requires human approval source")
-
-    expected_id = approver.split(":", 1)[1] if ":" in approver else None
-    dashboard_provenance = source.get("channel") == "hermes-dashboard"
-    if expected_id and not dashboard_provenance and source.get("id") != expected_id:
-        raise ValueError(f"operator step {key} requires approval from {approver}")
-    if require_decision_by and expected_id and not dashboard_provenance and decision.get("by") != expected_id:
-        raise ValueError(f"operator step {key} decision.by must match {approver}")
-
+    if not isinstance(source, dict):
+        raise ValueError(f"operator step {key} requires decision provenance")
     if not source.get("channel") or not any(source.get(field) for field in ("message_url", "message_id", "event_id")):
-        raise ValueError(f"operator step {key} requires external approval provenance")
-
+        raise ValueError(f"operator step {key} requires external decision provenance")
     return source
 
 
-def _validate_approval_source(key: str, approver: str, decision: Dict[str, Any], source: Any, *, require_decision_by: bool = True) -> Optional[Dict[str, Any]]:
-    return _validate_operator_source(key, approver, decision, source, require_decision_by=require_decision_by)
+def _validate_approval_source(key: str, decision: Dict[str, Any], source: Any) -> Optional[Dict[str, Any]]:
+    return _validate_operator_source(key, decision, source)
 
 
 @dataclass(frozen=True)

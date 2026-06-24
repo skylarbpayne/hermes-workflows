@@ -31,7 +31,7 @@ rm -f .hermes/presentation-july2/workflows.sqlite
 ## Demo 1: reviewable draft reaches Review Queue
 
 ```bash
-hermes-workflows run reviewable-draft   --config docs/presentation/2026-07-02/workflows.registry.example.json   --project-root .   --db default   --id wf_july2_reviewable_draft   --input-json '{"topic":"Hermes Workflows July 2 demo","approver":"human:operator"}'
+hermes-workflows run reviewable-draft   --config docs/presentation/2026-07-02/workflows.registry.example.json   --project-root .   --db default   --id wf_july2_reviewable_draft   --input-json '{"topic":"Hermes Workflows July 2 demo"}'
 
 hermes-workflows worker   --config docs/presentation/2026-07-02/workflows.registry.example.json   --db default   --worker-id july2-demo-worker   --max-commands 5   --idle-exit-after 0.1
 
@@ -76,7 +76,7 @@ hermes-workflows run coding-review \
   --project-root . \
   --db default \
   --id wf_july2_coding_review \
-  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","base_ref":"HEAD","worktree_path":"/tmp/hermes-workflows-july2-coding-worktree","branch_name":"demo/july2-coding-review","task":"Make a small, reviewable code change; do not commit, push, PR, or merge.","validation_command":"python -m py_compile examples/coding_review_demo.py && python -m pytest -q tests/test_launch_examples.py","approver":"human:operator"}'
+  --input-json '{"repo_path":"/Users/skylarpayne/code/hermes-workflows","base_ref":"HEAD","worktree_path":"/tmp/hermes-workflows-july2-coding-worktree","branch_name":"demo/july2-coding-review","task":"Make a small, reviewable code change; do not commit, push, PR, or merge.","validation_command":"python -m py_compile examples/coding_review_demo.py && python -m pytest -q tests/test_launch_examples.py"}'
 
 hermes-workflows worker \
   --config docs/presentation/2026-07-02/workflows.registry.example.json \
@@ -110,7 +110,7 @@ hermes-workflows run content-asset-lane \
   --project-root . \
   --db default \
   --id wf_july2_content_assets \
-  --input-json '{"approver":"human:operator"}'
+  --input-json '{}'
 
 hermes-workflows worker \
   --config docs/presentation/2026-07-02/workflows.registry.example.json \
@@ -140,7 +140,7 @@ hermes-workflows run email-triage-demo \
   --project-root . \
   --db default \
   --id wf_july2_email_triage \
-  --input-json '{"fixture":"synthetic","approver":"human:operator"}'
+  --input-json '{"fixture":"synthetic"}'
 
 hermes-workflows worker \
   --config docs/presentation/2026-07-02/workflows.registry.example.json \
@@ -170,7 +170,7 @@ hermes-workflows run event-planning-demo \
   --project-root . \
   --db default \
   --id wf_july2_event_planning \
-  --input-json '{"approver":"human:operator"}'
+  --input-json '{}'
 
 hermes-workflows worker \
   --config docs/presentation/2026-07-02/workflows.registry.example.json \
@@ -203,7 +203,7 @@ For source-tree examples under `examples/`, keep `PYTHONPATH=src:.` exported in 
 Use the lower-level source-checkout path. This is not the primary product demo, but it proves the same runtime state without the `uv run` wrapper:
 
 ```bash
-PYTHONPATH=src:. python -m hermes_workflows start   hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow   --db .hermes/presentation-july2/workflows.sqlite   --id wf_july2_reviewable_draft   --input-json '{"topic":"Hermes Workflows July 2 demo","approver":"human:operator"}'
+PYTHONPATH=src:. python -m hermes_workflows start   hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow   --db .hermes/presentation-july2/workflows.sqlite   --id wf_july2_reviewable_draft   --input-json '{"topic":"Hermes Workflows July 2 demo"}'
 
 PYTHONPATH=src:. python -m hermes_workflows worker   hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow   --db .hermes/presentation-july2/workflows.sqlite   --id wf_july2_reviewable_draft   --worker-id july2-demo-worker   --max-commands 5   --idle-exit-after 0.1
 ```

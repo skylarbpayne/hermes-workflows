@@ -17,7 +17,6 @@ async def typed_auto_key_workflow(inputs):
     decision = await approve(
         "Approve plan artifact?",
         artifact={"plan": inputs.get("plan", "ship it")},
-        approver="human:skylar",
     )
     return {
         "typed": isinstance(decision, ApprovalDecision),
@@ -33,7 +32,6 @@ async def agent_workflow(inputs):
         "Approve implementation agent work?",
         key="approve_agent_plan",
         artifact={"goal": inputs.get("goal", "demo")},
-        approver="human:skylar",
     )
     if not approved.approved:
         return {"status": "not-approved", "feedback": approved.feedback}
@@ -60,7 +58,6 @@ async def feedback_loop_workflow(inputs):
             "Approve packet?",
             key="approve_packet",
             artifact=packet,
-            approver="human:skylar",
             allowed=["approve", "reject", "edit"],
             feedback_loop=True,
         )
@@ -78,7 +75,6 @@ async def human_only_guard_workflow(inputs):
     decision = await approve(
         "Approve guarded action?",
         key="approve_guarded_action",
-        approver="human:skylar",
     )
     return {"approved": decision.approved}
 
@@ -127,7 +123,7 @@ def test_ctx_approve_returns_typed_decision_and_derives_key(tmp_path):
     assert completed_step["status"] == "completed"
     assert completed_step["completion_mode"] == "approval"
     assert completed_step["output"] == {"action": "approve", "by": "skylar"}
-    assert completed_step["source"]["kind"] == "human"
+    assert completed_step["source"] == {"channel": "discord", "message_id": "msg-1"}
 
 
 def test_agent_records_external_work_and_resumes_on_completion_signal(tmp_path):
@@ -241,21 +237,21 @@ def test_agent_input_accepts_typed_approval_decisions():
     assert request["input_sha256"]
 
 
-def test_human_gate_rejects_agent_authored_named_gate_approval(tmp_path):
+def test_approval_accepts_any_recorded_decision_provenance_without_actor_identity_gate(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.run_until_idle(human_only_guard_workflow, {}, workflow_id="wf_guard")
 
-    with pytest.raises(ValueError, match="requires human approval source"):
-        engine.signal(
-            "wf_guard",
-            "approval.decision",
-            key="approve_guarded_action",
-            payload={"action": "approve", "by": "palmer"},
-            source={"kind": "agent", "id": "palmer", "channel": "discord", "message_id": "broad-chat"},
-            idempotency_key="agent-broad-chat",
-        )
+    recorded = engine.signal(
+        "wf_guard",
+        "approval.decision",
+        key="approve_guarded_action",
+        payload={"action": "approve", "by": "palmer"},
+        source={"kind": "agent", "id": "palmer", "channel": "discord", "message_id": "broad-chat"},
+        idempotency_key="agent-broad-chat",
+    )
 
-    status = engine.workflow_status("wf_guard")
-    assert status["status"] == "waiting"
-    assert status["waiting_on"] == "signal:approval.decision:approve_guarded_action"
+    assert recorded.status == "running"
+    result = engine.drain("wf_guard")
+    assert result.status == "completed"
+    assert result.result == {"approved": True}

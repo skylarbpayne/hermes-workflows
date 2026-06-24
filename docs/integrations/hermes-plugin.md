@@ -53,7 +53,7 @@ plugins:
             - /absolute/path/to/hermes-workflows/src
       # Required for dashboard Review Queue action buttons.
       # The browser does not choose identity; the server stamps this id.
-      dashboard_approver_id: operator
+      dashboard_decision_by_id: operator
 ```
 
 Environment fallback for tests/scripts:
@@ -61,7 +61,7 @@ Environment fallback for tests/scripts:
 ```bash
 export HERMES_WORKFLOWS_DBS='{"default":"/absolute/path/to/workspace/.hermes/workflows.sqlite"}'
 export HERMES_WORKFLOWS_CATALOG='[{"name":"reviewable-draft","workflow_ref":"hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
-export HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID=operator
+export HERMES_WORKFLOWS_DASHBOARD_DECISION_BY=operator
 ```
 
 `workflow_catalog` gives dashboard run/source/resume routes enough import context to resolve workflow code without asking operators to pass local persistence paths. Include `project_root`, `python_paths`, `repo_path`, or `cwd` when the workflow source is not importable from the Hermes process by default.
@@ -110,11 +110,11 @@ The dashboard tab at `/workflows` shows:
 - workflow waiting/running/completed state
 - recent events and command diagnostics
 - redacted artifacts and request schemas
-- trusted review/approval actions that stamp human provenance and resume through the configured workflow source
+- trusted review/approval actions that stamp server-configured provenance and resume through the configured workflow source
 
 Dashboard HTTP APIs are intentionally alias-only. They reject arbitrary SQLite paths because dashboard routes run inside the Hermes process and must not become local file readers/writers.
 
-Dashboard buttons are disabled unless `dashboard_approver_id` or `HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID` is configured server-side. The backend stamps provenance like `source={kind: human, id: <configured id>, channel: hermes-dashboard}` and records the decision/response. Review actions default to `resume=true` so the configured workflow source can enqueue or run the next continuation immediately. Remote or untrusted adapters can pass `resume=false` when they need record-only behavior.
+Dashboard buttons are disabled unless `dashboard_decision_by_id` or `HERMES_WORKFLOWS_DASHBOARD_DECISION_BY` is configured server-side. The backend stamps channel/message provenance and records the decision/response. Review actions default to `resume=true` so the configured workflow source can enqueue or run the next continuation immediately. Remote or untrusted adapters can pass `resume=false` when they need record-only behavior.
 
 ## Dashboard screenshots
 
@@ -250,7 +250,7 @@ JSON
 hermes-workflows run reviewable-draft \
   --config "$SMOKE_DIR/.hermes/workflows.registry.json" \
   --id wf_review_smoke \
-  --input-json '{"topic":"Review Queue smoke","approver":"human:operator"}'
+  --input-json '{"topic":"Review Queue smoke"}'
 
 # Drain queued workflow/agent work until the Review Queue request exists.
 hermes-workflows worker \

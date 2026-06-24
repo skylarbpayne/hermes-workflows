@@ -30,7 +30,6 @@ async def approval_trip_workflow(inputs):
         "Approve trip plan before packaging?",
         key="approve_trip_plan",
         artifact=plan,
-        approver="human:skylar",
         allowed=["approve", "reject", "edit", "rerun"],
     )
     if decision["action"] != "approve":
@@ -53,8 +52,6 @@ async def bulk_approval_workflow(inputs):
                 "artifact": {"kind": "entity", "name": "B"},
             },
         ],
-        approver="human:skylar",
-        authority={"scope": "bulk"},
     )
     return {"decisions": decisions}
 
@@ -71,10 +68,6 @@ def test_request_many_emits_every_atomic_approval_before_waiting(tmp_path):
     waits = [event for event in events if event["type"] == "WaitRequested"]
     assert [event["payload"]["key"] for event in approvals] == ["entity_a", "entity_b"]
     assert [event["payload"]["prompt"] for event in approvals] == ["Approve entity A?", "Approve entity B?"]
-    assert [event["payload"]["authority"] for event in approvals] == [
-        {"scope": "bulk"},
-        {"scope": "bulk"},
-    ]
     assert {event["payload"]["key"] for event in waits} == {"entity_a", "entity_b"}
 
     active = engine.list_approvals(status="waiting")
@@ -91,7 +84,7 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
         "approval.decision",
         key="entity_a",
         payload={"action": "approve", "by": "skylar"},
-        source={"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-a"},
+        source={"channel": "dashboard", "message_id": "approval-a"},
         idempotency_key="approval-a",
     )
 
@@ -107,7 +100,7 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
         "approval.decision",
         key="entity_b",
         payload={"action": "reject", "by": "skylar", "reason": "not needed"},
-        source={"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-b"},
+        source={"channel": "dashboard", "message_id": "approval-b"},
         idempotency_key="approval-b",
     )
 
@@ -118,14 +111,14 @@ def test_request_many_waits_until_every_atomic_approval_is_decided(tmp_path):
         "key": "entity_a",
         "action": "approve",
         "by": "skylar",
-        "source": {"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-a"},
+        "source": {"channel": "dashboard", "message_id": "approval-a"},
     }
     assert after_second.result["decisions"][1] == {
         "key": "entity_b",
         "action": "reject",
         "by": "skylar",
         "reason": "not needed",
-        "source": {"kind": "human", "id": "skylar", "channel": "dashboard", "message_id": "approval-b"},
+        "source": {"channel": "dashboard", "message_id": "approval-b"},
     }
     assert engine.list_approvals(status="waiting") == []
 
@@ -193,7 +186,6 @@ def test_run_until_idle_executes_local_steps_once_then_waits_for_approval(tmp_pa
     ]
     approval = next(event for event in events if event["type"] == "ApprovalRequested")
     assert approval["payload"]["prompt"] == "Approve trip plan before packaging?"
-    assert approval["payload"]["approver"] == "human:skylar"
     assert approval["payload"]["artifact"]["summary"] == "Trip plan for NYC"
 
     restarted = WorkflowEngine(db)

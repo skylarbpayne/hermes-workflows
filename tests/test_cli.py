@@ -26,7 +26,6 @@ async def demo_workflow(inputs):
         "Approve plan?",
         key="approve_plan",
         artifact=plan,
-        approver="human:skylar",
     )
     return {"plan": plan, "approved_by": decision["by"]}
 '''
@@ -868,12 +867,10 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
         {
             "key": "approve_plan",
             "status": "waiting",
-            "approver": "human:skylar",
             "prompt": "Approve plan?",
             "artifact": {"summary": "Plan for NYC"},
             "allowed": ["approve", "reject"],
             "schema": None,
-            "authority": [],
             "timeout": None,
             "requested_seq": 8,
             "decision": None,
@@ -888,16 +885,14 @@ def test_cli_events_outbox_list_filter_and_approval_summary(tmp_path):
         {
             "key": "approve_plan",
             "status": "approve",
-            "approver": "human:skylar",
             "prompt": "Approve plan?",
             "artifact": {"summary": "Plan for LA"},
             "allowed": ["approve", "reject"],
             "schema": None,
-            "authority": [],
             "timeout": None,
             "requested_seq": 8,
             "decision": {"action": "approve", "by": "skylar"},
-            "source": {"kind": "human", "id": "skylar", "channel": "discord", "message_url": "discord://thread/1/message/3"},
+            "source": {"channel": "discord", "message_url": "discord://thread/1/message/3"},
         }
     ]
 
@@ -1099,8 +1094,6 @@ def test_cli_approve_shortcut_sends_human_provenance_signal(tmp_path):
     approval = status_payload["approvals"][0]
     assert approval["decision"]["action"] == "approve"
     assert approval["source"] == {
-        "kind": "human",
-        "id": "skylar",
         "channel": "discord",
         "message_url": "discord://thread/1/message/2",
     }
@@ -1130,7 +1123,7 @@ def test_packaged_trip_example_runs_without_repo_examples_path(tmp_path):
         "hermes_workflows.examples.trip:trip_planning_workflow",
         db,
         "wf_trip_quickstart",
-        '{"destination":"NYC","approver":"human:operator"}',
+        '{"destination":"NYC"}',
         max_commands=10,
     )
     assert run_payload["status"] == "waiting"
@@ -1354,8 +1347,6 @@ def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
     assert status_payload["result"]["approved_by"] == "skylar"
     approval = status_payload["approvals"][0]
     assert approval["source"] == {
-        "kind": "human",
-        "id": "skylar",
         "channel": "local-dashboard",
         "message_id": "web-click-1",
     }

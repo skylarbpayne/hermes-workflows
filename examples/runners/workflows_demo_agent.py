@@ -27,21 +27,19 @@ async def assemble_email_review_packet(payload):
 async def participant_email_personalization_workflow(payload):
     review_packet = await assemble_email_review_packet(payload)
 
-    agent_decision = await approve(
-        "Agent approval: email-quality reviewer must approve the generated participant draft batch before human review.",
-        key="agent_email_quality_approval",
+    quality_decision = await approve(
+        "Review the generated participant draft batch before human review.",
+        key="email_quality_approval",
         artifact={"draft_batch": review_packet["draft_batch"], "quality_review": review_packet["quality_review"]},
-        approver="agent:email_quality_reviewer",
         allowed=["approve", "reject", "edit"],
-        authority=["advance_to_human_email_review"],
     )
-    if agent_decision.get("action") != "approve":
+    if quality_decision.get("action") != "approve":
         return {
             "ready_for_human": False,
-            "stage": "agent_quality_rejected",
+            "stage": "quality_rejected",
             "draft_batch": review_packet["draft_batch"],
             "quality_review": review_packet["quality_review"],
-            "agent_decision": agent_decision,
+            "quality_decision": quality_decision,
             "side_effects": {"gmail_drafts_created": 0, "emails_sent": 0},
         }
 
@@ -49,7 +47,7 @@ async def participant_email_personalization_workflow(payload):
         "ready_for_human": True,
         "draft_batch": review_packet["draft_batch"],
         "quality_review": review_packet["quality_review"],
-        "agent_decision": agent_decision,
+        "quality_decision": quality_decision,
         "side_effects": {"gmail_drafts_created": 0, "emails_sent": 0},
     }
 '''
@@ -292,7 +290,7 @@ def main() -> int:
         output = {
             "kind": "email_quality_review.v1",
             "approved": True,
-            "reviewer": "agent:email_quality_reviewer",
+            "reviewer": "email_quality_review",
             "checks": [
                 {"name": "roster coverage", "status": "pass", "detail": f"{len(drafts)} participant drafts generated."},
                 {"name": "winner accuracy", "status": "pass", "detail": "Winner emails mention only prizes tied to their project_id."},

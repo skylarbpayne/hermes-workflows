@@ -32,7 +32,7 @@ async def package_after_approval(plan, decision):
         "ready_for_booking_prep": True,
         "approved_by": decision["by"],
         "plan": plan,
-        "next_action": "prepare booking checklist; still do not purchase without a separate authority gate",
+        "next_action": "prepare booking checklist; still do not purchase without a separate approval gate",
     }
 
 
@@ -44,9 +44,7 @@ async def first_real_trip_workflow(inputs):
         "Approve this trip plan for packaging?",
         key="approve_trip_plan",
         artifact=plan,
-        approver="human:skylar",
         allowed=["approve", "reject", "edit", "rerun"],
-        authority=["schedule_external", "spend_money"],
     )
     if decision["action"] != "approve":
         return {"ready_for_booking_prep": False, "decision": decision, "plan": plan}

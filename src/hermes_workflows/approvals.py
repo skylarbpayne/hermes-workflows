@@ -17,9 +17,7 @@ class ApprovalView:
     prompt: str | None
     artifact: Any
     schema: str | None
-    approver: str | None
     allowed: list[str]
-    authority: Any
     timeout: str | None
     waiting_on: str | None
     requested_seq: int | None

@@ -18,7 +18,6 @@ from typing import Any
 from hermes_workflows import approve, step, workflow, workflow_id
 
 APPROVAL_KEY = "approve_email_triage_packet"
-APPROVER = "human:operator"
 DEFAULT_DB_ALIAS = "email-triage-demo"
 REGISTRY_NAME = "email-triage-demo"
 WORKFLOW_REF = "hermes_workflows.examples.email_triage:email_triage_workflow"
@@ -276,9 +275,7 @@ async def email_triage_workflow(inputs: dict[str, Any]) -> dict[str, Any]:
         ),
         key=APPROVAL_KEY,
         artifact=packet,
-        approver=APPROVER,
         allowed=["approve", "reject"],
-        authority=["local_email_triage_proposal_writebacks_only"],
     )
     return await perform_email_triage_demo_writebacks(packet, decision, inputs)
 
@@ -295,7 +292,7 @@ def sanitize_email_triage_inputs(inputs: Any, *, workflow_id: str | None = None)
         raise ValueError("email triage demo inputs must be a mapping")
     requested_fixture = inputs.get("fixture", "synthetic")
     fixture = requested_fixture if requested_fixture in {"synthetic", "provided"} else "synthetic"
-    sanitized: dict[str, Any] = {"fixture": fixture, "approver": APPROVER}
+    sanitized: dict[str, Any] = {"fixture": fixture}
     sanitized["output_dir"] = _resolve_output_dir(inputs.get("output_dir"), workflow_id=workflow_id)
     db_alias = _safe_optional_text(inputs.get("db_alias"))
     if db_alias:

@@ -473,7 +473,7 @@ WORKFLOW_APPROVAL_DECIDE_SCHEMA = {
             "workflow_id": {"type": "string"},
             "key": {"type": "string"},
             "action": {"type": "string", "enum": ["approve", "reject"]},
-            "by": {"type": "string", "description": "Human approver id/name."},
+            "by": {"type": "string", "description": "Decision actor id/name for receipt provenance."},
             "channel": {"type": "string", "default": "hermes-plugin"},
             "message_id": {"type": "string"},
             "message_url": {"type": "string"},

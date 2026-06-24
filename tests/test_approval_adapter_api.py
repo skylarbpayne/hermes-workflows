@@ -16,9 +16,7 @@ async def adapter_approval_workflow(inputs):
         "Approve adapter test?",
         key="approve_adapter_test",
         artifact={"plan": inputs.get("plan", "adapter"), "count": 2},
-        approver="human:skylar",
         allowed=["approve", "reject"],
-        authority=["adapter:test"],
         timeout="24h",
     )
     return {"decision": decision}
@@ -30,7 +28,6 @@ async def adapter_approval_then_step_workflow(inputs):
         "Approve before follow-up step?",
         key="approve_adapter_test",
         artifact={"plan": inputs.get("plan", "adapter")},
-        approver="human:skylar",
     )
     followup = await adapter_followup_step(inputs)
     return {"decision": decision, "followup": followup}
@@ -57,7 +54,7 @@ def decision_input(*, action="approve", message_id="msg-1", idempotency_key="app
     )
 
 
-def test_list_pending_approvals_returns_allowed_authority_artifact_and_workflow_ref(tmp_path):
+def test_list_pending_approvals_returns_allowed_artifact_and_workflow_ref(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     result = engine.run_until_idle(
@@ -81,9 +78,7 @@ def test_list_pending_approvals_returns_allowed_authority_artifact_and_workflow_
     assert approval.status == "waiting"
     assert approval.prompt == "Approve adapter test?"
     assert approval.artifact == {"plan": "adapter api", "count": 2}
-    assert approval.approver == "human:skylar"
     assert approval.allowed == ["approve", "reject"]
-    assert approval.authority == ["adapter:test"]
     assert approval.timeout == "24h"
     assert approval.waiting_on == "signal:approval.decision:approve_adapter_test"
     assert approval.requested_seq is not None
@@ -104,19 +99,19 @@ def test_get_approval_returns_one_view_without_dashboard_renderer(tmp_path):
     assert approval.status == "waiting"
 
 
-def test_submit_approval_decision_validates_human_source(tmp_path):
+def test_submit_approval_decision_validates_external_provenance(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
     engine.run_until_idle(adapter_approval_workflow, {}, workflow_id="wf_adapter")
 
-    with pytest.raises(ValueError, match="requires human approval source"):
+    with pytest.raises(ValueError, match="requires external decision provenance"):
         engine.submit_approval_decision(
             ApprovalDecisionInput(
                 workflow_id="wf_adapter",
                 key="approve_adapter_test",
                 action="approve",
                 by="skylar",
-                source={"kind": "agent", "id": "palmer", "channel": "test", "message_id": "m"},
+                source={"channel": "test"},
             )
         )
 
@@ -135,7 +130,7 @@ def test_submit_approval_decision_resume_true_returns_receipt_and_completes_work
     assert receipt.key == "approve_adapter_test"
     assert receipt.action == "approve"
     assert receipt.by == "skylar"
-    assert receipt.source == human_source()
+    assert receipt.source == {"channel": "discord", "message_id": "msg-1"}
     assert receipt.status == "running"
     assert receipt.waiting_on == "signal:approval.decision:approve_adapter_test"
     assert receipt.result_summary is None
@@ -146,7 +141,7 @@ def test_submit_approval_decision_resume_true_returns_receipt_and_completes_work
     assert decision.action == "approve"
     assert decision.by == "skylar"
     assert decision.note == "looks safe"
-    assert decision.source == human_source()
+    assert decision.source == {"channel": "discord", "message_id": "msg-1"}
 
 
 def test_submit_approval_decision_resume_false_records_without_running_next_step(tmp_path):
@@ -220,4 +215,4 @@ def test_submit_approval_decision_can_resume_by_stored_workflow_ref(tmp_path):
     assert receipt.status == "running"
     assert completed.status == "completed"
     assert completed.result is not None
-    assert completed.result["decision"]["source"] == human_source()
+    assert completed.result["decision"]["source"] == {"channel": "discord", "message_id": "msg-1"}

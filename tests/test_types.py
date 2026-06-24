@@ -45,7 +45,7 @@ def test_to_json_value_normalizes_framework_value_objects() -> None:
     )
     decision = ApprovalDecision(
         action="approve",
-        by="human:test",
+        by="test",
         source={"channel": "test"},
         direct_feedback="ship it",
     )
@@ -54,7 +54,7 @@ def test_to_json_value_normalizes_framework_value_objects() -> None:
         "workflow": workflow.to_json(),
         "decision": {
             "action": "approve",
-            "by": "human:test",
+            "by": "test",
             "feedback": "ship it",
             "source": {"channel": "test"},
         },

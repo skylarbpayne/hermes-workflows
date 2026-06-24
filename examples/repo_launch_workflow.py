@@ -122,9 +122,7 @@ async def repo_launch_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
         f"Approve launch packet for {packet['project']}?",
         key="approve_repo_launch",
         artifact=packet,
-        approver="human:skylar",
         allowed=["approve", "reject", "edit", "rerun"],
-        authority=["repo_writeback"],
     )
     if decision.get("action") != "approve":
         return {"ready": False, "packet": packet, "decision": decision}

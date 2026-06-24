@@ -24,9 +24,9 @@
 4. Open/update PR and produce landing evidence.
 5. Wait for separate merge approval.
 
-## Approval gates
-- Plan approval: `approve_implementation_plan`, approver `human:skylar`, before implementation.
-- Landing approval: `approve_pr_landing`, approver `human:skylar`, before merge/landing.
+## Review gates
+- Plan approval: `approve_implementation_plan`, before implementation.
+- Landing approval: `approve_pr_landing`, before merge/landing.
 
 ## Tests / verification
 {{verification_commands}}
@@ -37,7 +37,7 @@
 
 ## Risks / rollback
 - Risk: plan approval is confused with merge approval. Mitigation: separate keys and report sections.
-- Risk: missing provenance. Mitigation: require human source plus channel/message provenance.
+- Risk: missing provenance. Mitigation: require external channel/message provenance.
 - Rollback: stop before implementation, or close/supersede the PR if the approved slice proves wrong.
 
 ## Open questions / decision points

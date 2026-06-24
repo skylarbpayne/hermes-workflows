@@ -16,7 +16,7 @@ Use the public authoring primitives:
 - `@workflow` for the durable workflow entrypoint.
 - `agent(...)` for judgment-heavy or generative work.
 - `bash(...)` for deterministic local commands and receipts.
-- `ask(...)` for typed human/operator input and approval gates.
+- `ask(...)` for typed review input and external-action approval gates.
 - `parallel(...)` for fan-out/fan-in.
 - `pipeline(...)` for staged transformations over items.
 - `goal(...)` for loop-until-done semantics when available/appropriate.
@@ -50,7 +50,6 @@ from hermes_workflows import agent, ask, bash, parallel, workflow
 @dataclass
 class MyWorkflowInput:
     topic: str
-    approver: str = "human:operator"
 
 
 @dataclass
@@ -89,7 +88,6 @@ async def my_workflow(inputs: MyWorkflowInput) -> dict:
         key="review_draft_packet",
         input={"draft": draft, "side_effects": {"published": False}},
         returns=ReviewDecision,
-        approver=req.approver,
     )
 
     return {"status": decision.action, "draft": draft, "decision": decision}

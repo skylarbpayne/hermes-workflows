@@ -40,7 +40,7 @@ def test_email_triage_demo_waits_for_approval_before_any_writeback(tmp_path: Pat
 
     result = WorkflowEngine(db).run_until_idle(
         email_triage_workflow,
-        {"output_dir": str(output_root), "fixture": "synthetic", "approver": "human:operator"},
+        {"output_dir": str(output_root), "fixture": "synthetic"},
         workflow_id="wf_email_triage_waiting",
         workflow_ref=WORKFLOW_REF,
     )
@@ -121,7 +121,7 @@ def test_provided_fixture_workflow_accepts_bounded_symbolic_inputs_before_approv
 
     result = WorkflowEngine(db).run_until_idle(
         email_triage_workflow,
-        {"fixture": "provided", "threads": threads, "approver": "human:operator"},
+        {"fixture": "provided", "threads": threads},
         workflow_id="wf_email_triage_provided_redacted",
         workflow_ref=WORKFLOW_REF,
     )
@@ -155,7 +155,6 @@ def test_raw_provided_fixture_values_are_not_persisted_in_workflow_db(tmp_path: 
                     "signals": ["asks_for_response", "PRIVATE_BODY_SNIPPET_SECRET"],
                 }
             ],
-            "approver": "human:operator",
             "top_level_private": "TOP_LEVEL_PRIVATE_BODY",
         },
         workflow_id="wf_email_triage_raw_input_redacted_before_persistence",
@@ -180,7 +179,7 @@ def test_email_triage_sanitizer_preserves_existing_workflow_start_idempotency(tm
     db = tmp_path / "workflow.sqlite"
     first = WorkflowEngine(db).run_until_idle(
         email_triage_workflow,
-        {"fixture": "synthetic", "approver": "human:operator"},
+        {"fixture": "synthetic"},
         workflow_id="wf_email_triage_idempotent_sanitizer",
         workflow_ref=WORKFLOW_REF,
     )
@@ -196,12 +195,12 @@ def test_email_triage_sanitizer_preserves_existing_workflow_start_idempotency(tm
     assert second.status == "waiting"
 
 
-def test_email_triage_rejects_non_human_approval_even_if_input_tries_to_override_approver(tmp_path: Path):
+def test_email_triage_rejects_approval_without_external_provenance(tmp_path: Path):
     db = tmp_path / "workflow.sqlite"
     output_dir = tmp_path / "dist" / "email-triage-demo-approval-bypass"
     WorkflowEngine(db).run_until_idle(
         email_triage_workflow,
-        {"fixture": "synthetic", "approver": "service:ci", "output_dir": str(output_dir)},
+        {"fixture": "synthetic", "output_dir": str(output_dir)},
         workflow_id="wf_email_triage_nonhuman_approval",
         workflow_ref=WORKFLOW_REF,
     )
@@ -213,15 +212,15 @@ def test_email_triage_rejects_non_human_approval_even_if_input_tries_to_override
                 key=APPROVAL_KEY,
                 action="approve",
                 by="ci-bot",
-                source={"kind": "service", "id": "ci-bot", "channel": "ci", "message_id": "ci-approval"},
+                source={"channel": "ci"},
                 idempotency_key="ci://approval/nonhuman",
             ),
             resume=False,
         )
     except ValueError as exc:
-        assert "requires human approval source" in str(exc)
+        assert "requires external decision provenance" in str(exc)
     else:
-        raise AssertionError("non-human approval source should be rejected")
+        raise AssertionError("approval source without external provenance should be rejected")
 
     status = WorkflowEngine(db, read_only=True).workflow_status("wf_email_triage_nonhuman_approval")
 
@@ -291,7 +290,7 @@ def test_invocation_receipt_uses_sanitized_email_triage_input(tmp_path: Path):
                 workflow_ref=WORKFLOW_REF,
                 db="email-triage-demo",
                 title="Email triage demo",
-                default_input={"fixture": "provided", "approver": "service:ci"},
+                default_input={"fixture": "provided"},
                 trusted_resume=True,
             )
         },
@@ -323,7 +322,6 @@ def test_invocation_receipt_uses_sanitized_email_triage_input(tmp_path: Path):
     assert "gmail-thread-private-123" not in receipt_text
     assert "PRIVATE_BODY_SNIPPET_SECRET" not in receipt_text
     assert "TOP_LEVEL_PRIVATE_BODY" not in receipt_text
-    assert '"approver": "human:operator"' in receipt_text
 
 
 def test_invocation_receipt_does_not_fall_back_to_new_raw_source_for_existing_workflow(tmp_path: Path):
@@ -485,7 +483,7 @@ def test_email_triage_demo_default_output_dir_is_dated_and_omits_raw_db_path(tmp
                 workflow_ref=WORKFLOW_REF,
                 db="email-triage-demo",
                 title="Email triage demo",
-                default_input={"fixture": "synthetic", "approver": "human:operator"},
+                default_input={"fixture": "synthetic"},
                 trusted_resume=True,
             )
         },
@@ -537,7 +535,7 @@ def test_plugin_style_record_only_approval_keeps_workflow_queued_and_records_pro
     engine = WorkflowEngine(db)
     engine.run_until_idle(
         email_triage_workflow,
-        {"output_dir": str(output_dir), "fixture": "synthetic", "approver": "human:operator"},
+        {"output_dir": str(output_dir), "fixture": "synthetic"},
         workflow_id="wf_email_triage_record_only",
         workflow_ref=WORKFLOW_REF,
     )
@@ -566,7 +564,7 @@ def test_plugin_style_record_only_approval_keeps_workflow_queued_and_records_pro
     approval = _approval(status)
     assert status["status"] == "running"
     assert approval["status"] == "approve"
-    assert approval["source"] == {"kind": "human", "id": "operator", "channel": "discord", "message_id": "approval-msg-1"}
+    assert approval["source"] == {"channel": "discord", "message_id": "approval-msg-1"}
 
 
 def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_path: Path, monkeypatch):
@@ -575,7 +573,7 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     engine = WorkflowEngine(db)
     engine.run_until_idle(
         email_triage_workflow,
-        {"fixture": "synthetic", "approver": "human:operator"},
+        {"fixture": "synthetic"},
         workflow_id="wf-email-triage-private-approval-metadata",
         workflow_ref=WORKFLOW_REF,
     )
@@ -602,8 +600,6 @@ def test_approval_decision_metadata_is_sanitized_before_event_persistence(tmp_pa
     )
 
     assert receipt.source == {
-        "kind": "human",
-        "id": "operator",
         "channel": "discord",
         "message_id": "approval-private-metadata",
     }
@@ -630,7 +626,7 @@ def test_direct_approval_signal_sanitizes_metadata_before_resume_and_artifact_wr
     engine = WorkflowEngine(db)
     engine.run_until_idle(
         email_triage_workflow,
-        {"fixture": "synthetic", "approver": "human:operator"},
+        {"fixture": "synthetic"},
         workflow_id="wf-email-triage-direct-signal-private-approval",
         workflow_ref=WORKFLOW_REF,
     )
@@ -683,8 +679,6 @@ def test_direct_approval_signal_sanitizes_metadata_before_resume_and_artifact_wr
         "message": "another private approval message",
     }
     assert signal_event["payload"]["source"] == {
-        "kind": "human",
-        "id": "operator",
         "channel": "discord",
         "message_id": "approval-direct-private-metadata",
     }
@@ -703,7 +697,7 @@ def test_trusted_resume_creates_local_demo_receipt_with_zero_dangerous_side_effe
                 workflow_ref=WORKFLOW_REF,
                 db="email-triage-demo",
                 title="Email triage demo",
-                default_input={"output_dir": str(output_dir), "fixture": "synthetic", "approver": "human:operator"},
+                default_input={"output_dir": str(output_dir), "fixture": "synthetic"},
                 trusted_resume=True,
             )
         },

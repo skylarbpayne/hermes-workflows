@@ -145,7 +145,7 @@ def test_repo_change_plan_workflow_writes_agent_prompt_plan_then_waits_for_appro
     assert "## Goal" in plan
     assert "## Non-goals" in plan
     assert "## Proposed file/module changes" in plan
-    assert "## Approval gates" in plan
+    assert "## Review gates" in plan
     assert "## Tests / verification" in plan
     assert "## Risks / rollback" in plan
 
@@ -233,7 +233,7 @@ def test_repo_change_plan_workflow_records_human_plan_approval(tmp_path):
     assert result.result["plan_artifact_sha256"]
 
 
-def test_repo_change_plan_workflow_rejects_agent_plan_approval(tmp_path):
+def test_repo_change_plan_workflow_rejects_missing_plan_approval_provenance(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -245,13 +245,13 @@ def test_repo_change_plan_workflow_rejects_agent_plan_approval(tmp_path):
         workflow_id="wf_plan",
     )
 
-    with pytest.raises(ValueError, match="requires human approval source"):
+    with pytest.raises(ValueError, match="requires external decision provenance"):
         engine.signal(
             "wf_plan",
             "approval.decision",
             key="approve_implementation_plan",
             payload={"action": "approve", "by": "palmer"},
-            source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
+            source={"channel": "kanban"},
             idempotency_key="bad-plan-approval",
         )
 
@@ -387,7 +387,7 @@ def test_repo_pr_workflow_gathers_tests_writes_body_then_waits_for_landing_appro
     assert "PR: create_pr disabled" in report
 
 
-def test_repo_pr_workflow_rejects_agent_or_missing_landing_provenance(tmp_path):
+def test_repo_pr_workflow_rejects_missing_landing_provenance(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -396,13 +396,13 @@ def test_repo_pr_workflow_rejects_agent_or_missing_landing_provenance(tmp_path):
     implementation_plan = approve_plan_workflow(engine, repo, tmp_path)
     engine.run_until_idle(repo_pr_workflow, workflow_inputs(repo, tmp_path, implementation_plan=implementation_plan), workflow_id="wf_pr")
 
-    with pytest.raises(ValueError, match="requires human approval source"):
+    with pytest.raises(ValueError, match="requires external decision provenance"):
         engine.signal(
             "wf_pr",
             "approval.decision",
             key="approve_pr_landing",
             payload={"action": "approve", "by": "palmer"},
-            source={"kind": "agent", "id": "palmer", "channel": "kanban", "event_id": "run-1"},
+            source={"channel": "kanban"},
             idempotency_key="bad-approval",
         )
 

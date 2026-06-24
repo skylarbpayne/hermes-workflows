@@ -21,7 +21,7 @@ def test_registry_resolves_configured_workflow_and_env_db_aliases(tmp_path, monk
                         "db": "pilot",
                         "title": "Trip pilot",
                         "tags": ["demo", "approval"],
-                        "default_input": {"approver": "human:operator"},
+                        "default_input": {"reviewer": "operator"},
                         "trusted_resume": True,
                     }
                 },
@@ -38,7 +38,7 @@ def test_registry_resolves_configured_workflow_and_env_db_aliases(tmp_path, monk
     assert trip.name == "trip"
     assert trip.workflow_ref == "hermes_workflows.examples.trip:trip_planning_workflow"
     assert trip.db == "pilot"
-    assert trip.default_input == {"approver": "human:operator"}
+    assert trip.default_input == {"reviewer": "operator"}
     assert trip.trusted_resume is True
     assert trip.tags == ("demo", "approval")
 

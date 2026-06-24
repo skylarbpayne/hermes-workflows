@@ -12,7 +12,6 @@ class ContentStudioInput:
     audience: str = "developers evaluating Hermes Workflows"
     seed: str = "Hermes Workflows launch narrative for the July 2 demo"
     output_dir: str = "docs/presentation/2026-07-02/content-studio"
-    approver: str = "human:operator"
     visual_model: str = "gemini-nano-banana-2"
     formats: tuple[Literal["blogpost", "slide_deck", "hyperframes_video"], ...] = (
         "blogpost",
@@ -229,7 +228,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="select_content_topic",
         input={"topics": topics, "side_effects": _zero_side_effects()},
         returns=SelectionDecision,
-        approver=req.approver,
     )
     selected_topic = _selected_topic(topics, topic_decision)
     if selected_topic is None:
@@ -259,7 +257,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="select_content_angle",
         input={"angles": angles, "research": research, "side_effects": _zero_side_effects()},
         returns=SelectionDecision,
-        approver=req.approver,
     )
     selected_angle = _selected_angle(angles, angle_decision)
     if selected_angle is None:
@@ -276,7 +273,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="approve_content_outline",
         input={"outline": outline, "research": research, "side_effects": _zero_side_effects()},
         returns=ReviewDecision,
-        approver=req.approver,
     )
     if outline_decision.action != "approve":
         return {"status": "needs_outline_changes", "outline": outline, "decision": outline_decision, "side_effects": _zero_side_effects()}
@@ -289,7 +285,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
                 key=f"approve_content_section_{index}",
                 input={"section": packet, "side_effects": _zero_side_effects()},
                 returns=ReviewDecision,
-                approver=req.approver,
             )
             for index, packet in enumerate(section_packets, start=1)
         ],
@@ -317,7 +312,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="approve_canonical_content_draft",
         input={"canonical": canonical, "side_effects": _zero_side_effects()},
         returns=ReviewDecision,
-        approver=req.approver,
     )
     if canonical_decision.action != "approve":
         return {"status": "needs_canonical_draft_changes", "canonical": canonical, "decision": canonical_decision, "side_effects": _zero_side_effects()}
@@ -363,7 +357,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="approve_content_asset_plan",
         input={"asset_plan": asset_plan, "canonical": canonical, "side_effects": _zero_side_effects()},
         returns=ReviewDecision,
-        approver=req.approver,
     )
     if asset_plan_decision.action != "approve":
         return {"status": "needs_asset_plan_changes", "asset_plan": asset_plan, "decision": asset_plan_decision, "side_effects": _zero_side_effects()}
@@ -418,7 +411,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="approve_blog_visual_elements_plan",
         input={"visual_plan": visual_plan, "canonical": canonical, "side_effects": _zero_side_effects()},
         returns=ReviewDecision,
-        approver=req.approver,
     )
     if visual_plan_decision.action != "approve":
         return {"status": "needs_visual_plan_changes", "visual_plan": visual_plan, "decision": visual_plan_decision, "side_effects": _zero_side_effects()}
@@ -476,7 +468,6 @@ async def content_asset_lane_workflow(inputs: ContentStudioInput) -> dict:
         key="approve_local_content_packet",
         input={"packet": packet, "assets": assets, "visuals": visuals, "side_effects": _zero_side_effects()},
         returns=PackageDecision,
-        approver=req.approver,
     )
 
     return {

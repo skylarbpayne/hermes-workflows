@@ -185,7 +185,6 @@ class AskCall(Generic[T]):
     key: str | None = None
     input: Any = None
     returns: Any = dict
-    approver: str = "human"
     timeout: str | None = None
 
     def __post_init__(self) -> None:
@@ -207,7 +206,6 @@ class AskCall(Generic[T]):
             artifact=self.input,
             schema=_return_schema_id(self.returns),
             schema_descriptor=_return_schema_descriptor(self.returns),
-            approver=self.approver,
             timeout=self.timeout,
             block=block,
         )
@@ -296,7 +294,6 @@ def ask(
     key: str | None = None,
     input: Any = None,
     returns: Any = dict,
-    approver: str = "human",
     timeout: str | None = None,
 ) -> AskCall[Any]:
     """Request typed input from a Review Queue surface.
@@ -305,7 +302,7 @@ def ask(
     and `returns=` is the typed response contract.
     """
 
-    return AskCall(prompt, key=key, input=input, returns=returns, approver=approver, timeout=timeout)
+    return AskCall(prompt, key=key, input=input, returns=returns, timeout=timeout)
 
 
 async def gather(*calls: Any) -> list[Any]:
@@ -371,12 +368,6 @@ async def goal(
             return value
     return value
 
-
-def _authority_payload(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        return dict(value)
     return list(value)
 
 
@@ -385,9 +376,7 @@ async def approve(
     *,
     key: str | None = None,
     artifact: Any = None,
-    approver: str = "human",
     allowed: Sequence[str] | None = None,
-    authority: Any = None,
     timeout: str | None = None,
     feedback_loop: bool = False,
 ) -> ApprovalDecision:
@@ -396,9 +385,7 @@ async def approve(
         prompt,
         key=key,
         artifact=artifact,
-        approver=approver,
         allowed=list(allowed) if allowed is not None else None,
-        authority=_authority_payload(authority),
         timeout=timeout,
         feedback_loop=feedback_loop,
     )
@@ -407,18 +394,14 @@ async def approve(
 async def approve_many(
     requests: Sequence[Mapping[str, Any]],
     *,
-    approver: str = "human",
     allowed: Sequence[str] | None = None,
-    authority: Any = None,
     timeout: str | None = None,
     feedback_loop: bool = False,
 ) -> list[dict[str, Any]]:
     runtime_context = current_context()
     return await runtime_context.approval.request_many(
         list(requests),
-        approver=approver,
         allowed=list(allowed) if allowed is not None else None,
-        authority=_authority_payload(authority),
         timeout=timeout,
         feedback_loop=feedback_loop,
     )

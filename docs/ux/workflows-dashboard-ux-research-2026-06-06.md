@@ -154,7 +154,7 @@ A single approval view should use this layout:
 #### Right sidebar
 
 - policy triggered and matched conditions
-- required approver(s)
+- required review state
 - requester / agent / source channel
 - affected resources and blast radius
 - rollback/cancel availability
