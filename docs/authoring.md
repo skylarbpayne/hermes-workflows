@@ -104,7 +104,6 @@ decision = await ask(
     key="review_launch_packet",
     input=summary,
     returns=ReviewDecision,
-    approver="human:operator",
 )
 ```
 

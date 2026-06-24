@@ -50,7 +50,7 @@ Run the installed facade-first demo and then let the Workflow Worker drain runna
 hermes-workflows run reviewable-draft \
   --config .hermes/workflows.registry.json \
   --id wf_reviewable_draft_quickstart \
-  --input-json '{"topic":"Hermes Workflows launch","approver":"human:operator"}'
+  --input-json '{"topic":"Hermes Workflows launch"}'
 
 hermes-workflows worker \
   --config .hermes/workflows.registry.json \

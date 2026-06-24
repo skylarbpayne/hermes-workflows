@@ -51,7 +51,7 @@ Show commands from `demo-runbook.md`:
 
 ```bash
 python -m pip install -e '.[dev]'
-hermes-workflows run reviewable-draft   --config docs/presentation/2026-07-02/workflows.registry.example.json   --project-root .   --db default   --id wf_july2_reviewable_draft   --input-json '{"topic":"Hermes Workflows July 2 demo","approver":"human:operator"}'
+hermes-workflows run reviewable-draft   --config docs/presentation/2026-07-02/workflows.registry.example.json   --project-root .   --db default   --id wf_july2_reviewable_draft   --input-json '{"topic":"Hermes Workflows July 2 demo"}'
 hermes-workflows worker   --config docs/presentation/2026-07-02/workflows.registry.example.json   --db default   --worker-id july2-demo-worker   --max-commands 5   --idle-exit-after 0.1
 hermes-workflows status --db .hermes/presentation-july2/workflows.sqlite --id wf_july2_reviewable_draft
 ```

@@ -122,13 +122,12 @@ def _approval_table(
             "<tr>"
             f"<td><code>{_e(item.get('key'))}</code></td>"
             f"<td class=\"{_e(item.get('status'))}\">{_e(item.get('status'))}</td>"
-            f"<td>{_e(item.get('approver'))}</td>"
             f"<td>{_e(item.get('prompt'))}</td>"
             f"<td><pre>{_e(item.get('source'))}</pre></td>"
             f"<td><pre>{_e(command)}</pre></td>"
             "</tr>"
         )
-    return "<h3>Approvals</h3><table><thead><tr><th>Key</th><th>Status</th><th>Approver</th><th>Prompt</th><th>Source</th><th>Approval shortcut</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    return "<h3>Approvals</h3><table><thead><tr><th>Key</th><th>Status</th><th>Prompt</th><th>Prompt</th><th>Source</th><th>Approval shortcut</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
 
 
 def _approval_command(item: dict[str, Any], *, workflow_id: str, db_path: Path | None) -> str:

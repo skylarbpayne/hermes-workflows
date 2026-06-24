@@ -28,7 +28,6 @@ async def approval_only_workflow(inputs):
         "Approve the thing?",
         key="approve_thing",
         artifact={"item": inputs["item"]},
-        approver="human:skylar",
     )
     return {"approved_by": decision["by"]}
 
@@ -56,7 +55,6 @@ async def cancels_itself_then_requests_approval(inputs):
         "This should not be enqueued after cancellation",
         key="late_approval",
         artifact={"item": inputs["item"]},
-        approver="human:skylar",
     )
     return {"should_not": "wait"}
 

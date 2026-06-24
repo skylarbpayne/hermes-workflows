@@ -8,7 +8,6 @@ from typing import Any, Dict, List, TypedDict, cast
 from hermes_workflows import agent, approve, step, workflow
 
 
-PUBLIC_APPROVAL_GATES = ["approve_coding_plan", "implementation_agent", "approve_coding_review"]
 INTERNAL_IMPLEMENTATION_AGENT_KEY = "coding_ready"
 
 
@@ -24,8 +23,6 @@ class CodingWorkflowInput(TypedDict, total=False):
     plan_path: str
     evidence_path: str
     review_packet_path: str
-    approver: str
-    implementer: str
     commit: bool
     push: bool
     commit_message: str
@@ -45,7 +42,6 @@ class CodingWorkflowResult(TypedDict, total=False):
     stage: str
     goal: str
     repo_path: str
-    approval_gates: List[str]
     verification: Dict[str, Any]
     artifact_paths: dict[str, str]
     packet: Dict[str, Any]
@@ -143,7 +139,7 @@ async def coding_write_plan(inputs: Dict[str, Any], repo: Dict[str, Any]) -> Dic
     verification = inputs.get("verification_commands") or ["pytest -q"]
     acceptance = inputs.get("acceptance_checks") or [
         "A targeted regression test exists for the requested behavior.",
-        "Implementation does not begin until approve_coding_plan is approved by the human approver.",
+        "Implementation does not begin until approve_coding_plan is approved by the reviewer.",
         "The workflow records an implementation handoff before collecting diff/evidence.",
         "The review packet is approved before the workflow reports ready=true or commits/pushes.",
     ]
@@ -200,7 +196,7 @@ async def coding_write_plan(inputs: Dict[str, Any], repo: Dict[str, Any]) -> Dic
             visual_nodes = [str(node) for node in raw_nodes]
     visual_line = " → ".join(visual_nodes) if visual_nodes else "approval-gated coding flow"
     implementation_boundary = "No source files will be modified before this approval is recorded. Implementation happens only after approve_coding_plan; the workflow records an internal implementation handoff before evidence collection."
-    completion_boundary = "Workflow completion requires approve_coding_review from the human approver after evidence is collected."
+    completion_boundary = "Workflow completion requires approve_coding_review from the reviewer after evidence is collected."
     content = f"""# Coding workflow plan
 
 ## Goal
@@ -242,9 +238,11 @@ After: {before_after['after']}
 
 """ + "\n".join(f"- {item}" for item in rollback) + f"""
 
-## Approval gates
+## Review checkpoints
 
-""" + "\n".join(f"- `{gate}`" for gate in PUBLIC_APPROVAL_GATES) + f"""
+- `approve_coding_plan` before implementation
+- `coding_ready` implementation completion signal
+- `approve_coding_review` before landing
 
 ## Implementation boundary
 
@@ -270,7 +268,6 @@ After: {before_after['after']}
         "repo": repo,
         "verification_commands": verification,
         "acceptance_checks": acceptance,
-        "approval_gates": PUBLIC_APPROVAL_GATES,
         "implementation_boundary": implementation_boundary,
         "completion_boundary": completion_boundary,
         "artifact_path": str(plan_path),
@@ -408,9 +405,11 @@ Plan approval source: {_format_approval_source(plan_decision)}
 Implementation signaled by: {implementation_signal.get('by', 'unknown')}
 Review status: waiting on `approve_coding_review`
 
-## Approval gates
+## Review checkpoints
 
-{chr(10).join(f"- `{gate}`" for gate in PUBLIC_APPROVAL_GATES)}
+- `approve_coding_plan` before implementation
+- `coding_ready` implementation completion signal
+- `approve_coding_review` before landing
 
 ## Verification
 
@@ -461,9 +460,11 @@ Implementation signaled by: {packet['implementation_signal'].get('by', 'unknown'
 Review approved by: {review_decision.get('by', 'unknown')}
 Review approval source: {_format_approval_source(review_decision)}
 
-## Approval gates
+## Review checkpoints
 
-{chr(10).join(f"- `{gate}`" for gate in PUBLIC_APPROVAL_GATES)}
+- `approve_coding_plan` before implementation
+- `coding_ready` implementation completion signal
+- `approve_coding_review` before landing
 
 ## Repository
 
@@ -544,7 +545,6 @@ async def coding_workflow(inputs: CodingWorkflowInput) -> CodingWorkflowResult:
         f"Approve coding plan for: {plan['goal']}?",
         key="approve_coding_plan",
         artifact=plan,
-        approver=inputs.get("approver", "human:skylar"),
         allowed=["approve", "reject", "edit", "rerun"],
     )
     if not plan_decision.approved:
@@ -565,7 +565,6 @@ async def coding_workflow(inputs: CodingWorkflowInput) -> CodingWorkflowResult:
         f"Approve coding review for: {plan['goal']}?",
         key="approve_coding_review",
         artifact=packet,
-        approver=inputs.get("approver", "human:skylar"),
         allowed=["approve", "reject", "edit", "rerun"],
     )
     if not review_decision.approved:
@@ -577,7 +576,6 @@ async def coding_workflow(inputs: CodingWorkflowInput) -> CodingWorkflowResult:
         "ready": True,
         "goal": plan["goal"],
         "repo_path": repo["repo_path"],
-        "approval_gates": PUBLIC_APPROVAL_GATES,
         "verification": {"ok": verification["ok"], "results": verification["results"]},
         "artifact_paths": {
             "plan": plan["artifact_path"],

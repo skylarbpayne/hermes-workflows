@@ -14,7 +14,6 @@ class EventPlanningDemoInput:
     budget_cap_usd: int = 2500
     requires_waivers: bool = True
     output_dir: str = "docs/presentation/2026-07-02/event-planning-lane"
-    approver: str = "human:operator"
 
 
 @dataclass
@@ -160,7 +159,6 @@ async def event_planning_demo_workflow(inputs: EventPlanningDemoInput) -> dict:
         key="approve_event_ops_packet",
         input={"packet": packet, "side_effect_ledger": _zero_ledger()},
         returns=EventOpsDecision,
-        approver=req.approver,
     )
 
     return {

@@ -14,7 +14,6 @@ class CodingReviewDemoInput:
     branch_name: str = "demo/coding-review-workflow"
     task: str = "Make a small, reviewable code change."
     validation_command: str = "python -m compileall -q src/hermes_workflows"
-    approver: str = "human:operator"
 
 
 @dataclass
@@ -222,7 +221,6 @@ async def coding_review_demo_workflow(inputs: CodingReviewDemoInput) -> dict:
         key="review_worktree_change",
         input={"change": change, "code_review": code_review},
         returns=HumanReviewDecision,
-        approver=request.approver,
     )
     if human_decision.action != "approve":
         return {
@@ -260,7 +258,6 @@ async def coding_review_demo_workflow(inputs: CodingReviewDemoInput) -> dict:
         key="approve_create_pr",
         input={"pr_draft": pr_draft, "change": change, "code_review": code_review},
         returns=PullRequestDecision,
-        approver=request.approver,
     )
     if pr_decision.action != "create_pr":
         return {

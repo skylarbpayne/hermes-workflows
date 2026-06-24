@@ -499,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         approval.add_argument("--db", required=True, type=Path)
         approval.add_argument("--id", required=True, dest="workflow_id")
         approval.add_argument("--key", required=True)
-        approval.add_argument("--by", required=True, help="Human id; must match human:<id> approver when specified")
+        approval.add_argument("--by", required=True, help="Decision actor id/name for receipt provenance")
         approval.add_argument("--channel", required=True, help="Where this approval was captured, e.g. discord, cli, local-dashboard")
         approval.add_argument("--message-url")
         approval.add_argument("--message-id")

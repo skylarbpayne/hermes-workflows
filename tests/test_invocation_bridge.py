@@ -25,7 +25,6 @@ async def bridge_approval_workflow(inputs):
         "Approve bridge test?",
         key="approve_bridge_test",
         artifact={"summary": inputs.get("summary", "Bridge packet"), "secret_token": "hide-me"},
-        approver=inputs.get("approver", "human:skylar"),
     )
     return await bridge_followup_step(decision)
 
@@ -36,7 +35,6 @@ async def other_approval_workflow(inputs):
         "Approve other test?",
         key="approve_other_test",
         artifact={"summary": inputs.get("summary", "Other packet")},
-        approver=inputs.get("approver", "human:skylar"),
     )
     return {"other_followup_ran": True, "decision": decision}
 
@@ -47,13 +45,11 @@ async def two_approval_workflow(inputs):
         "Approve first?",
         key="approve_first",
         artifact={"step": "first"},
-        approver=inputs.get("approver", "human:skylar"),
     )
     second = await approve(
         "Approve second?",
         key="approve_second",
         artifact={"step": "second"},
-        approver=inputs.get("approver", "human:skylar"),
     )
     return {"first": first, "second": second}
 
@@ -61,7 +57,7 @@ async def two_approval_workflow(inputs):
 @dataclass
 class TypedBridgeInput:
     topic: str
-    approver: str = "human:skylar"
+    reviewer: str = "skylar"
 
 
 @workflow
@@ -70,7 +66,6 @@ async def typed_bridge_approval_workflow(inputs: TypedBridgeInput):
         f"Approve typed bridge test for {inputs.topic}?",
         key="approve_typed_bridge_test",
         artifact={"summary": inputs.topic},
-        approver=inputs.approver,
     )
     return {"typed_followup_ran": True, "topic": inputs.topic, "decision": decision}
 

@@ -16,7 +16,6 @@ async def approval_then_agent_workflow(inputs):
         "Approve plan?",
         key="approve_plan",
         artifact={"goal": inputs.get("goal", "demo")},
-        approver="human:skylar",
     )
     if not decision.approved:
         return {"ready": False, "stage": "plan_rejected"}
@@ -59,7 +58,6 @@ def test_approval_and_agent_completion_are_operator_facing_steps(tmp_path):
     assert set(after_approval_steps) == {"approve_plan", "run_agent_request"}
     assert after_approval_steps["approve_plan"]["status"] == "completed"
     assert after_approval_steps["approve_plan"]["output"] == {"action": "approve", "by": "skylar"}
-    assert after_approval_steps["approve_plan"]["source"]["kind"] == "human"
     assert after_approval_steps["run_agent_request"]["completion_mode"] == "agent"
     assert after_approval_steps["run_agent_request"]["status"] == "waiting"
 
@@ -112,7 +110,6 @@ async def duplicate_public_step_key_workflow(inputs):
     decision = await approve(
         "Approve overloaded key?",
         key="shared_step",
-        approver="human:skylar",
     )
     if not decision.approved:
         return {"ready": False}

@@ -24,7 +24,7 @@ DEFAULT_PROPOSED_CHANGES = [
 ]
 DEFAULT_API_CHANGES = [
     "Approval signal key: approve_implementation_plan.",
-    "Approval source must be human:skylar with external provenance.",
+    "Approval decision must include external provenance.",
 ]
 DEFAULT_OPEN_QUESTIONS = ["None for this slice after plan approval."]
 DEFAULT_PLAN_PROMPT_PATH = Path(__file__).parent / "prompts" / "repo_change_plan.md"
@@ -119,10 +119,8 @@ def _has_matching_plan_approval_event(events: List[Dict[str, Any]], durable_plan
         source = payload.get("source") or {}
         if (
             decision.get("action") == "approve"
-            and decision.get("by") == durable_plan.get("approved_by") == "skylar"
+            and decision.get("by") == durable_plan.get("approved_by")
             and source == durable_plan.get("approval_source")
-            and source.get("kind") == "human"
-            and source.get("id") == "skylar"
             and _source_has_provenance(source)
         ):
             return True
@@ -134,8 +132,8 @@ def _require_approved_implementation_plan(inputs: Dict[str, Any]) -> Dict[str, A
     if not isinstance(plan, dict) or plan.get("ready_for_implementation") is not True:
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan before PR work")
     source = plan.get("approval_source")
-    if plan.get("approved_by") != "skylar" or not isinstance(source, dict) or source.get("kind") != "human" or source.get("id") != "skylar":
-        raise RuntimeError("repo_pr_workflow requires approved implementation_plan from human:skylar")
+    if not plan.get("approved_by") or not isinstance(source, dict):
+        raise RuntimeError("repo_pr_workflow requires implementation_plan decision provenance")
     if not _source_has_provenance(source):
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan with external approval provenance")
     if not plan.get("plan_artifact_path") or not plan.get("plan_workflow_id"):
@@ -152,8 +150,8 @@ def _require_approved_implementation_plan(inputs: Dict[str, Any]) -> Dict[str, A
     if not isinstance(durable_plan, dict) or durable_plan.get("ready_for_implementation") is not True:
         raise RuntimeError("repo_pr_workflow requires implementation plan workflow result ready_for_implementation=true")
     durable_source = durable_plan.get("approval_source")
-    if durable_plan.get("approved_by") != "skylar" or not isinstance(durable_source, dict) or durable_source.get("kind") != "human" or durable_source.get("id") != "skylar":
-        raise RuntimeError("repo_pr_workflow requires durable implementation plan approval from human:skylar")
+    if not durable_plan.get("approved_by") or not isinstance(durable_source, dict):
+        raise RuntimeError("repo_pr_workflow requires durable implementation plan decision provenance")
     if not _source_has_provenance(durable_source) or not _has_matching_plan_approval_event(plan_status.get("events") or [], durable_plan):
         raise RuntimeError("repo_pr_workflow requires durable implementation plan approval event with external provenance")
 
@@ -579,9 +577,7 @@ async def repo_change_plan_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
         f"Approve implementation plan for: {inputs['goal']}?",
         key="approve_implementation_plan",
         artifact={"goal": inputs["goal"], "plan": plan},
-        approver="human:skylar",
         allowed=["approve", "reject", "edit", "rerun"],
-        authority=["implement_pr"],
     )
     if decision.get("action") != "approve":
         return {"ready_for_implementation": False, "stage": "plan_rejected", "decision": decision, **plan}
@@ -626,9 +622,7 @@ async def repo_pr_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
             "body": body,
             "landing_packet": landing_packet,
         },
-        approver="human:skylar",
         allowed=["approve", "reject", "edit", "rerun"],
-        authority=["review_pr", "merge_pr"] if inputs.get("merge") else ["review_pr"],
     )
     if landing_decision.get("action") != "approve":
         return {"ready": False, "stage": "landing_rejected", "decision": landing_decision}

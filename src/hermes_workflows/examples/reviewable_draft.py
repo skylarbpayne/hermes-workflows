@@ -9,7 +9,6 @@ from hermes_workflows import agent, ask, workflow
 @dataclass
 class ReviewableDraftInput:
     topic: str = "Hermes Workflows launch"
-    approver: str = "human:operator"
 
 
 @dataclass
@@ -65,7 +64,6 @@ async def reviewable_draft_workflow(inputs: ReviewableDraftInput) -> ReviewableD
         key="review_draft_packet",
         input=draft,
         returns=ReviewDecision,
-        approver=inputs.approver,
     )
     return ReviewableDraftResult(
         draft=draft,

@@ -30,8 +30,7 @@ class ContentLaneInput:
     output_dir: str = "docs/presentation/2026-07-02/content-lane"
     launch_date: str = "2026-07-02"
     audience: str = "developers evaluating Hermes Workflows"
-    thesis: str = "code-first workflows coordinate agents, deterministic checks, and human approval gates"
-    approver: str = "human:skylar"
+    thesis: str = "code-first workflows coordinate agents, deterministic checks, and review gates"
 
 
 @dataclass
@@ -114,7 +113,6 @@ async def content_asset_lane(inputs: ContentLaneInput) -> dict:
         key="select_content_topic",
         input={"plan": plan, "preflight": preflight},
         returns=EditorialReview,
-        approver=req.approver,
     )
     if plan_decision.action != "approve":
         return {"status": "needs_topic_selection", "plan": plan, "decision": plan_decision}
@@ -136,7 +134,6 @@ async def content_asset_lane(inputs: ContentLaneInput) -> dict:
         key="approve_local_content_packet",
         input={"package": package, "drafts": drafts},
         returns=PackageDecision,
-        approver=req.approver,
     )
 
     return {
@@ -186,7 +183,7 @@ async def blogpost_asset(inputs: dict) -> dict:
     draft = await agent("draft_blogpost", prompt="Write the launch blogpost.", input=inputs, returns=AssetDraft)
     fact_check = await agent("fact_check_blogpost", prompt="Find unsupported claims and missing caveats.", input=draft, returns=dict)
     lint = await bash("python - <<'PY'\nfrom pathlib import Path\np=Path('docs/presentation/2026-07-02/launch-blogpost-draft.md')\nprint(p.exists(), p.stat().st_size if p.exists() else 0)\nPY", key="blogpost_file_check", cwd=inputs["repo_path"])
-    decision = await ask("Editorial review: blogpost draft.", key="review_blogpost", input={"draft": draft, "fact_check": fact_check, "lint": lint}, returns=EditorialReview, approver=inputs["approver"])
+    decision = await ask("Editorial review: blogpost draft.", key="review_blogpost", input={"draft": draft, "fact_check": fact_check, "lint": lint}, returns=EditorialReview)
     return {"asset": draft, "decision": decision}
 ```
 
@@ -197,7 +194,7 @@ async def blogpost_asset(inputs: dict) -> dict:
 async def deck_asset(inputs: dict) -> dict:
     slides = await agent("draft_deck", prompt="Create a 10-slide HTML deck for the July 2 demo.", input=inputs, returns=AssetDraft)
     check = await bash("python - <<'PY'\nfrom pathlib import Path\np=Path('docs/presentation/2026-07-02/slides.html')\ntext=p.read_text() if p.exists() else ''\nprint({'exists': p.exists(), 'slides': text.count('<section')})\nPY", key="deck_structure_check", cwd=inputs["repo_path"])
-    decision = await ask("Review deck before it is used live.", key="review_deck", input={"slides": slides, "check": check}, returns=EditorialReview, approver=inputs["approver"])
+    decision = await ask("Review deck before it is used live.", key="review_deck", input={"slides": slides, "check": check}, returns=EditorialReview)
     return {"asset": slides, "decision": decision}
 ```
 
@@ -208,7 +205,7 @@ async def deck_asset(inputs: dict) -> dict:
 async def video_script_asset(inputs: dict) -> dict:
     script = await agent("draft_video_script", prompt="Write a 2-minute VO script plus shot list; no recording/uploading.", input=inputs, returns=AssetDraft)
     timing = await agent("estimate_video_timing", prompt="Estimate duration and cut lines to stay under 2:15.", input=script, returns=dict)
-    decision = await ask("Approve video script for recording only; not upload/publish.", key="review_video_script", input={"script": script, "timing": timing}, returns=EditorialReview, approver=inputs["approver"])
+    decision = await ask("Approve video script for recording only; not upload/publish.", key="review_video_script", input={"script": script, "timing": timing}, returns=EditorialReview)
     return {"asset": script, "decision": decision, "side_effects": {"recorded": False, "uploaded": False}}
 ```
 
@@ -219,7 +216,7 @@ async def video_script_asset(inputs: dict) -> dict:
 async def demo_script_asset(inputs: dict) -> dict:
     runbook = await agent("draft_live_demo_script", prompt="Write exact commands, expected outputs to point at, fallback path, and no-side-effect constraints.", input=inputs, returns=AssetDraft)
     smoke = await bash("python -m pytest -q tests/test_launch_examples.py", key="demo_smoke_tests", cwd=inputs["repo_path"], timeout_seconds=180)
-    decision = await ask("Approve live demo script and fallback path.", key="review_demo_script", input={"runbook": runbook, "smoke": smoke}, returns=EditorialReview, approver=inputs["approver"])
+    decision = await ask("Approve live demo script and fallback path.", key="review_demo_script", input={"runbook": runbook, "smoke": smoke}, returns=EditorialReview)
     return {"asset": runbook, "decision": decision}
 ```
 
@@ -273,7 +270,7 @@ hermes-workflows run content-asset-lane \
   --project-root . \
   --db default \
   --id wf_july2_content_lane \
-  --input-json '{"approver":"human:operator"}'
+  --input-json '{}'
 hermes-workflows worker \
   --config docs/presentation/2026-07-02/workflows.registry.example.json \
   --db default \

@@ -24,9 +24,7 @@ async def trip_planning_workflow(inputs):
         "Approve this trip plan?",
         key="approve_trip_plan",
         artifact=options,
-        approver=inputs.get("approver", "human:operator"),
         allowed=["approve", "reject"],
-        authority=["book_travel"],
     )
     if decision.get("action") != "approve":
         return {"approved": False, "decision": decision, "options": options}

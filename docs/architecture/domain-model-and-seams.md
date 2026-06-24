@@ -166,8 +166,7 @@ The runtime may include bounded stdout/stderr tails and command metadata in diag
 
 Approval decisions can fail when:
 
-- the approver does not match a `human:<id>` requirement
-- the source/provenance is missing or malformed
+- the external decision provenance is missing or malformed
 - a duplicate or conflicting decision is submitted for the same key
 - the workflow is already terminal
 - a record-only adapter stores the approval but no trusted resumer runs afterward

@@ -348,16 +348,16 @@ def _status_packet(
     return packet
 
 
-def _dashboard_approver_id() -> str | None:
-    """Return the server-configured human identity dashboard decisions may use."""
-    env_value = os.getenv("HERMES_WORKFLOWS_DASHBOARD_APPROVER_ID")
+def _dashboard_decision_by_id() -> str | None:
+    """Return the server-configured label dashboard decisions may use."""
+    env_value = os.getenv("HERMES_WORKFLOWS_DASHBOARD_DECISION_BY")
     if env_value and env_value.strip():
         return env_value.strip()
     try:
         from hermes_cli.config import cfg_get, load_config  # type: ignore
 
         config = load_config()
-        for key in ("dashboard_approver_id", "approver_id"):
+        for key in ("dashboard_decision_by_id", "decision_by"):
             value = cfg_get(config, "plugins", "entries", "hermes-workflows-approvals", key, default=None)
             if value and str(value).strip():
                 return str(value).strip()
@@ -367,13 +367,7 @@ def _dashboard_approver_id() -> str | None:
 
 
 def _dashboard_decision_actor(configured_actor: str) -> str:
-    """Return the server-configured actor to store as approval provenance.
-
-    Dashboard approval identity is audit/provenance, not a permissions layer. The
-    workflow's requested approver label remains visible on the approval card, but
-    this trusted local dashboard does not block or rewrite decisions because that
-    label differs from the configured dashboard actor.
-    """
+    """Return the server-configured actor label to store as decision provenance."""
     return configured_actor
 
 
@@ -1048,9 +1042,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
 
 
 def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
-    authority = approval.get("authority")
     artifact = approval.get("artifact")
-    text = json.dumps({"authority": authority, "artifact": artifact}, default=str).lower()
+    text = json.dumps({"artifact": artifact}, default=str).lower()
     if any(word in text for word in ("payment", "purchase", "delete", "publish", "send_email", "external_send", "credential")):
         return {"level": "high", "reason": "The approval appears to authorize an external, destructive, financial, or credential-affecting action."}
     if any(word in text for word in ("email", "calendar", "schedule", "deploy", "post", "message")):
@@ -1142,7 +1135,6 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
         "request_type": "human_input",
         "headline": prompt,
         "prompt": prompt,
-        "approver": step.get("approver") or request.get("approver"),
         "schema": schema_id,
         "request_schema": descriptor,
         "input_surface": _review_input_surface(descriptor),
@@ -1171,7 +1163,6 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
         "request_type": "approval_policy",
         "headline": prompt,
         "prompt": prompt,
-        "approver": approval.get("approver"),
         "allowed": approval.get("allowed") or ["approve", "reject"],
         "request_schema": {
             "id": "hermes_workflows.approvals:ApprovalDecision",
@@ -1183,7 +1174,6 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
             "actions": list(approval.get("allowed") or ["approve", "reject"]),
             "feedback": {"kind": "text", "optional": True},
         },
-        "authority": approval.get("authority"),
         "artifact_preview": _redact_artifact_local_refs(artifact),
         "artifact_render": _artifact_descriptor(artifact),
         "decision": approval.get("decision"),
@@ -1518,9 +1508,7 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
             "allowed_decisions": approval.get("allowed") or ["approve", "reject"],
             "artifact": _redact_artifact_local_refs(approval.get("artifact")),
             "artifact_render": _artifact_descriptor(approval.get("artifact")),
-            "authority": approval.get("authority"),
-            "approver": approval.get("approver"),
-        },
+                },
         "risk": card["risk"],
         "consequence": card["consequence"],
         "decision_semantics": {
@@ -1614,21 +1602,23 @@ async def respond_operator_step(body: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/review-requests/response")
 async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
-    approver_id = _dashboard_approver_id()
-    if not approver_id:
+    decision_by = _dashboard_decision_by_id()
+    if not decision_by:
         raise HTTPException(
             status_code=403,
-            detail="Dashboard review responses require server-configured dashboard_approver_id.",
+            detail="Dashboard review responses require server-configured dashboard_decision_by_id.",
         )
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
     workflow_id = str(body.get("workflow_id") or "").strip()
     key = str(body.get("key") or "").strip()
     if not workflow_id or not key:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
-    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
-    if not payload:
+    raw_payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    if not raw_payload:
         raise HTTPException(status_code=400, detail="review response payload is required")
-    decision_actor = _dashboard_decision_actor(approver_id)
+    decision_actor = _dashboard_decision_actor(decision_by)
+    payload = {key: value for key, value in raw_payload.items() if key not in {"by", "source"}}
+    payload["by"] = decision_actor
     message_id = f"dashboard:{uuid.uuid4()}"
 
     def record_and_resume() -> tuple[Any, dict[str, Any]]:
@@ -1675,11 +1665,11 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
     # Dashboard approvals derive human provenance from server-side plugin
     # configuration, never from untrusted browser JSON. After recording the
     # decision they immediately resume trusted local workflow code.
-    approver_id = _dashboard_approver_id()
-    if not approver_id:
+    decision_by = _dashboard_decision_by_id()
+    if not decision_by:
         raise HTTPException(
             status_code=403,
-            detail="Dashboard approvals require server-configured dashboard_approver_id.",
+            detail="Dashboard approvals require server-configured dashboard_decision_by_id.",
         )
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
     action = str(body.get("action") or "approve").strip().lower()
@@ -1690,7 +1680,7 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
     if not workflow_id or not key:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
 
-    decision_actor = _dashboard_decision_actor(approver_id)
+    decision_actor = _dashboard_decision_actor(decision_by)
     message_id = f"dashboard:{uuid.uuid4()}"
     decision = ApprovalDecisionInput(
         workflow_id=workflow_id,

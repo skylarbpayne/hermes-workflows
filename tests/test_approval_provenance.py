@@ -9,9 +9,7 @@ async def approval_workflow(inputs):
         "Approve the test plan?",
         key="approve_test_plan",
         artifact={"plan": "test"},
-        approver="human:skylar",
         allowed=["approve", "reject"],
-        authority=["approve_plan"],
     )
     return {"decision": decision}
 
@@ -28,7 +26,6 @@ async def approval_after_step_workflow(inputs):
         "Approve the prepared test plan?",
         key="approve_test_plan",
         artifact=artifact,
-        approver="human:skylar",
     )
     return {"decision": decision}
 
@@ -39,7 +36,6 @@ async def approval_then_wait_workflow(inputs):
         "Approve before waiting for follow-up?",
         key="approve_test_plan",
         artifact={"plan": "test"},
-        approver="human:skylar",
     )
     follow_up = await wait_for("followup.ready", key="continue")
     return {"decision": decision, "follow_up": follow_up}
@@ -67,13 +63,13 @@ def reject_payload():
     return {"action": "reject", "by": "skylar"}
 
 
-def test_human_approval_rejects_agent_originated_signal(tmp_path):
+def test_approval_rejects_source_without_external_provenance(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     first = engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
     assert first.status == "waiting"
     assert first.waiting_on == "signal:approval.decision:approve_test_plan"
 
-    with pytest.raises(ValueError, match="requires human approval source"):
+    with pytest.raises(ValueError, match="requires external decision provenance"):
         WorkflowEngine(tmp_path / "workflow.sqlite").signal(
             "wf_approval",
             "approval.decision",
@@ -112,8 +108,6 @@ def test_human_approval_accepts_human_source_and_returns_provenance(tmp_path):
     assert decision["action"] == "approve"
     assert decision["by"] == "skylar"
     assert decision["source"] == {
-        "kind": "human",
-        "id": "skylar",
         "channel": "discord",
         "message_url": "discord://thread/123/message/456",
     }
@@ -123,7 +117,7 @@ def test_human_approval_rejects_missing_source(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
 
-    with pytest.raises(ValueError, match="requires human approval source"):
+    with pytest.raises(ValueError, match="requires external decision provenance"):
         WorkflowEngine(tmp_path / "workflow.sqlite").signal(
             "wf_approval",
             "approval.decision",
@@ -139,7 +133,7 @@ def test_human_approval_rejects_human_source_without_external_provenance(tmp_pat
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
 
-    with pytest.raises(ValueError, match="requires external approval provenance"):
+    with pytest.raises(ValueError, match="requires external decision provenance"):
         WorkflowEngine(tmp_path / "workflow.sqlite").signal(
             "wf_approval",
             "approval.decision",
@@ -152,21 +146,21 @@ def test_human_approval_rejects_human_source_without_external_provenance(tmp_pat
     assert WorkflowEngine(tmp_path / "workflow.sqlite").workflow_status("wf_approval")["status"] == "waiting"
 
 
-def test_human_approval_rejects_wrong_human_source(tmp_path):
+def test_approval_accepts_provenance_without_matching_actor_identity(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
     engine.run_until_idle(approval_workflow, {}, workflow_id="wf_approval")
 
-    with pytest.raises(ValueError, match="requires approval from human:skylar"):
-        WorkflowEngine(tmp_path / "workflow.sqlite").signal(
-            "wf_approval",
-            "approval.decision",
-            key="approve_test_plan",
-            payload={"action": "approve", "by": "skylar"},
-            source={"kind": "human", "id": "not-skylar", "channel": "discord", "message_url": "discord://thread/123/message/456"},
-            idempotency_key="wrong-human-approval",
-        )
+    recorded = WorkflowEngine(tmp_path / "workflow.sqlite").signal(
+        "wf_approval",
+        "approval.decision",
+        key="approve_test_plan",
+        payload={"action": "approve", "by": "skylar"},
+        source={"kind": "human", "id": "not-skylar", "channel": "discord", "message_url": "discord://thread/123/message/456"},
+        idempotency_key="wrong-human-approval",
+    )
 
-    assert WorkflowEngine(tmp_path / "workflow.sqlite").workflow_status("wf_approval")["status"] == "waiting"
+    assert recorded.status == "running"
+    assert WorkflowEngine(tmp_path / "workflow.sqlite").drain("wf_approval").status == "completed"
 
 
 def test_approval_decision_cannot_arrive_before_approval_request(tmp_path):

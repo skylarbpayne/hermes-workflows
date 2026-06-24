@@ -29,9 +29,7 @@ async def plugin_approval_workflow(inputs):
             "summary": "Plugin approval packet",
             "secret_token": "should-not-leak",
         },
-        approver="human:operator",
         allowed=["approve", "reject"],
-        authority={"scope": "plugin-test"},
     )
     return await plugin_followup_step(decision)
 
@@ -167,7 +165,6 @@ def test_workflow_review_requests_list_returns_bounded_redacted_pending_request(
     assert approval["workflow_ref"] == "tests.test_hermes_plugin_approvals:plugin_approval_workflow"
     assert approval["key"] == "approve_plugin_test"
     assert approval["allowed"] == ["approve", "reject"]
-    assert approval["authority"] == {"scope": "plugin-test"}
     assert approval["artifact"]["summary"] == "Plugin approval packet"
     assert approval["artifact"]["secret_token"] == "[REDACTED]"
     assert approval["decision_token_error"] == "decision tokens require a configured workflow DB alias"
