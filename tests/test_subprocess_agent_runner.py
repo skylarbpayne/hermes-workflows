@@ -15,17 +15,17 @@ from hermes_workflows import step, workflow
 # Unique source for subprocess-runner approval tests so full-suite module cache
 # state from other generated-workflow tests cannot satisfy this approval gate.
 @step
-async def label_item(ctx, item):
+async def label_item(item):
     return {"id": item["id"], "label": item["label"].upper()}
 
 @workflow
-async def process_item(ctx, item):
-    return {"processed": await label_item(ctx, item)}
+async def process_item(item):
+    return {"processed": await label_item(item)}
 '''
 
 
 @workflow
-async def subprocess_json_pipeline(ctx, inputs):
+async def subprocess_json_pipeline(inputs):
     return await agent(
         "double_value",
         prompt=f"Double {inputs['value']}",
@@ -34,7 +34,7 @@ async def subprocess_json_pipeline(ctx, inputs):
 
 
 @workflow
-async def subprocess_generated_workflow_pipeline(ctx, inputs):
+async def subprocess_generated_workflow_pipeline(inputs):
     processor = await agent(
         "build_processor",
         prompt=f"Write a Python workflow for {inputs['kind']} items.",

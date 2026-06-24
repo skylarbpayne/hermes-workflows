@@ -5,26 +5,26 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, approve, cancel_workflow, step, workflow
 
 
 STEP_RUNS = []
 
 
 @step
-async def cancellation_side_effect_step(ctx, value):
+async def cancellation_side_effect_step(value):
     STEP_RUNS.append(value)
     return {"value": value}
 
 
 @workflow
-async def step_wait_workflow(ctx, inputs):
-    return await cancellation_side_effect_step(ctx, inputs["item"])
+async def step_wait_workflow(inputs):
+    return await cancellation_side_effect_step(inputs["item"])
 
 
 @workflow
-async def approval_only_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def approval_only_workflow(inputs):
+    decision = await approve(
         "Approve the thing?",
         key="approve_thing",
         artifact={"item": inputs["item"]},
@@ -34,33 +34,25 @@ async def approval_only_workflow(ctx, inputs):
 
 
 @workflow
-async def immediate_success_workflow(ctx, inputs):
+async def immediate_success_workflow(inputs):
     return {"item": inputs["item"], "ok": True}
 
 
 @workflow
-async def immediate_failure_workflow(ctx, inputs):
+async def immediate_failure_workflow(inputs):
     raise RuntimeError(f"boom {inputs['item']}")
 
 
 @workflow
-async def cancels_itself_then_returns(ctx, inputs):
-    ctx.engine.cancel_workflow(
-        ctx.workflow_id,
-        reason="operator cancelled during decider",
-        source={"kind": "test", "id": "race"},
-    )
+async def cancels_itself_then_returns(inputs):
+    cancel_workflow(reason="operator cancelled during decider")
     return {"should_not": "complete"}
 
 
 @workflow
-async def cancels_itself_then_requests_approval(ctx, inputs):
-    ctx.engine.cancel_workflow(
-        ctx.workflow_id,
-        reason="operator cancelled before new wait",
-        source={"kind": "test", "id": "race"},
-    )
-    await ctx.approval.request(
+async def cancels_itself_then_requests_approval(inputs):
+    cancel_workflow(reason="operator cancelled before new wait")
+    await approve(
         "This should not be enqueued after cancellation",
         key="late_approval",
         artifact={"item": inputs["item"]},

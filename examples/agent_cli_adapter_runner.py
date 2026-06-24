@@ -7,7 +7,7 @@ from hermes_workflows import SubprocessAgentRunner, WorkflowEngine, agent, workf
 
 
 @workflow
-async def cli_agent_adapter_example(ctx, inputs):
+async def cli_agent_adapter_example(inputs):
     return await agent(
         "summarize_item",
         prompt=f"Summarize {inputs['item']} as JSON.",

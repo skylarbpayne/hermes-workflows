@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, TypedDict, cast
 
-from hermes_workflows import agent, step, workflow
+from hermes_workflows import agent, approve, step, workflow
 
 
 PUBLIC_APPROVAL_GATES = ["approve_coding_plan", "implementation_agent", "approve_coding_review"]
@@ -116,7 +116,7 @@ def _format_approval_source(decision: Dict[str, Any]) -> str:
 
 
 @step
-async def coding_inspect_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def coding_inspect_repo(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     if not (repo / ".git").exists():
         raise ValueError(f"not a git repo: {repo}")
@@ -136,7 +136,7 @@ async def coding_inspect_repo(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def coding_write_plan(ctx, inputs: Dict[str, Any], repo: Dict[str, Any]) -> Dict[str, Any]:
+async def coding_write_plan(inputs: Dict[str, Any], repo: Dict[str, Any]) -> Dict[str, Any]:
     repo_path = Path(repo["repo_path"])
     plan_path = _artifact_path(inputs, "plan_path", repo_path, "coding-plan.md")
     goal = inputs.get("goal") or inputs.get("task") or "Coding task"
@@ -289,7 +289,7 @@ After: {before_after['after']}
 
 
 @step
-async def coding_collect_diff(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def coding_collect_diff(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     status = _run_git(["status", "--short"], cwd=repo)
     return {
@@ -303,7 +303,7 @@ async def coding_collect_diff(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def coding_run_verification(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def coding_run_verification(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     commands = inputs.get("verification_commands") or ["pytest -q"]
     timeout = int(inputs.get("verification_timeout", 300))
@@ -313,7 +313,6 @@ async def coding_run_verification(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]
 
 @step
 async def coding_write_evidence(
-    ctx,
     inputs: Dict[str, Any],
     plan: Dict[str, Any],
     implementation_signal: Dict[str, Any],
@@ -367,7 +366,6 @@ async def coding_write_evidence(
 
 @step
 async def coding_build_review_packet(
-    ctx,
     inputs: Dict[str, Any],
     plan: Dict[str, Any],
     plan_decision: Dict[str, Any],
@@ -442,7 +440,6 @@ Review status: waiting on `approve_coding_review`
 
 @step
 async def coding_write_review_report(
-    ctx,
     inputs: Dict[str, Any],
     review_decision: Dict[str, Any],
     packet: Dict[str, Any],
@@ -501,7 +498,7 @@ Review approval source: {_format_approval_source(review_decision)}
 
 
 @step
-async def coding_land_change(ctx, inputs: Dict[str, Any], packet: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
+async def coding_land_change(inputs: Dict[str, Any], packet: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     if not inputs.get("commit", False):
         return {"committed": False, "pushed": False, "reason": "commit disabled", **report}
@@ -540,10 +537,10 @@ async def coding_land_change(ctx, inputs: Dict[str, Any], packet: Dict[str, Any]
 
 
 @workflow
-async def coding_workflow(ctx, inputs: CodingWorkflowInput) -> CodingWorkflowResult:
-    repo = await coding_inspect_repo(ctx, inputs)
-    plan = await coding_write_plan(ctx, inputs, repo)
-    plan_decision = await ctx.approve(
+async def coding_workflow(inputs: CodingWorkflowInput) -> CodingWorkflowResult:
+    repo = await coding_inspect_repo(inputs)
+    plan = await coding_write_plan(inputs, repo)
+    plan_decision = await approve(
         f"Approve coding plan for: {plan['goal']}?",
         key="approve_coding_plan",
         artifact=plan,
@@ -560,11 +557,11 @@ async def coding_workflow(ctx, inputs: CodingWorkflowInput) -> CodingWorkflowRes
         key=INTERNAL_IMPLEMENTATION_AGENT_KEY,
         tools=["terminal", "file"],
     )
-    diff = await coding_collect_diff(ctx, inputs)
-    verification = await coding_run_verification(ctx, inputs)
-    evidence = await coding_write_evidence(ctx, inputs, plan, implementation_signal, diff, verification)
-    packet = await coding_build_review_packet(ctx, inputs, plan, plan_decision, implementation_signal, diff, verification, evidence)
-    review_decision = await ctx.approve(
+    diff = await coding_collect_diff(inputs)
+    verification = await coding_run_verification(inputs)
+    evidence = await coding_write_evidence(inputs, plan, implementation_signal, diff, verification)
+    packet = await coding_build_review_packet(inputs, plan, plan_decision, implementation_signal, diff, verification, evidence)
+    review_decision = await approve(
         f"Approve coding review for: {plan['goal']}?",
         key="approve_coding_review",
         artifact=packet,
@@ -573,8 +570,8 @@ async def coding_workflow(ctx, inputs: CodingWorkflowInput) -> CodingWorkflowRes
     )
     if not review_decision.approved:
         return {"ready": False, "stage": "review_rejected", "packet": packet, "decision": review_decision.to_dict()}
-    report = await coding_write_review_report(ctx, inputs, review_decision, packet)
-    landing = await coding_land_change(ctx, inputs, packet, report)
+    report = await coding_write_review_report(inputs, review_decision, packet)
+    landing = await coding_land_change(inputs, packet, report)
     return cast(CodingWorkflowResult, {
         "kind": "coding_workflow_result",
         "ready": True,

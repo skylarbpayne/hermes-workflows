@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, workflow
+from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, workflow, workflow_id
 
 
 @dataclass
@@ -62,7 +62,7 @@ class TypedUnionWorkflowInput:
 
 
 @dataclass
-class TypedCtxWorkflowInput:
+class TypedContextWorkflowInput:
     topic: str
     enabled: bool = False
 
@@ -83,9 +83,9 @@ async def typed_union_input_workflow(inputs: TypedUnionWorkflowInput):
 
 
 @workflow
-async def typed_ctx_input_workflow(ctx, inputs: TypedCtxWorkflowInput):
-    assert ctx.workflow_id
-    assert isinstance(inputs, TypedCtxWorkflowInput)
+async def typed_context_input_workflow(inputs: TypedContextWorkflowInput):
+    assert workflow_id()
+    assert isinstance(inputs, TypedContextWorkflowInput)
     return {"topic": inputs.topic, "enabled": inputs.enabled}
 
 
@@ -253,13 +253,13 @@ def test_workflow_coerces_typed_input_for_legacy_ctx_signature(tmp_path):
     engine = WorkflowEngine(db)
 
     result = engine.run_until_idle(
-        typed_ctx_input_workflow,
-        {"topic": "ctx typed", "enabled": 1},
-        workflow_id="wf_typed_ctx_input",
+        typed_context_input_workflow,
+        {"topic": "context typed", "enabled": 1},
+        workflow_id="wf_typed_context_input",
     )
 
     assert result.status == "completed"
-    assert result.result == {"topic": "ctx typed", "enabled": True}
+    assert result.result == {"topic": "context typed", "enabled": True}
 
 
 def test_workflow_input_parser_rejects_missing_required_fields(tmp_path):

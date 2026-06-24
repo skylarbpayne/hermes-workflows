@@ -1,26 +1,26 @@
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, gather, step, workflow
 
 
 RUNS = []
 
 
 @step
-async def gather_left(ctx, value):
+async def gather_left(value):
     RUNS.append(("left", value))
     return {"side": "left", "value": value}
 
 
 @step
-async def gather_right(ctx, value):
+async def gather_right(value):
     RUNS.append(("right", value))
     return {"side": "right", "value": value}
 
 
 @workflow
-async def fanout_workflow(ctx, inputs):
-    left, right = await ctx.gather(
-        gather_left(ctx, inputs["left"]),
-        gather_right(ctx, inputs["right"]),
+async def fanout_workflow(inputs):
+    left, right = await gather(
+        gather_left(inputs["left"]),
+        gather_right(inputs["right"]),
     )
     return {"left": left, "right": right}
 
@@ -178,13 +178,13 @@ def test_gather_rejects_non_step_inputs(tmp_path):
     engine = WorkflowEngine(tmp_path / "workflow.sqlite")
 
     @workflow
-    async def bad_gather_workflow(ctx, inputs):
+    async def bad_gather_workflow(inputs):
         async def plain_coroutine():
             return "not durable"
 
-        return await ctx.gather(plain_coroutine())
+        return await gather(plain_coroutine())
 
     result = engine.run_until_idle(bad_gather_workflow, {}, workflow_id="wf_bad_gather")
 
     assert result.status == "failed"
-    assert "ctx.gather only supports @step calls" in result.error
+    assert "gather only supports @step calls" in result.error

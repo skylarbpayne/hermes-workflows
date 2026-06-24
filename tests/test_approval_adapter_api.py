@@ -1,18 +1,18 @@
 import pytest
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, approve, step, workflow
 from hermes_workflows.approvals import ApprovalDecisionInput, ApprovalReceipt, ApprovalView
 from hermes_workflows.engine import _WORKFLOW_REGISTRY
 
 
 @step
-async def adapter_followup_step(ctx, inputs):
+async def adapter_followup_step(inputs):
     return {"followup": inputs.get("followup", "done")}
 
 
 @workflow
-async def adapter_approval_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def adapter_approval_workflow(inputs):
+    decision = await approve(
         "Approve adapter test?",
         key="approve_adapter_test",
         artifact={"plan": inputs.get("plan", "adapter"), "count": 2},
@@ -25,14 +25,14 @@ async def adapter_approval_workflow(ctx, inputs):
 
 
 @workflow
-async def adapter_approval_then_step_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def adapter_approval_then_step_workflow(inputs):
+    decision = await approve(
         "Approve before follow-up step?",
         key="approve_adapter_test",
         artifact={"plan": inputs.get("plan", "adapter")},
         approver="human:skylar",
     )
-    followup = await adapter_followup_step(ctx, inputs)
+    followup = await adapter_followup_step(inputs)
     return {"decision": decision, "followup": followup}
 
 

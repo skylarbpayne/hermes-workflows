@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from hermes_workflows import Workflow, WorkflowEngine, agent, workflow
+from hermes_workflows import Workflow, WorkflowEngine, agent, start_child, workflow
 from hermes_workflows.agent_runner import build_agent_runner
 
 
@@ -10,23 +10,23 @@ GENERATED_SOURCE = '''
 from hermes_workflows import step, workflow
 
 @step
-async def label_item(ctx, item):
+async def label_item(item):
     return {"id": item["id"], "label": item["label"].upper()}
 
 @workflow
-async def process_item(ctx, item):
-    return {"processed": await label_item(ctx, item)}
+async def process_item(item):
+    return {"processed": await label_item(item)}
 '''
 
 MULTI_WORKFLOW_SOURCE = '''
 from hermes_workflows import workflow
 
 @workflow
-async def harmless(ctx, item):
+async def harmless(item):
     return {"symbol": "harmless", "item": item}
 
 @workflow
-async def dangerous(ctx, item):
+async def dangerous(item):
     return {"symbol": "dangerous", "item": item}
 '''
 
@@ -64,7 +64,7 @@ json.dump({"output": {"argv": sys.argv[1:]}, "provenance": {"runner": "argv-prov
 
 
 @workflow
-async def live_json_agent_pipeline(ctx, inputs):
+async def live_json_agent_pipeline(inputs):
     return await agent(
         "summarize_item",
         prompt=f"Summarize {inputs['item']}",
@@ -73,7 +73,7 @@ async def live_json_agent_pipeline(ctx, inputs):
 
 
 @workflow
-async def live_generated_workflow_pipeline(ctx, inputs):
+async def live_generated_workflow_pipeline(inputs):
     processor = await agent(
         "build_processor",
         prompt=f"Write a Python workflow for {inputs['kind']} items.",
@@ -84,7 +84,7 @@ async def live_generated_workflow_pipeline(ctx, inputs):
 
 
 @workflow
-async def live_multi_symbol_pipeline(ctx, inputs):
+async def live_multi_symbol_pipeline(inputs):
     harmless_workflow = await agent(
         "build_harmless",
         prompt=f"Write a harmless workflow for {inputs['kind']} items.",
@@ -103,21 +103,21 @@ async def live_multi_symbol_pipeline(ctx, inputs):
 
 
 @workflow
-async def live_multi_symbol_same_group_pipeline(ctx, inputs):
+async def live_multi_symbol_same_group_pipeline(inputs):
     harmless_workflow = await agent(
         "build_harmless",
         prompt=f"Write a harmless workflow for {inputs['kind']} items.",
         input={"kind": inputs["kind"]},
         returns=Workflow,
     )
-    first = await ctx.start_child(harmless_workflow, inputs["item"], key="same", group="shared")
+    first = await start_child(harmless_workflow, inputs["item"], key="same", group="shared")
     dangerous_workflow = await agent(
         "build_dangerous",
         prompt=f"Write a dangerous workflow for {inputs['kind']} items.",
         input={"kind": inputs["kind"]},
         returns=Workflow,
     )
-    second = await ctx.start_child(dangerous_workflow, inputs["item"], key="same", group="shared")
+    second = await start_child(dangerous_workflow, inputs["item"], key="same", group="shared")
     return {"first": first, "second": second}
 
 

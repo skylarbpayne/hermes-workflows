@@ -5,13 +5,13 @@ from hermes_workflows.cli import main as cli_main
 
 
 @step
-async def status_history_explode(ctx, text):
+async def status_history_explode(text):
     raise ValueError("command-history-smoke-boom")
 
 
 @workflow
-async def status_history_workflow(ctx, inputs):
-    return await status_history_explode(ctx, inputs["text"])
+async def status_history_workflow(inputs):
+    return await status_history_explode(inputs["text"])
 
 
 def test_status_command_history_is_opt_in_and_shows_failed_command_details(tmp_path):

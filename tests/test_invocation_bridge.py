@@ -8,31 +8,31 @@ from pathlib import Path
 
 import pytest
 
-from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, step, workflow
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine, approve, step, workflow
 from hermes_workflows.invocation import InvocationService, TrustedResumer
 from hermes_workflows.receipts import redact_secrets
 from hermes_workflows.registry import WorkflowRegistry
 
 
 @step
-async def bridge_followup_step(ctx, decision):
+async def bridge_followup_step(decision):
     return {"followup_ran": True, "decision": decision, "api_token": "do-not-leak"}
 
 
 @workflow
-async def bridge_approval_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def bridge_approval_workflow(inputs):
+    decision = await approve(
         "Approve bridge test?",
         key="approve_bridge_test",
         artifact={"summary": inputs.get("summary", "Bridge packet"), "secret_token": "hide-me"},
         approver=inputs.get("approver", "human:skylar"),
     )
-    return await bridge_followup_step(ctx, decision)
+    return await bridge_followup_step(decision)
 
 
 @workflow
-async def other_approval_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def other_approval_workflow(inputs):
+    decision = await approve(
         "Approve other test?",
         key="approve_other_test",
         artifact={"summary": inputs.get("summary", "Other packet")},
@@ -42,14 +42,14 @@ async def other_approval_workflow(ctx, inputs):
 
 
 @workflow
-async def two_approval_workflow(ctx, inputs):
-    first = await ctx.approval.request(
+async def two_approval_workflow(inputs):
+    first = await approve(
         "Approve first?",
         key="approve_first",
         artifact={"step": "first"},
         approver=inputs.get("approver", "human:skylar"),
     )
-    second = await ctx.approval.request(
+    second = await approve(
         "Approve second?",
         key="approve_second",
         artifact={"step": "second"},
@@ -65,8 +65,8 @@ class TypedBridgeInput:
 
 
 @workflow
-async def typed_bridge_approval_workflow(ctx, inputs: TypedBridgeInput):
-    decision = await ctx.approval.request(
+async def typed_bridge_approval_workflow(inputs: TypedBridgeInput):
+    decision = await approve(
         f"Approve typed bridge test for {inputs.topic}?",
         key="approve_typed_bridge_test",
         artifact={"summary": inputs.topic},
@@ -140,7 +140,7 @@ def test_invocation_service_loads_path_workflow_refs(tmp_path):
         "from hermes_workflows import workflow\n"
         "\n"
         "@workflow\n"
-        "async def path_invocation_workflow(ctx, inputs):\n"
+        "async def path_invocation_workflow(inputs):\n"
         "    return {'value': inputs.get('value')}\n"
     )
     workflow_ref = f"{workflow_file}:path_invocation_workflow"

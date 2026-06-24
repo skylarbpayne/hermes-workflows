@@ -13,16 +13,16 @@ from hermes_workflows.cli import agent_runner_from_args, normalize_agent_value_o
 
 
 WORKFLOW_MODULE = '''
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, wait_for, workflow
 
 @step
-async def make_plan(ctx, inputs):
+async def make_plan(inputs):
     return {"summary": f"Plan for {inputs['destination']}"}
 
 @workflow
-async def demo_workflow(ctx, inputs):
-    plan = await make_plan(ctx, inputs)
-    decision = await ctx.approval.request(
+async def demo_workflow(inputs):
+    plan = await make_plan(inputs)
+    decision = await approve(
         "Approve plan?",
         key="approve_plan",
         artifact=plan,
@@ -37,11 +37,11 @@ from pathlib import Path
 from hermes_workflows import Workflow, workflow
 
 WAITING_SOURCE = """
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 @workflow
-async def waiting_child(ctx, item):
-    payload = await ctx.wait_for(\"dynamic.ready\", key=item[\"id\"])
+async def waiting_child(item):
+    payload = await wait_for(\"dynamic.ready\", key=item[\"id\"])
     return {\"payload\": payload}
 """
 
@@ -52,7 +52,7 @@ CHILD = Workflow.from_source(
 )
 
 @workflow
-async def parent_workflow(ctx, inputs):
+async def parent_workflow(inputs):
     return await CHILD(inputs["item"], key=inputs["item"]["id"])
 '''
 
@@ -61,16 +61,16 @@ DYNAMIC_CHILD_WORKFLOW_MODULE = '''
 from hermes_workflows import agent, Workflow, workflow
 
 WAITING_SOURCE = """
-from hermes_workflows import workflow
+from hermes_workflows import wait_for, workflow
 
 @workflow
-async def waiting_child(ctx, item):
-    payload = await ctx.wait_for(\"dynamic.ready\", key=item[\"id\"])
+async def waiting_child(item):
+    payload = await wait_for(\"dynamic.ready\", key=item[\"id\"])
     return {\"payload\": payload}
 """
 
 @workflow
-async def generated_parent_workflow(ctx, inputs):
+async def generated_parent_workflow(inputs):
     child = await agent(
         "build_waiting_child",
         prompt="Build a child workflow that waits for a signal.",
@@ -85,7 +85,7 @@ AGENT_RUNNER_WORKFLOW_MODULE = '''
 from hermes_workflows import agent, workflow
 
 @workflow
-async def agent_runner_workflow(ctx, inputs):
+async def agent_runner_workflow(inputs):
     packet = await agent(
         "writer",
         prompt="Write a short packet.",
@@ -113,7 +113,7 @@ AGENT_MODEL_RUNNER_WORKFLOW_MODULE = '''
 from hermes_workflows import agent, workflow
 
 @workflow
-async def agent_model_runner_workflow(ctx, inputs):
+async def agent_model_runner_workflow(inputs):
     packet = await agent(
         "writer",
         prompt="Write a short packet.",
@@ -1238,9 +1238,9 @@ def test_cli_serve_dashboard_read_only_does_not_import_workflow_module(tmp_path)
     (tmp_path / "side_effect_wf.py").write_text(
         "from pathlib import Path\n"
         f"Path({str(marker)!r}).write_text('imported')\n"
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def side_effect_workflow(ctx, inputs):\n"
+        "async def side_effect_workflow(inputs):\n"
         "    return {'ok': True}\n"
     )
     (tmp_path / "demo_wf.py").write_text(WORKFLOW_MODULE)
@@ -1363,9 +1363,9 @@ def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
 
 def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(tmp_path):
     (tmp_path / "alias_wf.py").write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def alias_workflow(ctx, inputs):\n"
+        "async def alias_workflow(inputs):\n"
         "    return {'message': inputs['message']}\n"
     )
     registry = tmp_path / ".hermes" / "workflows.registry.json"
@@ -1433,9 +1433,9 @@ def test_workflow_run_helper_supports_direct_uv_script_style_and_default_db(tmp_
         pytest.skip("uv is required for direct uv script smoke")
     script = tmp_path / "direct_workflow.py"
     script.write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def direct_workflow(ctx, inputs):\n"
+        "async def direct_workflow(inputs):\n"
         "    return {'ok': inputs.get('ok', False)}\n"
         "if __name__ == '__main__':\n"
         "    raise SystemExit(direct_workflow.run())\n"
@@ -1479,13 +1479,13 @@ def test_workflow_run_helper_supports_direct_uv_script_style_and_default_db(tmp_
 
 def test_run_no_drain_replays_memoized_step_outputs_from_same_entrypoint_and_db(tmp_path):
     (tmp_path / "memo_wf.py").write_text(
-        "from hermes_workflows import step, workflow\n"
+        "from hermes_workflows import approve, step, workflow\n"
         "@step\n"
-        "async def compute(ctx, value):\n"
+        "async def compute(value):\n"
         "    return {'computed': value}\n"
         "@workflow\n"
-        "async def memo_workflow(ctx, inputs):\n"
-        "    result = await compute(ctx, inputs['value'])\n"
+        "async def memo_workflow(inputs):\n"
+        "    result = await compute(inputs['value'])\n"
         "    return {'final': result}\n"
     )
     db = tmp_path / ".hermes" / "workflows.sqlite"
@@ -1556,10 +1556,10 @@ def test_registry_discover_lists_workflow_files(tmp_path):
     workflow_file.parent.mkdir()
     (workflow_file.parent / "helpers.py").write_text("DEFAULT_OUTPUT = {'from': 'sibling'}\n")
     workflow_file.write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "from helpers import DEFAULT_OUTPUT\n"
         "@workflow\n"
-        "async def daily_ops(ctx, inputs):\n"
+        "async def daily_ops(inputs):\n"
         "    return DEFAULT_OUTPUT\n"
     )
 
@@ -1606,10 +1606,10 @@ def test_registry_discover_is_static_and_does_not_execute_workflow_modules(tmp_p
     workflow_file = tmp_path / "dangerous_workflow.py"
     workflow_file.write_text(
         "from pathlib import Path\n"
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         f"Path({str(marker)!r}).write_text('imported')\n"
         "@workflow\n"
-        "async def dangerous_workflow(ctx, inputs):\n"
+        "async def dangerous_workflow(inputs):\n"
         "    return inputs\n"
     )
 
@@ -1661,9 +1661,9 @@ def test_run_with_external_config_defaults_db_to_config_project_root(tmp_path):
     caller.mkdir()
     (project / ".hermes").mkdir()
     (project / "configured_wf.py").write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def configured_wf(ctx, inputs):\n"
+        "async def configured_wf(inputs):\n"
         "    return {'project': inputs['project']}\n"
     )
     registry = project / ".hermes" / "workflows.registry.json"
@@ -1709,9 +1709,9 @@ def test_direct_workflow_run_defaults_db_to_workflow_file_project(tmp_path):
     caller.mkdir()
     script = project / "direct_project_workflow.py"
     script.write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def direct_project_workflow(ctx, inputs):\n"
+        "async def direct_project_workflow(inputs):\n"
         "    return {'value': inputs['value']}\n"
         "if __name__ == '__main__':\n"
         "    raise SystemExit(direct_project_workflow.run())\n"
@@ -1743,9 +1743,9 @@ def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
     caller.mkdir()
     (project / ".hermes").mkdir()
     (project / "configured_wf.py").write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def configured_wf(ctx, inputs):\n"
+        "async def configured_wf(inputs):\n"
         "    return {'project': inputs['project']}\n"
     )
     registry = project / ".hermes" / "workflows.registry.json"
@@ -1804,9 +1804,9 @@ def test_module_ref_run_defaults_db_to_imported_module_project(tmp_path):
     project.mkdir()
     caller.mkdir()
     (project / "module_wf.py").write_text(
-        "from hermes_workflows import workflow\n"
+        "from hermes_workflows import wait_for, workflow\n"
         "@workflow\n"
-        "async def module_workflow(ctx, inputs):\n"
+        "async def module_workflow(inputs):\n"
         "    return {'ok': True}\n"
     )
 

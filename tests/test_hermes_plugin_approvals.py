@@ -11,18 +11,18 @@ from typing import Any
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, step, workflow
+from hermes_workflows import WorkflowEngine, approve, step, workflow
 from hermes_workflows.engine import JsonCodec
 
 
 @step
-async def plugin_followup_step(ctx, decision: dict[str, Any]) -> dict[str, Any]:
+async def plugin_followup_step(decision: dict[str, Any]) -> dict[str, Any]:
     return {"followup_ran": True, "decision": decision}
 
 
 @workflow
-async def plugin_approval_workflow(ctx, inputs):
-    decision = await ctx.approval.request(
+async def plugin_approval_workflow(inputs):
+    decision = await approve(
         key="approve_plugin_test",
         prompt="Approve the plugin test packet?",
         artifact={
@@ -33,7 +33,7 @@ async def plugin_approval_workflow(ctx, inputs):
         allowed=["approve", "reject"],
         authority={"scope": "plugin-test"},
     )
-    return await plugin_followup_step(ctx, decision)
+    return await plugin_followup_step(decision)
 
 
 class FakePluginContext:
@@ -99,24 +99,24 @@ def test_plugin_entrypoint_and_directory_manifest_are_present():
 def test_plugin_registers_approval_tools_and_gateway_hook():
     from hermes_workflows.hermes_plugin_approvals import register
 
-    ctx = FakePluginContext()
-    register(ctx)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
 
-    assert set(ctx.tools) == {
+    assert set(plugin_context.tools) == {
         "workflow_review_requests_list",
         "workflow_review_respond",
         "workflow_approval_decide",
     }
-    assert ctx.tools["workflow_review_requests_list"]["toolset"] == "hermes_workflows_approvals"
-    assert ctx.tools["workflow_review_respond"]["toolset"] == "hermes_workflows_approvals"
-    assert ctx.tools["workflow_approval_decide"]["toolset"] == "hermes_workflows_approvals"
-    assert "pre_gateway_dispatch" in ctx.hooks
-    assert set(ctx.skills) == {
+    assert plugin_context.tools["workflow_review_requests_list"]["toolset"] == "hermes_workflows_approvals"
+    assert plugin_context.tools["workflow_review_respond"]["toolset"] == "hermes_workflows_approvals"
+    assert plugin_context.tools["workflow_approval_decide"]["toolset"] == "hermes_workflows_approvals"
+    assert "pre_gateway_dispatch" in plugin_context.hooks
+    assert set(plugin_context.skills) == {
         "hermes-workflows",
         "hermes-workflows-running",
         "hermes-workflows-creating",
     }
-    for skill_name, skill_path in ctx.skills.items():
+    for skill_name, skill_path in plugin_context.skills.items():
         assert skill_path.name == "SKILL.md"
         assert skill_path.exists()
         text = skill_path.read_text()
@@ -156,10 +156,10 @@ def test_workflow_review_requests_list_returns_bounded_redacted_pending_request(
 
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    ctx = FakePluginContext()
-    register(ctx)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
 
-    result = parse_tool_result(ctx.tools["workflow_review_requests_list"]["handler"]({"db": str(db)}))
+    result = parse_tool_result(plugin_context.tools["workflow_review_requests_list"]["handler"]({"db": str(db)}))
 
     assert result["count"] == 1
     approval = result["review_requests"][0]
@@ -181,10 +181,10 @@ def test_decision_tokens_use_configured_db_alias_not_raw_db_path(tmp_path, monke
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
     monkeypatch.setenv("HERMES_WORKFLOWS_DBS", json.dumps({"launch": str(db)}))
-    ctx = FakePluginContext()
-    register(ctx)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
 
-    result = parse_tool_result(ctx.tools["workflow_review_requests_list"]["handler"]({"db": "launch"}))
+    result = parse_tool_result(plugin_context.tools["workflow_review_requests_list"]["handler"]({"db": "launch"}))
 
     token = result["review_requests"][0]["decision_token_approve"]
     parsed = parse_decision_token(token)
@@ -198,11 +198,11 @@ def test_workflow_approval_decide_defaults_to_resume_true(tmp_path):
 
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    ctx = FakePluginContext()
-    register(ctx)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
 
     result = parse_tool_result(
-        ctx.tools["workflow_approval_decide"]["handler"](
+        plugin_context.tools["workflow_approval_decide"]["handler"](
             {
                 "db": str(db),
                 "workflow_id": "wf_plugin",
@@ -228,11 +228,11 @@ def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path)
 
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
-    ctx = FakePluginContext()
-    register(ctx)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
 
     result = parse_tool_result(
-        ctx.tools["workflow_approval_decide"]["handler"](
+        plugin_context.tools["workflow_approval_decide"]["handler"](
             {
                 "db": str(db),
                 "workflow_id": "wf_plugin",
@@ -274,9 +274,9 @@ def test_gateway_hook_only_handles_exact_decision_token(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
     monkeypatch.setenv("HERMES_WORKFLOWS_DBS", json.dumps({"launch": str(db)}))
-    ctx = FakePluginContext()
-    register(ctx)
-    hook = ctx.hooks["pre_gateway_dispatch"]
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+    hook = plugin_context.hooks["pre_gateway_dispatch"]
 
     unrelated = hook(event=FakeEvent("yes looks good", FakeSource()), gateway=None, session_store=None)
     assert unrelated is None
@@ -298,9 +298,9 @@ def test_gateway_hook_rejects_path_tokens_without_creating_attacker_db(tmp_path)
     from hermes_workflows.hermes_plugin_approvals import register
 
     attacker_db = tmp_path / "attacker-controlled.sqlite"
-    ctx = FakePluginContext()
-    register(ctx)
-    hook = ctx.hooks["pre_gateway_dispatch"]
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+    hook = plugin_context.hooks["pre_gateway_dispatch"]
     token = crafted_decision_token(
         "approve",
         {"db": str(attacker_db), "workflow_id": "wf_missing", "key": "approve_plugin_test"},
@@ -320,9 +320,9 @@ def test_gateway_hook_handles_failed_exact_token_instead_of_falling_through(tmp_
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
     monkeypatch.setenv("HERMES_WORKFLOWS_DBS", json.dumps({"launch": str(db)}))
-    ctx = FakePluginContext()
-    register(ctx)
-    hook = ctx.hooks["pre_gateway_dispatch"]
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+    hook = plugin_context.hooks["pre_gateway_dispatch"]
     token = decision_token("approve", "launch", "wf_missing", "approve_plugin_test")
 
     handled = hook(event=FakeEvent(token, FakeSource()), gateway=None, session_store=None)
@@ -335,9 +335,9 @@ def test_gateway_hook_handles_failed_exact_token_instead_of_falling_through(tmp_
 def test_gateway_hook_rejects_token_shaped_invalid_action_instead_of_falling_through():
     from hermes_workflows.hermes_plugin_approvals import register
 
-    ctx = FakePluginContext()
-    register(ctx)
-    hook = ctx.hooks["pre_gateway_dispatch"]
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+    hook = plugin_context.hooks["pre_gateway_dispatch"]
     token = crafted_decision_token(
         "maybe",
         {"db": "launch", "workflow_id": "wf_plugin", "key": "approve_plugin_test"},
@@ -356,9 +356,9 @@ def test_gateway_hook_rejects_non_canonical_token_instead_of_accepting_trailing_
     db = tmp_path / "workflow.sqlite"
     create_pending_approval(db)
     monkeypatch.setenv("HERMES_WORKFLOWS_DBS", json.dumps({"launch": str(db)}))
-    ctx = FakePluginContext()
-    register(ctx)
-    hook = ctx.hooks["pre_gateway_dispatch"]
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+    hook = plugin_context.hooks["pre_gateway_dispatch"]
     token = decision_token("approve", "launch", "wf_plugin", "approve_plugin_test") + "!!!"
 
     handled = hook(event=FakeEvent(token, FakeSource()), gateway=None, session_store=None)

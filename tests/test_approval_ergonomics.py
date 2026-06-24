@@ -1,6 +1,6 @@
 import pytest
 
-from hermes_workflows import ApprovalDecision, WorkflowEngine, agent, step, workflow
+from hermes_workflows import ApprovalDecision, WorkflowEngine, agent, approve, step, workflow
 
 
 def human_source(message_id="msg-1"):
@@ -13,8 +13,8 @@ def human_source(message_id="msg-1"):
 
 
 @workflow
-async def typed_auto_key_workflow(ctx, inputs):
-    decision = await ctx.approve(
+async def typed_auto_key_workflow(inputs):
+    decision = await approve(
         "Approve plan artifact?",
         artifact={"plan": inputs.get("plan", "ship it")},
         approver="human:skylar",
@@ -28,8 +28,8 @@ async def typed_auto_key_workflow(ctx, inputs):
 
 
 @workflow
-async def agent_workflow(ctx, inputs):
-    approved = await ctx.approve(
+async def agent_workflow(inputs):
+    approved = await approve(
         "Approve implementation agent work?",
         key="approve_agent_plan",
         artifact={"goal": inputs.get("goal", "demo")},
@@ -47,16 +47,16 @@ async def agent_workflow(ctx, inputs):
 
 
 @step
-async def revise_packet(ctx, feedback):
+async def revise_packet(feedback):
     return {"revision": feedback}
 
 
 @workflow
-async def feedback_loop_workflow(ctx, inputs):
+async def feedback_loop_workflow(inputs):
     packet = {"draft": inputs.get("draft", "v1")}
     decisions = []
     for _ in range(3):
-        decision = await ctx.approve(
+        decision = await approve(
             "Approve packet?",
             key="approve_packet",
             artifact=packet,
@@ -69,13 +69,13 @@ async def feedback_loop_workflow(ctx, inputs):
             return {"status": "approved", "decisions": decisions, "packet": packet}
         if not decision.needs_revision:
             return {"status": "stopped", "decisions": decisions}
-        packet = await revise_packet(ctx, decision.feedback or "revise")
+        packet = await revise_packet(decision.feedback or "revise")
     return {"status": "too-many-revisions", "decisions": decisions}
 
 
 @workflow
-async def human_only_guard_workflow(ctx, inputs):
-    decision = await ctx.approve(
+async def human_only_guard_workflow(inputs):
+    decision = await approve(
         "Approve guarded action?",
         key="approve_guarded_action",
         approver="human:skylar",

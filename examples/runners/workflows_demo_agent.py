@@ -7,10 +7,10 @@ import sys
 
 
 DYNAMIC_WORKFLOW_SOURCE = '''
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow
 
 @step
-async def assemble_email_review_packet(ctx, payload):
+async def assemble_email_review_packet(payload):
     return {
         "kind": "participant_email_review_packet.v1",
         "event": payload["event"],
@@ -24,10 +24,10 @@ async def assemble_email_review_packet(ctx, payload):
     }
 
 @workflow
-async def participant_email_personalization_workflow(ctx, payload):
-    review_packet = await assemble_email_review_packet(ctx, payload)
+async def participant_email_personalization_workflow(payload):
+    review_packet = await assemble_email_review_packet(payload)
 
-    agent_decision = await ctx.approval.request(
+    agent_decision = await approve(
         "Agent approval: email-quality reviewer must approve the generated participant draft batch before human review.",
         key="agent_email_quality_approval",
         artifact={"draft_batch": review_packet["draft_batch"], "quality_review": review_packet["quality_review"]},

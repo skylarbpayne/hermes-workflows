@@ -2505,9 +2505,13 @@ class WorkflowEngine:
         if row is None:
             return self._result_from_instance(workflow_id)
 
+        from .authoring import bind_workflow_context, reset_workflow_context
+
+        step_context = StepExecutionContext(self, workflow_id, key)
+        token = bind_workflow_context(step_context)
         try:
             with self._command_lease_heartbeat(workflow_id, command):
-                output = _run_maybe_async(body(StepExecutionContext(self, workflow_id, key), *args, **kwargs))
+                output = _run_maybe_async(_call_step_body(body, step_context, *args, **kwargs))
         except Exception as exc:
             error = _error_from_exception(exc)
             with self._connect() as con:
@@ -2542,6 +2546,8 @@ class WorkflowEngine:
                     (JsonCodec.dumps(error), _now(), workflow_id),
                 )
             return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            reset_workflow_context(token)
 
         metadata = None
         if isinstance(output, StepOutput):
@@ -3484,8 +3490,9 @@ class ApprovalClient:
         *,
         approver: str = "human",
         allowed: Optional[List[str]] = None,
-        authority: Optional[List[str]] = None,
+        authority: Any = None,
         timeout: Optional[str] = None,
+        feedback_loop: bool = False,
     ) -> List[Dict[str, Any]]:
         """Emit every approval request before waiting for any decision.
 
@@ -3499,7 +3506,11 @@ class ApprovalClient:
         seen_keys: set[str] = set()
         for index, request in enumerate(requests):
             raw_key = request.get("key")
-            key = self._key_for_request(str(request.get("prompt") or f"approval {index}"), str(raw_key) if raw_key else None)
+            key = self._key_for_request(
+                str(request.get("prompt") or f"approval {index}"),
+                str(raw_key) if raw_key else None,
+                feedback_loop=feedback_loop,
+            )
             if not key:
                 raise ValueError("approval request_many entries require key or prompt")
             if key in seen_keys:
@@ -3518,7 +3529,7 @@ class ApprovalClient:
                         artifact=request.get("artifact"),
                         approver=request_approver,
                         allowed=request_allowed,
-                        authority=list(request.get("authority") or authority or []),
+                        authority=_approval_authority_payload(request.get("authority") if "authority" in request else authority),
                         timeout=request.get("timeout") or timeout,
                     ),
                 }
@@ -3564,6 +3575,14 @@ class ApprovalClient:
 
 
 _OPERATOR_SOURCE_ALLOWLIST = ("kind", "id", "channel", "message_url", "message_id", "event_id")
+
+
+def _approval_authority_payload(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    return list(value)
 
 
 def _normalize_approval_decision_payload(payload: Any) -> Any:
@@ -3940,6 +3959,29 @@ def _lease_seconds_from_command(command: Union[sqlite3.Row, Dict[str, Any]]) -> 
     if expires_at is None or updated_at is None:
         return 0
     return max(0, int(expires_at) - int(updated_at))
+
+
+def _call_step_body(body: Callable[..., Any], step_context: StepExecutionContext, *args: Any, **kwargs: Any) -> Any:
+    try:
+        signature = inspect.signature(body)
+    except (TypeError, ValueError):
+        return body(step_context, *args, **kwargs)
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    required_positional = [
+        parameter
+        for parameter in positional
+        if parameter.default is inspect.Parameter.empty and parameter.name not in kwargs
+    ]
+    should_inject_context = False
+    if positional and len(args) < len(required_positional):
+        should_inject_context = True
+    if should_inject_context:
+        return body(step_context, *args, **kwargs)
+    return body(*args, **kwargs)
 
 
 def _run_maybe_async(value: Any) -> Any:

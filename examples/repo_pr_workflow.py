@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_workflows import render_prompt, step, workflow
+from hermes_workflows import approve, gather, render_prompt, step, workflow, workflow_id, workflow_status
 
 
 DEFAULT_VERIFICATION_COMMANDS = ["pytest -q"]
@@ -129,7 +129,7 @@ def _has_matching_plan_approval_event(events: List[Dict[str, Any]], durable_plan
     return False
 
 
-def _require_approved_implementation_plan(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+def _require_approved_implementation_plan(inputs: Dict[str, Any]) -> Dict[str, Any]:
     plan = inputs.get("implementation_plan")
     if not isinstance(plan, dict) or plan.get("ready_for_implementation") is not True:
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan before PR work")
@@ -142,7 +142,7 @@ def _require_approved_implementation_plan(ctx, inputs: Dict[str, Any]) -> Dict[s
         raise RuntimeError("repo_pr_workflow requires approved implementation_plan with plan artifact and workflow id")
 
     try:
-        plan_status = ctx.engine.workflow_status(str(plan["plan_workflow_id"]), recent_events=100)
+        plan_status = workflow_status(str(plan["plan_workflow_id"]), recent_events=100)
     except KeyError as exc:
         raise RuntimeError(f"repo_pr_workflow requires completed implementation plan workflow: {plan['plan_workflow_id']}") from exc
 
@@ -222,7 +222,7 @@ def _pr_url_from_output(output: str) -> str:
 
 
 @step
-async def gather_pr_evidence(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def gather_pr_evidence(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     base_branch = inputs.get("base_branch", "main")
     remote_name = inputs.get("remote_name", "origin")
@@ -264,7 +264,7 @@ async def gather_pr_evidence(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def run_pr_verification(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def run_pr_verification(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     commands = inputs.get("verification_commands") or DEFAULT_VERIFICATION_COMMANDS
     timeout = int(inputs.get("verification_timeout_seconds", 300))
@@ -273,9 +273,9 @@ async def run_pr_verification(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @step
-async def write_implementation_plan(ctx, inputs: Dict[str, Any], rendered_plan: Dict[str, Any]) -> Dict[str, Any]:
+async def write_implementation_plan(inputs: Dict[str, Any], rendered_plan: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
-    plan_path = Path(inputs.get("plan_artifact_path") or repo / ".hermes" / "pr-workflows" / f"{ctx.workflow_id}-implementation-plan.md")
+    plan_path = Path(inputs.get("plan_artifact_path") or repo / ".hermes" / "pr-workflows" / f"{workflow_id()}-implementation-plan.md")
     plan_path = plan_path.expanduser().resolve()
     plan_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -292,14 +292,13 @@ async def write_implementation_plan(ctx, inputs: Dict[str, Any], rendered_plan: 
 
 @step
 async def write_pr_body(
-    ctx,
     inputs: Dict[str, Any],
     evidence: Dict[str, Any],
     verification: Dict[str, Any],
     implementation_plan: Dict[str, Any],
 ) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
-    body_path = Path(inputs.get("pr_body_path") or repo / ".hermes" / "pr-workflows" / f"{ctx.workflow_id}-body.md")
+    body_path = Path(inputs.get("pr_body_path") or repo / ".hermes" / "pr-workflows" / f"{workflow_id()}-body.md")
     body_path = body_path.expanduser().resolve()
     body_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -315,7 +314,7 @@ async def write_pr_body(
 {summary}
 
 ## Workflow-backed PR evidence
-- Workflow id: `{ctx.workflow_id}`
+- Workflow id: `{workflow_id()}`
 - Repo: `{evidence['owner_repo'] or evidence['repo_path']}`
 - Branch: `{evidence['branch']}`
 - Base: `{evidence['base_ref']}`
@@ -365,7 +364,7 @@ async def write_pr_body(
 
 
 @step
-async def open_pull_request(ctx, inputs: Dict[str, Any], evidence: Dict[str, Any], verification: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
+async def open_pull_request(inputs: Dict[str, Any], evidence: Dict[str, Any], verification: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     if not inputs.get("create_pr", False):
         return {"opened": False, "skipped": True, "reason": "create_pr disabled", "body_path": body["body_path"]}
@@ -441,7 +440,7 @@ async def open_pull_request(ctx, inputs: Dict[str, Any], evidence: Dict[str, Any
 
 
 @step
-async def watch_pull_request_checks(ctx, inputs: Dict[str, Any], pr: Dict[str, Any]) -> Dict[str, Any]:
+async def watch_pull_request_checks(inputs: Dict[str, Any], pr: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     if not inputs.get("watch_checks", False):
         return {"watched": False, "skipped": True, "reason": "watch_checks disabled"}
@@ -476,7 +475,6 @@ async def watch_pull_request_checks(ctx, inputs: Dict[str, Any], pr: Dict[str, A
 
 @step
 async def write_pr_status_report(
-    ctx,
     inputs: Dict[str, Any],
     evidence: Dict[str, Any],
     verification: Dict[str, Any],
@@ -487,7 +485,7 @@ async def write_pr_status_report(
     landing_decision: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
-    report_path = Path(inputs.get("status_report_path") or repo / ".hermes" / "pr-workflows" / f"{ctx.workflow_id}-status.md")
+    report_path = Path(inputs.get("status_report_path") or repo / ".hermes" / "pr-workflows" / f"{workflow_id()}-status.md")
     report_path = report_path.expanduser().resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     verification_status = "pass" if verification["ok"] else "fail"
@@ -499,7 +497,7 @@ async def write_pr_status_report(
         pr_url = _pr_url_from_output(pr["created"]["output"])
     contents = f"""# Workflow-backed PR status: {inputs['goal']}
 
-- Workflow id: `{ctx.workflow_id}`
+- Workflow id: `{workflow_id()}`
 - Repo: `{evidence['owner_repo'] or evidence['repo_path']}`
 - Branch: `{evidence['branch']}`
 - Base: `{evidence['base_ref']}`
@@ -542,7 +540,7 @@ async def write_pr_status_report(
     report_path.write_text(contents)
     return {
         "ready": True,
-        "workflow_id": ctx.workflow_id,
+        "workflow_id": workflow_id(),
         "report_path": str(report_path),
         "pr_url": pr_url,
         "verification_ok": verification["ok"],
@@ -553,7 +551,7 @@ async def write_pr_status_report(
 
 
 @workflow
-async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def repo_change_plan_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     verification = inputs.get("verification_commands") or DEFAULT_VERIFICATION_COMMANDS
     plan_prompt_path = Path(inputs.get("plan_prompt_path") or DEFAULT_PLAN_PROMPT_PATH)
@@ -561,7 +559,7 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
     prompt_vars = {
         "goal": inputs["goal"],
         "repo_path": str(repo),
-        "workflow_id": ctx.workflow_id,
+        "workflow_id": workflow_id(),
         "non_goals": _bullets(inputs.get("non_goals") or DEFAULT_NON_GOALS),
         "proposed_changes": _bullets(inputs.get("proposed_changes") or DEFAULT_PROPOSED_CHANGES),
         "api_or_event_changes": _bullets(inputs.get("api_or_event_changes") or DEFAULT_API_CHANGES),
@@ -576,8 +574,8 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
         "rendered_prompt": render_prompt(prompt_text, prompt_vars),
         "rendered_prompt_sha256": _sha256_text(render_prompt(prompt_text, prompt_vars)),
     }
-    plan = await write_implementation_plan(ctx, inputs, rendered_plan)
-    decision = await ctx.approval.request(
+    plan = await write_implementation_plan(inputs, rendered_plan)
+    decision = await approve(
         f"Approve implementation plan for: {inputs['goal']}?",
         key="approve_implementation_plan",
         artifact={"goal": inputs["goal"], "plan": plan},
@@ -589,7 +587,7 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
         return {"ready_for_implementation": False, "stage": "plan_rejected", "decision": decision, **plan}
     return {
         "ready_for_implementation": True,
-        "plan_workflow_id": ctx.workflow_id,
+        "plan_workflow_id": workflow_id(),
         "repo_path": str(Path(inputs["repo_path"]).expanduser().resolve()),
         "goal": inputs["goal"],
         "base_branch": inputs.get("base_branch", "main"),
@@ -605,17 +603,17 @@ async def repo_change_plan_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, An
 
 
 @workflow
-async def repo_pr_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
-    implementation_plan = _require_approved_implementation_plan(ctx, inputs)
-    evidence, verification = await ctx.gather(
-        gather_pr_evidence(ctx, inputs),
-        run_pr_verification(ctx, inputs),
+async def repo_pr_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    implementation_plan = _require_approved_implementation_plan(inputs)
+    evidence, verification = await gather(
+        gather_pr_evidence(inputs),
+        run_pr_verification(inputs),
     )
-    body = await write_pr_body(ctx, inputs, evidence, verification, implementation_plan)
-    pr = await open_pull_request(ctx, inputs, evidence, verification, body)
-    checks = await watch_pull_request_checks(ctx, inputs, pr)
-    landing_packet = await write_pr_status_report(ctx, inputs, evidence, verification, body, pr, checks, implementation_plan)
-    landing_decision = await ctx.approval.request(
+    body = await write_pr_body(inputs, evidence, verification, implementation_plan)
+    pr = await open_pull_request(inputs, evidence, verification, body)
+    checks = await watch_pull_request_checks(inputs, pr)
+    landing_packet = await write_pr_status_report(inputs, evidence, verification, body, pr, checks, implementation_plan)
+    landing_decision = await approve(
         f"Approve PR landing packet for: {inputs['goal']}?",
         key="approve_pr_landing",
         artifact={
@@ -634,4 +632,4 @@ async def repo_pr_workflow(ctx, inputs: Dict[str, Any]) -> Dict[str, Any]:
     )
     if landing_decision.get("action") != "approve":
         return {"ready": False, "stage": "landing_rejected", "decision": landing_decision}
-    return await write_pr_status_report(ctx, inputs, evidence, verification, body, pr, checks, implementation_plan, landing_decision)
+    return await write_pr_status_report(inputs, evidence, verification, body, pr, checks, implementation_plan, landing_decision)

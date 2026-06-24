@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from hermes_workflows import step, workflow
+from hermes_workflows import approve, step, workflow
 
 
 @step
-async def draft_trip_options(ctx, inputs):
+async def draft_trip_options(inputs):
     destination = inputs.get("destination", "NYC")
     return {
         "destination": destination,
@@ -16,11 +16,11 @@ async def draft_trip_options(ctx, inputs):
 
 
 @workflow
-async def trip_planning_workflow(ctx, inputs):
+async def trip_planning_workflow(inputs):
     """Small installed demo: draft options, wait for human approval, return receipt."""
 
-    options = await draft_trip_options(ctx, inputs)
-    decision = await ctx.approval.request(
+    options = await draft_trip_options(inputs)
+    decision = await approve(
         "Approve this trip plan?",
         key="approve_trip_plan",
         artifact=options,
