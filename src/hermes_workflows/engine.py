@@ -14,11 +14,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
+from .domain import CommandType, WorkflowStatus, decode_command_row, decode_event_row, make_command, make_event
 from .types import to_json_value
 from .workflow_values import Workflow
 
 
-TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
+TERMINAL_WORKFLOW_STATUSES = WorkflowStatus.terminal_values()
 
 
 class WorkflowWaiting(Exception):
@@ -865,9 +866,7 @@ class WorkflowEngine:
         if command_type is not None:
             type_clause = "AND c.type = ?"
         else:
-            runnable_types = ["run_workflow", "run_step", "start_child_workflow"]
-            if include_external_agent:
-                runnable_types.append("external_agent")
+            runnable_types = CommandType.worker_runnable_values(include_external_agent=include_external_agent)
             quoted_types = ", ".join(f"'{command_type}'" for command_type in runnable_types)
             type_clause = f"AND c.type IN ({quoted_types})"
         params: list[Any] = [workflow_id]
@@ -1055,9 +1054,7 @@ class WorkflowEngine:
         """
 
         now = _now()
-        command_types = ["run_workflow", "run_step", "start_child_workflow"]
-        if include_external_agent:
-            command_types.append("external_agent")
+        command_types = CommandType.worker_runnable_values(include_external_agent=include_external_agent)
         quoted_types = ", ".join(f"'{type_name}'" for type_name in command_types)
         query = f"""
             SELECT
@@ -1107,17 +1104,7 @@ class WorkflowEngine:
             rows = con.execute(query, params).fetchall()
         if limit is not None:
             rows = list(reversed(rows))
-        return [
-            {
-                "seq": row["seq"],
-                "type": row["type"],
-                "key": row["key"],
-                "payload": JsonCodec.loads(row["payload_json"]),
-                "idempotency_key": row["idempotency_key"],
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return [decode_event_row(row).to_public_dict() for row in rows]
 
     def pending_child_workflow_keys(self, workflow_id: str) -> list[str]:
         self._instance(workflow_id)
@@ -2154,17 +2141,18 @@ class WorkflowEngine:
         )
 
     def _execute_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
-        payload = command["payload"] if isinstance(command, dict) else JsonCodec.loads(command["payload_json"])
-        command_type = command["type"] if isinstance(command, dict) else command["type"]
-        if command_type == "run_workflow":
+        command_model = decode_command_row(command)
+        payload = command_model.payload
+        command_type = command_model.command_type
+        if command_type is CommandType.RUN_WORKFLOW:
             return self._execute_run_workflow_command(workflow_id, command)
-        if command_type == "run_step":
+        if command_type is CommandType.RUN_STEP:
             return self._execute_run_step_command(workflow_id, command)
-        if command_type == "start_child_workflow":
+        if command_type is CommandType.START_CHILD_WORKFLOW:
             return self._execute_start_child_workflow_command(workflow_id, command, payload)
-        if command_type == "external_agent":
+        if command_type is CommandType.EXTERNAL_AGENT:
             return self._execute_external_agent_command(workflow_id, command, payload)
-        raise ValueError(f"unknown workflow command type: {command_type}")
+        raise ValueError(f"unknown workflow command type: {command_type.value}")
 
     def _execute_run_workflow_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         with self._connect() as con:
@@ -2699,6 +2687,7 @@ class WorkflowEngine:
         idempotency_key: Optional[str],
         ignore_duplicate: bool = False,
     ) -> bool:
+        event = make_event(event_type, key=key, payload=payload, idempotency_key=idempotency_key, created_at=_now())
         next_seq = con.execute(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_events WHERE workflow_id = ?",
             (workflow_id,),
@@ -2709,7 +2698,7 @@ class WorkflowEngine:
                 INSERT INTO workflow_events(workflow_id, seq, type, key, payload_json, idempotency_key, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (workflow_id, next_seq, event_type, key, JsonCodec.dumps(payload), idempotency_key, _now()),
+                (workflow_id, next_seq, event.event_type.value, event.key, JsonCodec.dumps(event.payload), event.idempotency_key, event.created_at),
             )
             return True
         except sqlite3.IntegrityError:
@@ -2732,12 +2721,13 @@ class WorkflowEngine:
         key: str,
         payload: Any,
     ) -> bool:
+        command = make_command(command_type, workflow_id=workflow_id, key=key, payload=payload)
         con.execute(
             """
             INSERT INTO workflow_commands_outbox(workflow_id, type, key, payload_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (workflow_id, command_type, key, JsonCodec.dumps(payload), _now(), _now()),
+            (workflow_id, command.command_type.value, command.key, JsonCodec.dumps(command.payload), _now(), _now()),
         )
         return True
 
@@ -2832,21 +2822,7 @@ class WorkflowEngine:
                 con.execute(sql)
 
     def _command_payload(self, row: sqlite3.Row) -> Dict[str, Any]:
-        return {
-            "id": row["id"],
-            "workflow_id": row["workflow_id"],
-            "type": row["type"],
-            "key": row["key"],
-            "payload": JsonCodec.loads(row["payload_json"]),
-            "status": row["status"],
-            "claimed_by": row["claimed_by"],
-            "lease_expires_at": row["lease_expires_at"],
-            "lease_seconds": _lease_seconds_from_row(row),
-            "attempts": row["attempts"],
-            "last_error": JsonCodec.loads(row["last_error_json"]),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+        return decode_command_row(row).to_public_dict()
 
 
 class WorkflowContext:
