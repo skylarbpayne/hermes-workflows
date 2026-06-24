@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_workflows import approve, gather, render_prompt, step, workflow, workflow_id, workflow_status
+from hermes_workflows import approve, gather, prompt_file, step, workflow, workflow_id, workflow_status
 
 
 DEFAULT_VERIFICATION_COMMANDS = ["pytest -q"]
@@ -553,7 +553,6 @@ async def repo_change_plan_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
     repo = Path(inputs["repo_path"]).expanduser().resolve()
     verification = inputs.get("verification_commands") or DEFAULT_VERIFICATION_COMMANDS
     plan_prompt_path = Path(inputs.get("plan_prompt_path") or DEFAULT_PLAN_PROMPT_PATH)
-    prompt_text = plan_prompt_path.read_text()
     prompt_vars = {
         "goal": inputs["goal"],
         "repo_path": str(repo),
@@ -564,14 +563,7 @@ async def repo_change_plan_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
         "verification_commands": _bullets([f"`{command}`" for command in verification]),
         "open_questions": _bullets(inputs.get("open_questions") or DEFAULT_OPEN_QUESTIONS),
     }
-    rendered_plan = {
-        "kind": "prompt.rendered.v1",
-        "prompt_path": str(plan_prompt_path),
-        "prompt_text": prompt_text,
-        "prompt_sha256": _sha256_text(prompt_text),
-        "rendered_prompt": render_prompt(prompt_text, prompt_vars),
-        "rendered_prompt_sha256": _sha256_text(render_prompt(prompt_text, prompt_vars)),
-    }
+    rendered_plan = prompt_file(plan_prompt_path).render(**prompt_vars).to_json()
     plan = await write_implementation_plan(inputs, rendered_plan)
     decision = await approve(
         f"Approve implementation plan for: {inputs['goal']}?",

@@ -4,6 +4,8 @@ import hashlib
 import inspect
 import json
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .decorators import step
@@ -11,6 +13,76 @@ from .types import to_json_value
 from .workflow_values import workflow_from_agent_output
 
 _PLACEHOLDER = re.compile(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}")
+
+
+@dataclass(frozen=True)
+class RenderedPrompt:
+    template_path: str
+    template_text: str
+    template_sha256: str
+    variables_sha256: str
+    rendered_prompt: str
+    rendered_prompt_sha256: str
+    include_rendered_text: bool = True
+
+    def __str__(self) -> str:
+        return self.rendered_prompt
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": "prompt.rendered.v1",
+            "template_path": self.template_path,
+            "prompt_path": self.template_path,
+            "template_sha256": self.template_sha256,
+            "prompt_sha256": self.template_sha256,
+            "variables_sha256": self.variables_sha256,
+            "rendered_prompt_sha256": self.rendered_prompt_sha256,
+        }
+        if self.include_rendered_text:
+            payload["template_text"] = self.template_text
+            payload["prompt_text"] = self.template_text
+            payload["rendered_prompt"] = self.rendered_prompt
+        return payload
+
+    def to_agent_request_fields(self) -> dict[str, Any]:
+        return {
+            "prompt": self.template_text,
+            "prompt_sha256": self.template_sha256,
+            "rendered_prompt": self.rendered_prompt,
+            "rendered_prompt_sha256": self.rendered_prompt_sha256,
+            "prompt_path": self.template_path,
+            "template_path": self.template_path,
+            "template_sha256": self.template_sha256,
+            "variables_sha256": self.variables_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class PromptFile:
+    path: Path
+
+    def render(self, *, include_rendered_text: bool = True, **variables: Any) -> RenderedPrompt:
+        template_text = self.path.read_text()
+        rendered = render_prompt(template_text, variables)
+        return RenderedPrompt(
+            template_path=str(self.path),
+            template_text=template_text,
+            template_sha256=_sha256_text(template_text),
+            variables_sha256=_sha256_json(variables),
+            rendered_prompt=rendered,
+            rendered_prompt_sha256=_sha256_text(rendered),
+            include_rendered_text=include_rendered_text,
+        )
+
+
+def prompt_file(path: str | Path, *, base_dir: str | Path | None = None) -> PromptFile:
+    template_path = Path(path).expanduser()
+    if not template_path.is_absolute():
+        if base_dir is None:
+            caller = inspect.currentframe().f_back  # type: ignore[union-attr]
+            base_dir = Path(caller.f_code.co_filename).parent if caller is not None else Path.cwd()
+        template_path = Path(base_dir).expanduser() / template_path
+    return PromptFile(template_path.resolve())
 
 
 @step
@@ -88,6 +160,10 @@ def _build_runner_request(ctx: Any, request: dict[str, Any]) -> dict[str, Any]:
         "input",
         "input_sha256",
         "fingerprint",
+        "prompt_path",
+        "template_path",
+        "template_sha256",
+        "variables_sha256",
         "tools",
         "skills",
         "files",

@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, workflow, workflow_id
+from hermes_workflows import WorkflowEngine, agent, ask, goal, parallel, pipeline, prompt_file, workflow, workflow_id
 
 
 @dataclass
@@ -94,6 +94,19 @@ async def prompted_agent_workflow(inputs):
     research = await agent(
         "research",
         prompt=f"Research {inputs['topic']}",
+        input={"topic": inputs["topic"]},
+        returns=ResearchPacket,
+    )
+    assert isinstance(research, ResearchPacket)
+    return {"summary": research.summary, "sources": research.sources}
+
+
+@workflow
+async def prompt_file_agent_workflow(inputs):
+    rendered = prompt_file(inputs["prompt_path"]).render(topic=inputs["topic"])
+    research = await agent(
+        "research",
+        prompt=rendered,
         input={"topic": inputs["topic"]},
         returns=ResearchPacket,
     )
@@ -305,6 +318,36 @@ def test_agent_prompt_input_are_sent_to_runner_and_typed_output_replays(tmp_path
     assert replayed.status == "completed"
     assert replayed.result == result.result
     assert replay_calls == []
+
+
+def test_agent_accepts_rendered_prompt_file_metadata(tmp_path):
+    prompt_path = tmp_path / "research.md"
+    prompt_path.write_text("Research {{ topic }} from durable context")
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        return {"output": {"summary": request["rendered_prompt"], "sources": [request["prompt_path"]]}}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+
+    result = engine.run_until_idle(
+        prompt_file_agent_workflow,
+        {"topic": "prompt files", "prompt_path": str(prompt_path)},
+        workflow_id="wf_prompt_file_agent",
+    )
+
+    assert result.status == "completed"
+    assert result.result == {"summary": "Research prompt files from durable context", "sources": [str(prompt_path.resolve())]}
+    assert len(calls) == 1
+    assert calls[0]["prompt"] == "Research {{ topic }} from durable context"
+    assert calls[0]["rendered_prompt"] == "Research prompt files from durable context"
+    assert calls[0]["prompt_path"] == str(prompt_path.resolve())
+    assert calls[0]["template_path"] == str(prompt_path.resolve())
+    assert calls[0]["template_sha256"] == calls[0]["prompt_sha256"]
+    assert len(calls[0]["variables_sha256"]) == 64
+    assert calls[0]["fingerprint"]
 
 
 def test_agent_replay_fails_loudly_when_prompt_or_input_fingerprint_changes(tmp_path):

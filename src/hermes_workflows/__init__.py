@@ -26,6 +26,7 @@ from .artifacts import (
 from .authoring import agent, approve, approve_many, ask, cancel_workflow, gather, goal, map_workflow, parallel, pipeline, start_child, wait_for, workflow_id, workflow_status
 from .bash import bash
 from .decorators import workflow
+from .prompts import PromptFile, RenderedPrompt, prompt_file
 from .workflow_values import Workflow
 
 # Import the built-in prompt/agent step module for its @step registration side
@@ -54,6 +55,9 @@ __all__ = [
     "map_workflow",
     "parallel",
     "pipeline",
+    "PromptFile",
+    "prompt_file",
+    "RenderedPrompt",
     "start_child",
     "wait_for",
     "workflow",
