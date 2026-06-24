@@ -25,7 +25,7 @@ _NAME_HINT_STACK: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextV
 @dataclass(frozen=True)
 class AgentCall(Generic[T]):
     name: str
-    prompt: str
+    prompt: Any
     input: Any = None
     returns: Any = dict
     key_by: Any = None
@@ -44,7 +44,8 @@ class AgentCall(Generic[T]):
     name_source: str = "explicit"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.prompt, str) or not self.prompt.strip():
+        prompt_fields = _agent_prompt_fields(self.prompt)
+        if not isinstance(prompt_fields["rendered_prompt"], str) or not prompt_fields["rendered_prompt"].strip():
             raise TypeError("agent(...) requires a non-empty prompt")
         if not isinstance(self.name, str) or not self.name.strip():
             raise TypeError("agent(...) could not infer a non-empty public name; pass agent('name', prompt=...)")
@@ -62,7 +63,7 @@ class AgentCall(Generic[T]):
         request = payload["args"][0]
         if getattr(ctx.engine, "agent_runner", None) is None and self.mock_output is None:
             result = await ctx._request_agent_work(
-                self.prompt,
+                request["rendered_prompt"],
                 key=key,
                 artifact=request,
                 assignee=self.name,
@@ -131,17 +132,14 @@ class AgentCall(Generic[T]):
 
     def _payload(self, key: str) -> dict[str, Any]:
         safe_input = _jsonable(self.input)
-        rendered_prompt = self.prompt
+        prompt_fields = _agent_prompt_fields(self.prompt)
         request = {
             "kind": "agent.request.v1",
             "name": self.name,
             "public_name": self.effective_public_name,
             "public_label": self.effective_public_label,
             "name_source": self.name_source,
-            "prompt": self.prompt,
-            "prompt_sha256": _sha256_text(self.prompt),
-            "rendered_prompt": rendered_prompt,
-            "rendered_prompt_sha256": _sha256_text(rendered_prompt),
+            **prompt_fields,
             "input": safe_input,
             "input_sha256": _sha256_json(safe_input),
             "returns": _return_schema_id(self.returns),
@@ -244,7 +242,7 @@ def current_context() -> Any:
 def agent(
     name: str | None = None,
     *,
-    prompt: str,
+    prompt: Any,
     input: Any = None,
     returns: Any = dict,
     key_by: Any = None,
@@ -815,6 +813,28 @@ def _default_item_key(value: Any) -> Any:
 
 def _jsonable(value: Any) -> Any:
     return to_json_value(value)
+
+
+def _agent_prompt_fields(prompt: Any) -> dict[str, Any]:
+    to_agent_request_fields = getattr(prompt, "to_agent_request_fields", None)
+    if callable(to_agent_request_fields):
+        raw_fields = to_agent_request_fields()
+        if not isinstance(raw_fields, Mapping):
+            raise TypeError("agent(...) prompt object must return a mapping of request fields")
+        fields = dict(raw_fields)
+        required = ("prompt", "prompt_sha256", "rendered_prompt", "rendered_prompt_sha256")
+        missing = [key for key in required if key not in fields]
+        if missing:
+            raise TypeError("agent(...) prompt object missing fields: " + ", ".join(missing))
+        return fields
+    if not isinstance(prompt, str):
+        raise TypeError("agent(...) requires a non-empty prompt")
+    return {
+        "prompt": prompt,
+        "prompt_sha256": _sha256_text(prompt),
+        "rendered_prompt": prompt,
+        "rendered_prompt_sha256": _sha256_text(prompt),
+    }
 
 
 def _sha256_text(value: str) -> str:
