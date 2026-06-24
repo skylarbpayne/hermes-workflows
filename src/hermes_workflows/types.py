@@ -34,7 +34,7 @@ def to_json_value(value: object) -> JsonValue:
 
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    if _is_workflow_value(value):
+    if _is_framework_json_value(value):
         return to_json_value(cast(_WorkflowJsonValue, value).to_json())
     if _is_approval_decision(value):
         return to_json_value(cast(_ApprovalDecisionJsonValue, value).to_dict())
@@ -56,12 +56,20 @@ def to_json_object(value: object) -> JsonObject:
     return normalized
 
 
-def _is_workflow_value(value: object) -> bool:
+def _is_framework_json_value(value: object) -> bool:
     try:
         from .workflow_values import Workflow
     except Exception:  # pragma: no cover - defensive for import cycles.
-        return False
-    return isinstance(value, Workflow)
+        Workflow = None  # type: ignore[assignment]
+    try:
+        from .artifacts import Artifact
+    except Exception:  # pragma: no cover - defensive for import cycles.
+        Artifact = None  # type: ignore[assignment]
+    return (Workflow is not None and isinstance(value, Workflow)) or (Artifact is not None and isinstance(value, Artifact))
+
+
+def _is_workflow_value(value: object) -> bool:
+    return _is_framework_json_value(value)
 
 
 def _is_approval_decision(value: object) -> bool:

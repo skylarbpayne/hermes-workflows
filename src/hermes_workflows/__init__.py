@@ -1,7 +1,7 @@
 """Public authoring facade for ``hermes-workflows``.
 
 The launch-facing SDK is intentionally small: workflow authors should start
-with ``workflow``, ``agent(...)``, ``ask(...)``, ``bash(...)``,
+with ``workflow``, ``agent(...)``, ``ask(...)``, ``bash(...)``, artifacts,
 ``goal(...)``, ``parallel(...)``, and ``pipeline(...)``. Runtime services,
 approval adapter DTOs, low-level steps, and direct engine control remain
 available from their submodules for advanced integrations, but they are not
@@ -12,6 +12,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from .artifacts import (
+    Artifact,
+    ArtifactMetadata,
+    ArtifactRender,
+    FileArtifact,
+    JsonArtifact,
+    LinkArtifact,
+    MarkdownArtifact,
+    PythonSourceArtifact,
+    TextArtifact,
+)
 from .authoring import agent, approve, approve_many, ask, cancel_workflow, gather, goal, map_workflow, parallel, pipeline, start_child, wait_for, workflow_id, workflow_status
 from .bash import bash
 from .decorators import workflow
@@ -22,6 +33,15 @@ from .workflow_values import Workflow
 from . import prompts as _prompts  # noqa: F401
 
 __all__ = [
+    "Artifact",
+    "ArtifactMetadata",
+    "ArtifactRender",
+    "FileArtifact",
+    "JsonArtifact",
+    "LinkArtifact",
+    "MarkdownArtifact",
+    "PythonSourceArtifact",
+    "TextArtifact",
     "Workflow",
     "agent",
     "approve",
@@ -42,6 +62,9 @@ __all__ = [
 ]
 
 _ADVANCED_EXPORTS: dict[str, tuple[str, str]] = {
+    "artifact_descriptor": ("hermes_workflows.artifacts", "artifact_descriptor"),
+    "normalize_artifact": ("hermes_workflows.artifacts", "normalize_artifact"),
+    "workflow_source_preview": ("hermes_workflows.artifacts", "workflow_source_preview"),
     "AgentCall": ("hermes_workflows.authoring", "AgentCall"),
     "AskCall": ("hermes_workflows.authoring", "AskCall"),
     "approve": ("hermes_workflows.authoring", "approve"),

@@ -1480,6 +1480,8 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         "Human input requests record typed outputs; approval gates are approve/reject review requests.",
         "artifact: ",
         "ArtifactInlinePreview",
+        "artifactInlineValue",
+        'value.__hermes_type__ === "Artifact"',
         "hwf-markdown-preview",
     ):
         assert phrase in index_js
