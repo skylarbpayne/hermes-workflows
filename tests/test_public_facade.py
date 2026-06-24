@@ -70,6 +70,19 @@ def test_advanced_top_level_imports_remain_compatibility_shims() -> None:
     assert bash is submodule_bash
 
 
+def test_advanced_runner_imports_share_canonical_agent_runner_module() -> None:
+    from hermes_workflows import AgentRunnerError, SubprocessAgentRunner
+    from hermes_workflows.agent_runner import AgentRunnerError as CanonicalAgentRunnerError
+    from hermes_workflows.agent_runner import SubprocessAgentRunner as CanonicalSubprocessAgentRunner
+    from hermes_workflows.runners import AgentRunnerError as CompatAgentRunnerError
+    from hermes_workflows.runners import SubprocessAgentRunner as CompatSubprocessAgentRunner
+
+    assert AgentRunnerError is CanonicalAgentRunnerError
+    assert SubprocessAgentRunner is CanonicalSubprocessAgentRunner
+    assert CompatAgentRunnerError is CanonicalAgentRunnerError
+    assert CompatSubprocessAgentRunner is CanonicalSubprocessAgentRunner
+
+
 def test_all_advanced_compatibility_shims_resolve() -> None:
     for name, (module_name, attr_name) in hermes_workflows._ADVANCED_EXPORTS.items():
         module = __import__(module_name, fromlist=[attr_name])

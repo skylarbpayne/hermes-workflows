@@ -99,7 +99,7 @@ hermes-workflows worker \
 
 The worker leases runnable or lease-expired `run_workflow`, `run_step`, `external_agent`, and child-workflow commands from configured DBs. It loads each instance's stored `workflow_ref` through the registry, executes the command, records durable output, and replays the workflow until it reaches a Review Queue request, another durable wait, or a terminal state.
 
-`agent(...)` already runs through the existing agent-step machinery: the workflow emits an `external_agent` command, the worker calls `WorkflowEngine.agent_runner`, and the standard `SubprocessAgentRunner` runs the configured adapter command. For Hermes CLI, keep using that path: `agent_cli_adapter` receives the durable runner request on stdin, expands `agent(..., model="...")` with `--agent-model-arg`, and passes the rendered prompt to Hermes as `--oneshot <prompt>` with `--agent-prompt-arg`.
+`agent(...)` already runs through the existing agent-step machinery: the workflow emits an `external_agent` command, the worker calls `WorkflowEngine.agent_runner`, and the canonical `hermes_workflows.agent_runner.SubprocessAgentRunner` runs the configured adapter command. The compatibility module `hermes_workflows.runners` re-exports the same runner classes for older code. For Hermes CLI, keep using that path: `agent_cli_adapter` receives the durable runner request on stdin, expands `agent(..., model="...")` with `--agent-model-arg`, and passes the rendered prompt to Hermes as `--oneshot <prompt>` with `--agent-prompt-arg`.
 
 ```text
 agent(..., model="openrouter/example")

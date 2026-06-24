@@ -171,6 +171,7 @@ def run_agent_command(
     max_stdout_bytes: int,
     max_stderr_bytes: int,
     cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> ProviderResult:
     started = time.monotonic()
     stdout = bytearray()
@@ -184,6 +185,7 @@ def run_agent_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=str(Path(cwd).expanduser()) if cwd is not None else None,
+            env=env,
         )
     except OSError as exc:
         duration_ms = _duration_ms(started)
