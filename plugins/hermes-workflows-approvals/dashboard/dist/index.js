@@ -92,7 +92,7 @@
 
   function ArtifactInlinePreview(props) {
     const render = props.render || {};
-    const value = props.value;
+    const value = artifactInlineValue(props.value);
     if (render.render === "python-source") {
       return e(WorkflowSourcePreview, { render: render, value: value });
     }
@@ -109,6 +109,13 @@
       return e("pre", { className: "hwf-text-preview" }, value);
     }
     return null;
+  }
+
+  function artifactInlineValue(value) {
+    if (value && typeof value === "object" && value.__hermes_type__ === "Artifact" && Object.prototype.hasOwnProperty.call(value, "value")) {
+      return value.value;
+    }
+    return value;
   }
 
   function isGeneratedPythonWorkflowArtifact(value) {

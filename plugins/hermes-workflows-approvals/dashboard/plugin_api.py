@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
-import mimetypes
 import os
 import re
 import sys
@@ -13,7 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hermes_workflows import ApprovalDecisionInput, Workflow, WorkflowEngine
+from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
+from hermes_workflows.artifacts import artifact_descriptor, workflow_source_preview
 from hermes_workflows.hermes_plugin_approvals import (
     _configured_dbs,
     _next_step_for_receipt,
@@ -101,11 +100,6 @@ def _strip_internal_fields(value: Any) -> Any:
     return value
 
 
-_ARTIFACT_PATH_KEYS = {"path", "file_path", "local_path", "absolute_path", "filesystem_path"}
-_ARTIFACT_REF_KEYS = _ARTIFACT_PATH_KEYS | {"uri", "href", "url"}
-_MEDIA_KINDS = {"image", "audio", "video"}
-
-
 def _looks_like_local_path(value: str) -> bool:
     cleaned = value.strip()
     return cleaned.startswith(("/", "./", "../", "~", "file://")) or re.match(r"^[A-Za-z]:[\\/]", cleaned) is not None
@@ -157,51 +151,8 @@ def _operator_approval_artifact(value: Any) -> Any:
 
 
 def _workflow_source_preview(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, Workflow):
-        source = value.source
-        symbol = value.symbol
-        source_sha256 = value.source_sha256
-        provenance = value.provenance
-        module_name = value.module_name
-        approval_required = value.approval_required
-        approval_key = value.approval_key
-    elif isinstance(value, dict) and value.get("__hermes_type__") == "Workflow" and isinstance(value.get("source"), str):
-        source = value["source"]
-        symbol = str(value.get("symbol") or "workflow")
-        source_sha256 = str(value.get("source_sha256") or hashlib.sha256(source.encode("utf-8")).hexdigest())
-        provenance = value.get("provenance")
-        module_name = value.get("module_name")
-        approval_required = bool(value.get("approval_required", False))
-        approval_key = value.get("approval_key")
-    elif isinstance(value, dict) and value.get("kind") == "generated_workflow.approval.v1" and isinstance(value.get("source"), str):
-        source = value["source"]
-        symbol = str(value.get("symbol") or "workflow")
-        source_sha256 = str(value.get("source_sha256") or hashlib.sha256(source.encode("utf-8")).hexdigest())
-        provenance = {
-            "runner_provenance": value.get("runner_provenance"),
-            "agent_request": value.get("agent_request"),
-            "agent_response": value.get("agent_response"),
-        }
-        module_name = None
-        approval_required = True
-        approval_key = value.get("approval_key")
-    else:
-        return None
-    actual_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    return {
-        "kind": "generated_workflow_source",
-        "language": "python",
-        "highlight_class": "language-python",
-        "source": source,
-        "symbol": symbol,
-        "source_sha256": source_sha256,
-        "source_hash_verified": actual_sha256 == source_sha256,
-        "workflow_name": str(value.get("workflow_name") or f"generated:{source_sha256}:{symbol}") if isinstance(value, dict) else f"generated:{source_sha256}:{symbol}",
-        "module_name": module_name,
-        "provenance": provenance,
-        "approval_required": approval_required,
-        "approval_key": approval_key,
-    }
+    preview = workflow_source_preview(value)
+    return dict(preview) if preview is not None else None
 
 
 def _workflow_source_artifact(
@@ -230,87 +181,10 @@ def _workflow_source_artifact(
     return artifact
 
 
-def _artifact_kind_from_media_type(media_type: str | None) -> str | None:
-    if not media_type:
-        return None
-    major = media_type.split("/", 1)[0].lower()
-    if major in _MEDIA_KINDS:
-        return major
-    if media_type in {"text/markdown", "application/markdown"}:
-        return "markdown"
-    if media_type.startswith("text/"):
-        return "text"
-    if media_type == "application/json":
-        return "json"
-    return None
-
-
 def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
-    """Return the low-risk rendering seam for approval/run artifacts.
+    """Return the shared framework artifact render descriptor."""
 
-    This is descriptive only: it does not fetch, transcode, or serve media. The
-    raw artifact remains persisted in workflow history; the dashboard receives a
-    redacted preview plus this descriptor so future renderers can support text,
-    JSON, image, audio, video, links, and local/private file references safely.
-    """
-
-    descriptor: dict[str, Any] = {
-        "kind": "json",
-        "render": "inline-json",
-        "persisted": "workflow_history",
-        "servable_by_dashboard": False,
-    }
-    if artifact is None:
-        return {**descriptor, "kind": "none", "render": "none"}
-    workflow_source = _workflow_source_preview(artifact)
-    if workflow_source is not None:
-        return {
-            **descriptor,
-            "kind": "workflow_source",
-            "render": "python-source",
-            "language": "python",
-            "highlight_class": "language-python",
-            "source_hash": workflow_source["source_sha256"],
-            "symbol": workflow_source["symbol"],
-            "hash_verified": workflow_source["source_hash_verified"],
-        }
-    if isinstance(artifact, str):
-        if artifact.startswith(("http://", "https://")):
-            return {**descriptor, "kind": "link", "render": "external-link", "reference": {"type": "url", "href": artifact}}
-        return {**descriptor, "kind": "text", "render": "inline-text"}
-    if isinstance(artifact, dict):
-        media_type = artifact.get("media_type") or artifact.get("mime_type") or artifact.get("content_type")
-        media_type = str(media_type) if media_type else None
-        explicit_kind = str(artifact.get("kind") or artifact.get("type") or "").lower()
-        kind = _artifact_kind_from_media_type(media_type) or (explicit_kind if explicit_kind in {"text", "json", "markdown", "image", "audio", "video", "file", "link"} else "json")
-        ref = None
-        ref_key = None
-        for key in ("url", "uri", "href", "path", "file_path", "local_path"):
-            raw = artifact.get(key)
-            if isinstance(raw, str) and raw.strip():
-                ref = raw.strip()
-                ref_key = key
-                break
-        if ref and ref.startswith(("http://", "https://")):
-            render = "external-link" if kind == "link" else "media-reference" if kind in _MEDIA_KINDS else "external-reference"
-            return {**descriptor, "kind": kind, "render": render, "media_type": media_type, "reference": {"type": "url", "href": ref}}
-        if ref:
-            guessed_type = media_type or mimetypes.guess_type(ref)[0]
-            guessed_kind = _artifact_kind_from_media_type(guessed_type) or kind
-            return {
-                **descriptor,
-                "kind": guessed_kind,
-                "render": "file-reference",
-                "media_type": guessed_type,
-                "reference": {"type": "local_path", "field": ref_key, "href": ref},
-                "warning": "Local/private files are not served by the dashboard; attach or expose them through an explicit artifact store before rendering media inline.",
-            }
-        if kind == "markdown" or "markdown" in artifact:
-            return {**descriptor, "kind": "markdown", "render": "inline-markdown", "media_type": media_type}
-        if kind == "text" or "text" in artifact:
-            return {**descriptor, "kind": "text", "render": "inline-text", "media_type": media_type}
-        return {**descriptor, "kind": kind, "render": "inline-json", "media_type": media_type}
-    return descriptor
+    return dict(artifact_descriptor(artifact))
 
 
 def _runtime_semantics() -> dict[str, Any]:

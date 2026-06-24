@@ -3,8 +3,17 @@ from __future__ import annotations
 import hermes_workflows
 
 
-def test_top_level_public_facade_teaches_authoring_primitives_only() -> None:
+def test_top_level_public_facade_teaches_authoring_primitives_and_artifacts_only() -> None:
     assert set(hermes_workflows.__all__) == {
+        "Artifact",
+        "ArtifactMetadata",
+        "ArtifactRender",
+        "FileArtifact",
+        "JsonArtifact",
+        "LinkArtifact",
+        "MarkdownArtifact",
+        "PythonSourceArtifact",
+        "TextArtifact",
         "Workflow",
         "agent",
         "approve",
