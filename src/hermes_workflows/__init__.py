@@ -72,6 +72,8 @@ _ADVANCED_EXPORTS: dict[str, tuple[str, str]] = {
     "AgentCall": ("hermes_workflows.authoring", "AgentCall"),
     "AskCall": ("hermes_workflows.authoring", "AskCall"),
     "approve": ("hermes_workflows.authoring", "approve"),
+    "current_context": ("hermes_workflows.authoring", "current_context"),
+    "current_step_context": ("hermes_workflows.authoring", "current_step_context"),
     "step": ("hermes_workflows.decorators", "step"),
     "ApprovalDecision": ("hermes_workflows.approvals", "ApprovalDecision"),
     "ApprovalDecisionInput": ("hermes_workflows.approvals", "ApprovalDecisionInput"),

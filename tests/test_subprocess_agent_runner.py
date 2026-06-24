@@ -34,6 +34,17 @@ async def subprocess_json_pipeline(inputs):
 
 
 @workflow
+async def subprocess_workspace_pipeline(inputs):
+    return await agent(
+        "inspect_workspace",
+        prompt="Inspect the workspace.",
+        input={"value": inputs["value"]},
+        workspace_dir=inputs["workspace_dir"],
+        isolation="worktree",
+    )
+
+
+@workflow
 async def subprocess_generated_workflow_pipeline(inputs):
     processor = await agent(
         "build_processor",
@@ -86,6 +97,47 @@ def test_subprocess_runner_executes_agent_and_records_provenance(tmp_path):
         "output": {"answer": 42},
         "provenance": {"runner": "fixture", "request_name": "double_value"},
     }
+
+
+def test_subprocess_runner_uses_request_workspace_dir_as_cwd(tmp_path):
+    runner_script = _write_runner(
+        tmp_path,
+        '''
+        import json
+        import os
+        import sys
+
+        request = json.load(sys.stdin)
+        json.dump({
+            "output": {"cwd": os.getcwd(), "workspace_dir": request["workspace_dir"], "isolation": request["isolation"]},
+            "provenance": {"runner": "fixture"},
+        }, sys.stdout)
+        ''',
+    )
+    workspace = tmp_path / "repo-worktree"
+    workspace.mkdir()
+    engine = WorkflowEngine(
+        tmp_path / "workflow.sqlite",
+        agent_runner=SubprocessAgentRunner([sys.executable, str(runner_script)]),
+    )
+
+    result = engine.run_until_idle(
+        subprocess_workspace_pipeline,
+        {"value": 21, "workspace_dir": str(workspace)},
+        workflow_id="wf_workspace_runner",
+    )
+
+    assert result.status == "completed"
+    assert result.result == {"cwd": str(workspace.resolve()), "workspace_dir": str(workspace.resolve()), "isolation": "worktree"}
+
+
+def test_subprocess_runner_rejects_invalid_workspace_dir(tmp_path):
+    runner_script = _write_runner(tmp_path, 'raise AssertionError("runner should not start")')
+    runner = SubprocessAgentRunner([sys.executable, str(runner_script)])
+
+    with pytest.raises(AgentRunnerError, match="workspace_dir must exist"):
+        runner({"kind": "agent.runner_request.v1", "workspace_dir": str(tmp_path / "missing")})
+
 
 
 def test_subprocess_runner_nonzero_exit_reports_diagnostics(tmp_path):
