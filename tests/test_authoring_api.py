@@ -26,6 +26,12 @@ class ItemPacket:
     text: str
 
 
+
+@dataclass
+class ReviewArtifact:
+    title: str
+    packets: list[DraftPacket]
+
 @dataclass
 class ReviewDecision:
     action: Literal["approve", "request_changes"]
@@ -132,6 +138,19 @@ async def goal_feedback_workflow(inputs):
     draft = await goal(draft_with_goal_feedback, approve_goal_candidate, max_iters=3)
     return draft.text
 
+
+
+@workflow
+async def dataclass_review_artifact_workflow(inputs):
+    artifact = ReviewArtifact(title="typed artifact", packets=[DraftPacket(text="draft")])
+    decision = await ask(
+        "Review typed artifact",
+        key="review_typed_artifact",
+        input=artifact,
+        choice=["approve", "request_changes"],
+        returns=ReviewDecision,
+    )
+    return {"action": decision.action}
 
 @workflow
 async def typed_input_workflow(inputs: TypedWorkflowInput):
