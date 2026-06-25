@@ -69,6 +69,18 @@ class TypedContextWorkflowInput:
     enabled: bool = False
 
 
+@dataclass
+class TypedStepInput:
+    topic: str
+    count: int = 1
+
+
+@dataclass
+class TypedStepResult:
+    label: str
+    count: int
+
+
 PROMPT_VERSION = "v1"
 
 
@@ -89,6 +101,19 @@ async def typed_context_input_workflow(inputs: TypedContextWorkflowInput):
     assert workflow_id()
     assert isinstance(inputs, TypedContextWorkflowInput)
     return {"topic": inputs.topic, "enabled": inputs.enabled}
+
+
+@step
+async def typed_dataclass_step(inputs: TypedStepInput) -> TypedStepResult:
+    assert isinstance(inputs, TypedStepInput)
+    return TypedStepResult(label=inputs.topic.upper(), count=inputs.count + 1)
+
+
+@workflow
+async def typed_step_workflow(inputs: TypedStepInput) -> TypedStepResult:
+    result = await typed_dataclass_step(inputs)
+    assert isinstance(result, TypedStepResult)
+    return result
 
 
 @workflow
@@ -297,6 +322,25 @@ def test_workflow_coerces_typed_input_for_legacy_ctx_signature(tmp_path):
 
     assert result.status == "completed"
     assert result.result == {"topic": "context typed", "enabled": True}
+
+
+def test_step_coerces_typed_input_and_output_on_worker_and_replay(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+
+    result = engine.run_until_idle(
+        typed_step_workflow,
+        {"topic": "typed step", "count": "2"},
+        workflow_id="wf_typed_step",
+    )
+
+    assert result.status == "completed"
+    assert isinstance(result.result, TypedStepResult)
+    assert result.result == TypedStepResult(label="TYPED STEP", count=3)
+    status = engine.workflow_status("wf_typed_step", recent_events=20)
+    assert status["result"] == {"label": "TYPED STEP", "count": 3}
+    step_completed = [event for event in status["events"] if event["type"] == "StepCompleted"][0]
+    assert step_completed["payload"]["output"] == {"label": "TYPED STEP", "count": 3}
 
 
 def test_workflow_input_parser_rejects_missing_required_fields(tmp_path):
