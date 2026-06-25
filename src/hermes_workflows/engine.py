@@ -10,11 +10,12 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_type_hints
 from urllib.parse import quote
 
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
 from .domain import CommandType, WorkflowStatus, decode_command_row, decode_event_row, make_command, make_event
+from .input_parsing import coerce_workflow_input
 from .status_projection import StatusProjection
 from .types import to_json_value
 from .workflow_values import Workflow
@@ -2389,7 +2390,7 @@ class WorkflowContext:
                 requested = self._last_event("StepRequested", key)
                 if requested is not None:
                     _validate_step_request_fingerprint(key, requested, payload)
-            return completed["output"]
+            return _coerce_completed_step_output(step_name, completed["output"])
 
         requested = self._last_event("StepRequested", key)
         if requested is not None and payload_builder is not None:
@@ -3268,9 +3269,90 @@ def _call_step_body(body: Callable[..., Any], step_context: StepExecutionContext
     should_inject_context = False
     if positional and len(args) < len(required_positional):
         should_inject_context = True
+    type_hints = _safe_step_type_hints(body)
     if should_inject_context:
-        return body(step_context, *args, **kwargs)
-    return body(*args, **kwargs)
+        coerced_args, coerced_kwargs = _coerce_step_call(signature, type_hints, args, kwargs, skip_positional=1)
+        result = body(step_context, *coerced_args, **coerced_kwargs)
+    else:
+        coerced_args, coerced_kwargs = _coerce_step_call(signature, type_hints, args, kwargs, skip_positional=0)
+        result = body(*coerced_args, **coerced_kwargs)
+    return _coerce_step_return_maybe_async(result, _step_return_annotation(body, type_hints=type_hints))
+
+
+def _coerce_step_call(
+    signature: inspect.Signature,
+    type_hints: Dict[str, Any],
+    args: Tuple[Any, ...],
+    kwargs: Dict[str, Any],
+    *,
+    skip_positional: int,
+) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+    parameters = list(signature.parameters.values())
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ][skip_positional:]
+    coerced_args = [
+        _coerce_step_value(
+            arg,
+            type_hints.get(positional[index].name, positional[index].annotation) if index < len(positional) else inspect.Signature.empty,
+        )
+        for index, arg in enumerate(args)
+    ]
+    by_name = {parameter.name: parameter for parameter in parameters}
+    coerced_kwargs = {
+        key: _coerce_step_value(value, type_hints.get(key, by_name[key].annotation) if key in by_name else inspect.Signature.empty)
+        for key, value in kwargs.items()
+    }
+    return tuple(coerced_args), coerced_kwargs
+
+
+def _coerce_step_value(value: Any, annotation: Any) -> Any:
+    if annotation is inspect.Signature.empty:
+        return value
+    return coerce_workflow_input(value, annotation)
+
+
+def _safe_step_type_hints(body: Callable[..., Any]) -> Dict[str, Any]:
+    try:
+        return get_type_hints(body, include_extras=True)
+    except Exception:
+        return dict(getattr(body, "__annotations__", {}) or {})
+
+
+def _step_return_annotation(body: Callable[..., Any], *, type_hints: Dict[str, Any] | None = None) -> Any:
+    if type_hints is None:
+        type_hints = _safe_step_type_hints(body)
+    if "return" in type_hints:
+        return type_hints["return"]
+    try:
+        signature = inspect.signature(body)
+    except (TypeError, ValueError):
+        return inspect.Signature.empty
+    return signature.return_annotation
+
+
+async def _coerce_step_return_async(value: Any, annotation: Any) -> Any:
+    return _coerce_step_value(await value, annotation)
+
+
+def _coerce_step_return_maybe_async(value: Any, annotation: Any) -> Any:
+    if annotation is inspect.Signature.empty:
+        return value
+    if inspect.isawaitable(value):
+        return _coerce_step_return_async(value, annotation)
+    return _coerce_step_value(value, annotation)
+
+
+def _coerce_completed_step_output(step_name: str, output: Any) -> Any:
+    try:
+        from .decorators import get_step_body
+
+        body = get_step_body(step_name)
+    except Exception:
+        return output
+    return _coerce_step_value(output, _step_return_annotation(body))
 
 
 def _run_maybe_async(value: Any) -> Any:
