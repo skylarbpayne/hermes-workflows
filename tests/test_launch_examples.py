@@ -180,5 +180,5 @@ def test_goal_and_local_model_examples_complete_without_provider_credentials(tmp
     engine.start(loaded["goal_revision_loop_workflow"], {"target_score": 3}, workflow_id="wf_goal_exhausted")
     exhausted = _drain(engine, "wf_goal_exhausted")
 
-    assert exhausted.status == "completed"
-    assert exhausted.result["accepted"] is False
+    assert exhausted.status == "failed"
+    assert "goal(...) exhausted after 3 iteration(s)" in (exhausted.error or "")

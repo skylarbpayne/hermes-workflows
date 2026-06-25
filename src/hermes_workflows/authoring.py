@@ -23,6 +23,16 @@ _NAME_HINT_STACK: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextV
 )
 
 
+class GoalExhaustedError(RuntimeError):
+    """Raised when goal(...) reaches max_iters without accepted criteria."""
+
+    def __init__(self, *, max_iters: int, last_result: Any, last_check: Any) -> None:
+        self.max_iters = max_iters
+        self.last_result = last_result
+        self.last_check = last_check
+        super().__init__(f"goal(...) exhausted after {max_iters} iteration(s)")
+
+
 @dataclass(frozen=True)
 class AgentCall(Generic[T]):
     name: str
@@ -231,6 +241,39 @@ class AskCall(Generic[T]):
         return base if index == 0 else f"{base}_{index}"
 
 
+@dataclass(frozen=True)
+class SelectCall(Generic[T]):
+    key: str
+    options: Sequence[Any]
+    prompt: str | None = None
+    returns: Any = _MISSING
+    timeout: str | None = None
+
+    def __await__(self):
+        return self._run(block=True).__await__()
+
+    async def _run(self, *, block: bool) -> Any:
+        ctx = current_context()
+        return await self._run_with_context(ctx, block=block)
+
+    async def _run_with_context(self, ctx: Any, *, block: bool) -> Any:
+        normalized_options = [_selection_option(option, index=index) for index, option in enumerate(self.options)]
+        result = await ctx._request_human_input(
+            self.prompt or "Select one option.",
+            key=_safe_key(self.key),
+            artifact={"options": normalized_options},
+            schema=_return_schema_id(dict if self.returns is _MISSING else self.returns),
+            schema_descriptor=_selection_schema_descriptor(normalized_options, self.returns),
+            timeout=self.timeout,
+            block=block,
+        )
+        if isinstance(result, PendingStep):
+            return result
+        if self.returns is not _MISSING:
+            return _coerce_return(result, self.returns)
+        return _selected_option_value(result, self.options, normalized_options)
+
+
 def bind_workflow_context(ctx: Any):
     return _CURRENT_CONTEXT.set(ctx)
 
@@ -305,7 +348,8 @@ def agent(
 
 
 def ask(
-    prompt: str,
+    prompt_or_key: str | None = None,
+    prompt: str | None = None,
     *,
     key: str | None = None,
     input: Any = None,
@@ -316,13 +360,28 @@ def ask(
 ) -> AskCall[Any]:
     """Request typed input from a Review Queue surface.
 
-    `ask(...)` mirrors `agent(...)`: `input=` is the value/artifact to review,
-    and `returns=` is the typed response contract.
+    Supports both ``ask("Approve?", key="outline_0", ...)`` and
+    ``ask("outline_0", "Approve?", ...)`` so authored workflow structure can
+    stay close to the sketch without requiring sync runtime magic.
     """
 
     if choices is not None and choice is not None:
         raise TypeError("ask(...) accepts either choices= or choice=, not both")
-    return AskCall(prompt, key=key, input=input, returns=returns, timeout=timeout, choices=choices if choices is not None else choice)
+    if prompt is None:
+        if prompt_or_key is None:
+            raise TypeError("ask(...) requires a prompt")
+        prompt_text = prompt_or_key
+        request_key = key
+    else:
+        if prompt_or_key is None:
+            prompt_text = prompt
+            request_key = key
+        else:
+            if key is not None:
+                raise TypeError("ask(...) got both positional key and key=")
+            request_key = prompt_or_key
+            prompt_text = prompt
+    return AskCall(prompt_text, key=request_key, input=input, returns=returns, timeout=timeout, choices=choices if choices is not None else choice)
 
 
 def select(
@@ -330,26 +389,27 @@ def select(
     options: Sequence[Any],
     *,
     prompt: str | None = None,
-    returns: Any = dict,
+    returns: Any = _MISSING,
     timeout: str | None = None,
-) -> AskCall[Any]:
-    """Request a human/operator selection from stable options."""
+) -> SelectCall[Any]:
+    """Request a human/operator selection from stable options.
 
-    normalized_options = [_selection_option(option, index=index) for index, option in enumerate(options)]
-    return ask(
-        prompt or "Select one option.",
-        key=key,
-        input={"options": normalized_options},
-        returns=returns,
-        timeout=timeout,
-    )
+    If ``returns=`` is omitted, awaiting select(...) returns the selected option
+    value from the original typed option list.
+    """
+
+    return SelectCall(key=key, options=options, prompt=prompt, returns=returns, timeout=timeout)
 
 
 async def gather(*calls: Any) -> list[Any]:
     return await current_context().gather(*calls)
 
 
-async def parallel(calls: Iterable[Any], *, limit: int | None = None) -> list[Any]:
+async def parallel(calls: Iterable[Any] | Any, *more_calls: Any, limit: int | None = None) -> list[Any]:
+    if more_calls:
+        calls = (calls, *more_calls)
+    elif isinstance(calls, (AgentCall, AskCall, SelectCall)) or getattr(calls, "__durable_step_call__", False) or inspect.isawaitable(calls):
+        calls = (calls,)
     ctx = current_context()
     parallel_index = getattr(ctx, "_authoring_parallel_call_count", 0)
     setattr(ctx, "_authoring_parallel_call_count", parallel_index + 1)
@@ -430,7 +490,7 @@ async def goal(
         if criteria.accepted:
             return value
         feedback = criteria.feedback
-    return value
+    raise GoalExhaustedError(max_iters=max_iters, last_result=value, last_check=raw_criteria)
 
 
 async def approve(
@@ -507,6 +567,8 @@ async def _start_call(ctx: Any, call: Any, *, block: bool) -> Any:
         return await call._run_with_context(ctx, block=block)
     if isinstance(call, AskCall):
         return await call._run_with_context(ctx, block=block)
+    if isinstance(call, SelectCall):
+        return await call._run_with_context(ctx, block=block)
     if isinstance(call, BashCall):
         return await call._run_with_context(ctx, block=block)
     if getattr(call, "__durable_step_call__", False):
@@ -535,7 +597,7 @@ def _stage_call(stage: Any, item: Any, *, stage_index: int, item_index: int) -> 
 
 async def _resolve_goal_value(value: Any, *, hint: str) -> Any:
     with _public_name_hint(hint):
-        if isinstance(value, (AgentCall, AskCall)):
+        if isinstance(value, (AgentCall, AskCall, SelectCall)):
             return await value
         if getattr(value, "__durable_step_call__", False):
             return await value
@@ -604,6 +666,41 @@ def _selection_option(option: Any, *, index: int) -> dict[str, Any]:
     return {"id": str(index), "label": str(raw), "value": raw}
 
 
+def _selection_schema_descriptor(options: Sequence[Mapping[str, Any]], returns: Any) -> Mapping[str, Any]:
+    if returns is not _MISSING:
+        return _return_schema_descriptor(returns)
+    return {
+        "id": "selection",
+        "name": "selection",
+        "kind": "structured_object",
+        "fields": [
+            {
+                "name": "id",
+                "kind": "choice",
+                "required": True,
+                "options": [str(option["id"]) for option in options],
+                "description": "Selected option id",
+            }
+        ],
+    }
+
+
+def _selected_option_value(result: Any, raw_options: Sequence[Any], normalized_options: Sequence[Mapping[str, Any]]) -> Any:
+    selected = result
+    if isinstance(result, Mapping):
+        for key in ("id", "option_id", "selected", "selection", "choice", "angle_id", "value"):
+            if key in result:
+                selected = result[key]
+                break
+    for raw, normalized in zip(raw_options, normalized_options):
+        if str(normalized["id"]) == str(selected):
+            return raw
+    for raw, normalized in zip(raw_options, normalized_options):
+        if to_json_value(raw) == to_json_value(result) or normalized.get("value") == to_json_value(result):
+            return raw
+    raise ValueError(f"select(...) response did not match an option id: {selected!r}")
+
+
 def _with_choices(descriptor: dict[str, Any], choices: Sequence[str] | None) -> dict[str, Any]:
     if choices is None:
         return descriptor
@@ -613,7 +710,7 @@ def _with_choices(descriptor: dict[str, Any], choices: Sequence[str] | None) -> 
 
 
 def _looks_like_stage(value: Any) -> bool:
-    return isinstance(value, (AgentCall, AskCall)) or callable(value) or getattr(value, "__durable_step_call__", False)
+    return isinstance(value, (AgentCall, AskCall, SelectCall)) or callable(value) or getattr(value, "__durable_step_call__", False)
 
 
 def _call_goal_do(fn: Callable[..., Any], value: Any, *, have_value: bool, feedback: Any) -> Any:
