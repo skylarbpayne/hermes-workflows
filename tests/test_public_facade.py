@@ -32,6 +32,7 @@ def test_top_level_public_facade_teaches_authoring_primitives_and_artifacts_only
         "map_workflow",
         "parallel",
         "pipeline",
+        "select",
         "PromptFile",
         "prompt_file",
         "RenderedPrompt",

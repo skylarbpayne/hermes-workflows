@@ -190,6 +190,7 @@ class AskCall(Generic[T]):
     input: Any = None
     returns: Any = dict
     timeout: str | None = None
+    choices: Sequence[str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt, str) or not self.prompt.strip():
@@ -209,7 +210,7 @@ class AskCall(Generic[T]):
             key=key,
             artifact=self.input,
             schema=_return_schema_id(self.returns),
-            schema_descriptor=_return_schema_descriptor(self.returns),
+            schema_descriptor=_with_choices(_return_schema_descriptor(self.returns), self.choices),
             timeout=self.timeout,
             block=block,
         )
@@ -256,8 +257,8 @@ def current_step_context() -> Any:
 
 def agent(
     name: str | None = None,
+    prompt: Any = None,
     *,
-    prompt: Any,
     input: Any = None,
     returns: Any = dict,
     key_by: Any = None,
@@ -310,6 +311,8 @@ def ask(
     input: Any = None,
     returns: Any = dict,
     timeout: str | None = None,
+    choices: Sequence[str] | None = None,
+    choice: Sequence[str] | None = None,
 ) -> AskCall[Any]:
     """Request typed input from a Review Queue surface.
 
@@ -317,7 +320,29 @@ def ask(
     and `returns=` is the typed response contract.
     """
 
-    return AskCall(prompt, key=key, input=input, returns=returns, timeout=timeout)
+    if choices is not None and choice is not None:
+        raise TypeError("ask(...) accepts either choices= or choice=, not both")
+    return AskCall(prompt, key=key, input=input, returns=returns, timeout=timeout, choices=choices if choices is not None else choice)
+
+
+def select(
+    key: str,
+    options: Sequence[Any],
+    *,
+    prompt: str | None = None,
+    returns: Any = dict,
+    timeout: str | None = None,
+) -> AskCall[Any]:
+    """Request a human/operator selection from stable options."""
+
+    normalized_options = [_selection_option(option, index=index) for index, option in enumerate(options)]
+    return ask(
+        prompt or "Select one option.",
+        key=key,
+        input={"options": normalized_options},
+        returns=returns,
+        timeout=timeout,
+    )
 
 
 async def gather(*calls: Any) -> list[Any]:
@@ -343,7 +368,13 @@ async def parallel(calls: Iterable[Any], *, limit: int | None = None) -> list[An
     return results
 
 
-async def pipeline(items: Iterable[Any], *stages: Any, limit: int | None = None) -> list[Any]:
+def pipeline(items_or_stage: Any, *stages: Any, limit: int | None = None) -> Any:
+    if _looks_like_stage(items_or_stage):
+        return _SingleValuePipeline((items_or_stage, *stages))
+    return _pipeline_items(items_or_stage, *stages, limit=limit)
+
+
+async def _pipeline_items(items: Iterable[Any], *stages: Any, limit: int | None = None) -> list[Any]:
     current = list(items)
     for stage_index, stage in enumerate(stages):
         calls = []
@@ -352,6 +383,21 @@ async def pipeline(items: Iterable[Any], *stages: Any, limit: int | None = None)
             calls.append(call)
         current = await parallel(calls, limit=limit)
     return current
+
+
+@dataclass(frozen=True)
+class _SingleValuePipeline:
+    stages: tuple[Any, ...]
+
+    def __call__(self, value: Any) -> Any:
+        return self._run(value)
+
+    async def _run(self, value: Any) -> Any:
+        current = value
+        for stage_index, stage in enumerate(self.stages):
+            call = _stage_call(stage, current, stage_index=stage_index, item_index=0)
+            current = await _resolve_goal_value(call, hint=_callable_public_name(stage, fallback=f"stage_{stage_index}"))
+        return current
 
 
 async def goal(
@@ -373,17 +419,18 @@ async def goal(
         raise ValueError("goal(..., max_iters=...) must be at least 1")
     value = None if initial is _MISSING else initial
     have_value = initial is not _MISSING
+    feedback: Any = None
     for _index in range(max_iters):
-        candidate = _call_with_optional_value(do_fn, value, have_value=have_value)
+        candidate = _call_goal_do(do_fn, value, have_value=have_value, feedback=feedback)
         value = await _resolve_goal_value(candidate, hint=_callable_public_name(do_fn, fallback="do"))
         have_value = True
-        verdict = _call_with_optional_value(check_fn, value, have_value=True)
-        accepted = await _resolve_goal_value(verdict, hint=_callable_public_name(check_fn, fallback="check"))
-        if bool(accepted):
+        verdict = _call_goal_check(check_fn, _index, value)
+        raw_criteria = await _resolve_goal_value(verdict, hint=_callable_public_name(check_fn, fallback="check"))
+        criteria = _goal_criteria(raw_criteria)
+        if criteria.accepted:
             return value
+        feedback = criteria.feedback
     return value
-
-    return list(value)
 
 
 async def approve(
@@ -495,6 +542,114 @@ async def _resolve_goal_value(value: Any, *, hint: str) -> Any:
         if inspect.isawaitable(value):
             return await value
         return value
+
+
+@dataclass(frozen=True)
+class _GoalCriteria:
+    accepted: bool
+    feedback: Any = None
+
+
+def _goal_criteria(value: Any) -> _GoalCriteria:
+    if isinstance(value, bool):
+        return _GoalCriteria(value)
+    if isinstance(value, ApprovalDecision):
+        return _GoalCriteria(value.approved, value.feedback)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _goal_criteria({field.name: getattr(value, field.name) for field in fields(value)})
+    if isinstance(value, Mapping):
+        feedback = _first_present(value, ("feedback", "reason", "note", "comment", "message", "direct_feedback"))
+        for key in ("accepted", "approved", "ok", "passed", "pass"):
+            if key in value:
+                return _GoalCriteria(bool(value[key]), feedback)
+        action = value.get("action") or value.get("decision")
+        if isinstance(action, str):
+            normalized = action.strip().lower().replace("-", "_")
+            if normalized in {"approve", "approved", "accept", "accepted", "yes", "ship", "pass", "passed"}:
+                return _GoalCriteria(True, feedback)
+            if normalized in {"reject", "rejected", "request_changes", "revise", "rerun", "edit", "no", "fail", "failed"}:
+                return _GoalCriteria(False, feedback)
+        return _GoalCriteria(bool(value), feedback)
+    feedback = _first_attr(value, ("feedback", "reason", "note", "comment", "message", "direct_feedback"))
+    for attr in ("accepted", "approved", "ok", "passed"):
+        if hasattr(value, attr):
+            return _GoalCriteria(bool(getattr(value, attr)), feedback)
+    if hasattr(value, "action"):
+        return _goal_criteria({"action": getattr(value, "action"), "feedback": feedback})
+    return _GoalCriteria(bool(value), feedback)
+
+
+def _first_present(mapping: Mapping[str, Any], keys: Sequence[str]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _first_attr(value: Any, attrs: Sequence[str]) -> Any:
+    for attr in attrs:
+        attr_value = getattr(value, attr, None)
+        if attr_value not in (None, ""):
+            return attr_value
+    return None
+
+
+def _selection_option(option: Any, *, index: int) -> dict[str, Any]:
+    raw = to_json_value(option)
+    if isinstance(raw, Mapping):
+        option_id = raw.get("id") or raw.get("key") or raw.get("value") or str(index)
+        label = raw.get("label") or raw.get("title") or raw.get("name") or str(option_id)
+        return {"id": str(option_id), "label": str(label), "value": dict(raw)}
+    return {"id": str(index), "label": str(raw), "value": raw}
+
+
+def _with_choices(descriptor: dict[str, Any], choices: Sequence[str] | None) -> dict[str, Any]:
+    if choices is None:
+        return descriptor
+    enriched = dict(descriptor)
+    enriched["choices"] = [str(choice) for choice in choices]
+    return enriched
+
+
+def _looks_like_stage(value: Any) -> bool:
+    return isinstance(value, (AgentCall, AskCall)) or callable(value) or getattr(value, "__durable_step_call__", False)
+
+
+def _call_goal_do(fn: Callable[..., Any], value: Any, *, have_value: bool, feedback: Any) -> Any:
+    with _public_name_hint(_callable_public_name(fn, fallback="do")):
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn(value, feedback) if have_value and feedback is not None else _call_with_optional_value(fn, value, have_value=have_value)
+        positional = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_varargs = any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in signature.parameters.values())
+        if have_value and feedback is not None and (accepts_varargs or len(positional) >= 2):
+            return fn(value, feedback)
+        return _call_with_optional_value(fn, value, have_value=have_value)
+
+
+def _call_goal_check(fn: Callable[..., Any], index: int, value: Any) -> Any:
+    with _public_name_hint(_callable_public_name(fn, fallback="check")):
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return fn(index, value)
+        positional = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_varargs = any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in signature.parameters.values())
+        if accepts_varargs or len(positional) >= 2:
+            return fn(index, value)
+        if positional:
+            return fn(value)
+        return fn()
 
 
 def _call_with_optional_value(fn: Callable[..., Any], value: Any, *, have_value: bool) -> Any:
@@ -632,16 +787,38 @@ def _public_label(name: str) -> str:
 def _coerce_return(value: Any, returns: Any) -> Any:
     if returns in (None, Any, dict):
         return value
+    origin = get_origin(returns)
+    args = get_args(returns)
+    if origin is list:
+        item_type = args[0] if args else Any
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError(f"cannot coerce {type(value).__name__} to list")
+        return [_coerce_return(item, item_type) for item in value]
     if returns is str:
         return value if isinstance(value, str) else str(value)
-    if returns in (int, float, bool):
+    if returns is bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "yes", "y", "1", "approve", "approved", "ship", "pass"}:
+                return True
+            if normalized in {"false", "no", "n", "0", "reject", "rejected", "revise", "request_changes", "fail"}:
+                return False
+        return bool(value)
+    if returns in (int, float):
         return returns(value)
     if is_dataclass(returns) and isinstance(returns, type):
         if isinstance(value, returns):
             return value
         if not isinstance(value, Mapping):
             raise TypeError(f"cannot coerce {type(value).__name__} to {returns.__name__}")
-        kwargs = {field.name: value[field.name] for field in fields(returns) if field.name in value}
+        type_hints = _safe_dataclass_type_hints(returns)
+        kwargs = {
+            field.name: _coerce_return(value[field.name], type_hints.get(field.name, field.type))
+            for field in fields(returns)
+            if field.name in value
+        }
         return returns(**kwargs)
     return value
 
@@ -654,6 +831,16 @@ def _return_schema_descriptor(returns: Any) -> dict[str, Any]:
         return {"id": schema_id, "name": "str", "kind": "text"}
     if returns in (int, float, bool):
         return {"id": schema_id, "name": returns.__name__, "kind": "scalar", "type": returns.__name__}
+    origin = get_origin(returns)
+    args = get_args(returns)
+    if origin is list:
+        item_type = args[0] if args else Any
+        return {
+            "id": schema_id,
+            "name": "list",
+            "kind": "list",
+            "items": _return_schema_descriptor(item_type),
+        }
     if is_dataclass(returns) and isinstance(returns, type):
         type_hints = _safe_dataclass_type_hints(returns)
         field_descriptors = [_field_schema_descriptor(field, annotation=type_hints.get(field.name, field.type)) for field in fields(returns)]
@@ -811,6 +998,11 @@ def _return_schema_id(returns: Any) -> str:
         return "json"
     if returns is dict:
         return "json"
+    origin = get_origin(returns)
+    args = get_args(returns)
+    if origin is list:
+        item_id = _return_schema_id(args[0]) if args else "json"
+        return f"list[{item_id}]"
     if isinstance(returns, type):
         return f"{returns.__module__}:{returns.__qualname__}"
     return str(returns)

@@ -743,7 +743,14 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
     descriptor = schema if isinstance(schema, dict) else _review_request_schema_descriptor(schema)
     raw_fields = descriptor.get("fields")
     fields = raw_fields if isinstance(raw_fields, list) else []
-    action_field = next((field for field in fields if isinstance(field, dict) and field.get("name") == "action" and field.get("kind") == "choice"), None)
+    action_field = next(
+        (
+            field
+            for field in fields
+            if isinstance(field, dict) and field.get("name") in {"action", "decision"} and field.get("kind") == "choice"
+        ),
+        None,
+    )
     feedback_field = next(
         (
             field
@@ -758,6 +765,8 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
     if action_field:
         actions = [_review_action_descriptor(option, has_feedback=feedback_field is not None) for option in action_options]
         surface: dict[str, Any] = {"kind": "review_decision", "actions": actions}
+        if action_field.get("name") != "action":
+            surface["field"] = action_field.get("name")
         if feedback_field is not None:
             surface["feedback"] = {"kind": "text", "optional": True, "placeholder": "What should change?"}
         return surface
