@@ -29,7 +29,7 @@ from .artifacts import (
     TextArtifact,
     VideoArtifact,
 )
-from .authoring import agent, approve, approve_many, ask, cancel_workflow, gather, goal, map_workflow, parallel, pipeline, start_child, wait_for, workflow_id, workflow_status
+from .authoring import agent, approve, approve_many, ask, cancel_workflow, gather, goal, map_workflow, parallel, pipeline, select, start_child, wait_for, workflow_id, workflow_status
 from .bash import bash
 from .decorators import workflow
 from .prompts import PromptFile, RenderedPrompt, prompt_file
@@ -67,6 +67,7 @@ __all__ = [
     "map_workflow",
     "parallel",
     "pipeline",
+    "select",
     "PromptFile",
     "prompt_file",
     "RenderedPrompt",

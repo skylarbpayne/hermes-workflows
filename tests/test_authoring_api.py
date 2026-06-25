@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, agent, ask, current_step_context, goal, parallel, pipeline, prompt_file, step, workflow, workflow_id
+from hermes_workflows import WorkflowEngine, agent, ask, current_step_context, goal, parallel, pipeline, prompt_file, select, step, workflow, workflow_id
 
 
 @dataclass
@@ -52,6 +52,18 @@ class AngleChoice:
 
 
 @dataclass
+class Angle:
+    id: str
+    title: str
+
+
+@dataclass
+class GoalApproval:
+    decision: Literal["Yes", "No"]
+    feedback: str | None = None
+
+
+@dataclass
 class TypedWorkflowInput:
     topic: str
     count: int = 1
@@ -82,6 +94,43 @@ class TypedStepResult:
 
 
 PROMPT_VERSION = "v1"
+
+
+@workflow
+async def ergonomic_authoring_workflow(inputs):
+    angles = await agent("angles", f"Generate angles for {inputs['topic']}", returns=list[Angle])
+    assert all(isinstance(angle, Angle) for angle in angles)
+    choice = await select("select_angle", angles, returns=AngleChoice)
+    draft = await pipeline(
+        lambda selected: agent("draft", f"Draft {selected.angle_id}", input={"angle_id": selected.angle_id}, returns=DraftPacket),
+        lambda packet: DraftPacket(text=packet.text.upper()),
+    )(choice)
+    return {"angles": [angle.id for angle in angles], "angle": choice.angle_id, "draft": draft.text}
+
+
+def draft_with_goal_feedback(previous=None, feedback=None):
+    return agent(
+        "draft_outline",
+        "Draft until approved.",
+        input={"previous": getattr(previous, "text", None), "feedback": feedback},
+        returns=DraftPacket,
+    )
+
+
+def approve_goal_candidate(index, draft):
+    return ask(
+        f"Approve outline attempt {index + 1}?",
+        key=f"outline_{index}",
+        input=draft,
+        choice=["Yes", "No"],
+        returns=GoalApproval,
+    )
+
+
+@workflow
+async def goal_feedback_workflow(inputs):
+    draft = await goal(draft_with_goal_feedback, approve_goal_candidate, max_iters=3)
+    return draft.text
 
 
 @workflow
@@ -280,6 +329,92 @@ def test_agent_and_ask_do_not_accept_context_keyword():
         agent("research", prompt="Research", input={"topic": "x"}, **legacy_kwargs)
     with pytest.raises(TypeError, match="context"):
         ask("Review", key="review", input={"draft": "x"}, **legacy_kwargs)
+
+
+def test_ergo_authoring_shape_supports_positional_agent_list_returns_select_and_single_value_pipeline(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        if request["public_name"] == "angles":
+            return {"output": [{"id": "a", "title": "Angle A"}, {"id": "b", "title": "Angle B"}]}
+        if request["public_name"] == "draft":
+            return {"output": {"text": f"draft:{request['input']['angle_id']}"}}
+        raise AssertionError(request)
+
+    engine = WorkflowEngine(db, agent_runner=runner)
+    first = engine.run_until_idle(ergonomic_authoring_workflow, {"topic": "authoring"}, workflow_id="wf_ergonomic_authoring")
+
+    assert first.status == "waiting"
+    assert calls[0]["name"] == "angles"
+    assert calls[0]["rendered_prompt"] == "Generate angles for authoring"
+    assert calls[0]["returns"].startswith("list[")
+    review_request = engine.workflow_status("wf_ergonomic_authoring")["review_requests"][0]
+    assert review_request["key"] == "select_angle"
+    assert review_request["artifact"] == {
+        "options": [
+            {"id": "a", "label": "Angle A", "value": {"id": "a", "title": "Angle A"}},
+            {"id": "b", "label": "Angle B", "value": {"id": "b", "title": "Angle B"}},
+        ]
+    }
+
+    engine.submit_operator_response(
+        workflow_id="wf_ergonomic_authoring",
+        key="select_angle",
+        payload={"angle_id": "b", "rationale": "stronger hook"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-select"},
+    )
+    result = engine.drain("wf_ergonomic_authoring")
+
+    assert result.status == "completed"
+    assert result.result == {"angles": ["a", "b"], "angle": "b", "draft": "DRAFT:B"}
+    assert calls[1]["input"] == {"angle_id": "b"}
+
+
+def test_goal_criteria_can_return_feedback_and_yes_no_decision(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        feedback = request["input"].get("feedback")
+        text = "draft-1" if feedback is None else f"draft-2:{feedback}"
+        return {"output": {"text": text}}
+
+    engine = WorkflowEngine(db, agent_runner=runner)
+    first = engine.run_until_idle(goal_feedback_workflow, {}, workflow_id="wf_goal_feedback")
+
+    assert first.status == "waiting"
+    first_request = engine.workflow_status("wf_goal_feedback")["review_requests"][0]
+    assert first_request["key"] == "outline_0"
+    assert first_request["request_schema"]["choices"] == ["Yes", "No"]
+    assert first_request["request_schema"]["fields"][0]["options"] == ["Yes", "No"]
+    assert first_request["input_surface"]["kind"] == "review_decision"
+    assert first_request["input_surface"]["field"] == "decision"
+
+    engine.submit_operator_response(
+        workflow_id="wf_goal_feedback",
+        key="outline_0",
+        payload={"decision": "No", "feedback": "make it sharper"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-no"},
+    )
+    second = engine.drain("wf_goal_feedback")
+
+    assert second.status == "waiting"
+    assert engine.workflow_status("wf_goal_feedback")["review_requests"][1]["key"] == "outline_1"
+    assert calls[1]["input"] == {"previous": "draft-1", "feedback": "make it sharper"}
+
+    engine.submit_operator_response(
+        workflow_id="wf_goal_feedback",
+        key="outline_1",
+        payload={"decision": "Yes", "feedback": "ship it"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-yes"},
+    )
+    result = engine.drain("wf_goal_feedback")
+
+    assert result.status == "completed"
+    assert result.result == "draft-2:make it sharper"
 
 
 def test_workflow_coerces_raw_json_to_typed_dataclass_input(tmp_path):
