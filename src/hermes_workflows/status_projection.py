@@ -4,6 +4,7 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
+from .types import to_json_value
 from .workflow_values import Workflow
 
 
@@ -617,13 +618,7 @@ class StatusProjection:
 
 
 def _to_jsonable(value: Any) -> Any:
-    if isinstance(value, Workflow):
-        return value.to_json()
-    if isinstance(value, dict):
-        return {key: _to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_to_jsonable(item) for item in value]
-    return value
+    return to_json_value(value)
 
 
 def _from_jsonable(value: Any) -> Any:

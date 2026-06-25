@@ -26,6 +26,12 @@ class ItemPacket:
     text: str
 
 
+
+@dataclass
+class ReviewArtifact:
+    title: str
+    packets: list[DraftPacket]
+
 @dataclass
 class ReviewDecision:
     action: Literal["approve", "request_changes"]
@@ -93,7 +99,79 @@ class TypedStepResult:
     count: int
 
 
+@dataclass
+class ContentCreationWorkflowInputs:
+    topic: str
+    k: int = 2
+
+
+@dataclass
+class SectionDraft:
+    title: str
+    text: str
+
+    def render(self) -> str:
+        return f"## {self.title}\n{self.text}"
+
+
 PROMPT_VERSION = "v1"
+
+
+def researcher(topic: str, name: str | None = None):
+    name = name or f"research_{topic.replace(' ', '_')}"
+    return agent(name, f"Research the following topic deeply: {topic}")
+
+
+def draft_outline(previous: DraftPacket | None = None, feedback: str | None = None):
+    return agent(
+        "draft_outline",
+        "Draft the outline. Use feedback if present.",
+        input={"previous": getattr(previous, "text", None), "feedback": feedback},
+        returns=DraftPacket,
+    )
+
+
+def draft_section(angle: Angle, research: str, section: Any):
+    return agent(
+        "draft_section",
+        f"Draft the section for {angle.title} from research:\n{research}",
+        input={"angle": angle, "research": research, "section": section},
+        returns=SectionDraft,
+    )
+
+
+def humanize(value):
+    if isinstance(value, SectionDraft):
+        return SectionDraft(title=value.title, text=f"{value.text} [human]")
+    return f"{value}\n[human]"
+
+
+@workflow
+async def async_dspy_like_content_creation_workflow(inputs: ContentCreationWorkflowInputs):
+    research = await researcher(inputs.topic)
+    angles = await agent(
+        "angles",
+        f"Generate {inputs.k} different angles to write a blog post on from the research:\n{research}",
+        returns=list[Angle],
+    )
+    angle = await select("select_angle", angles)
+    outline = await goal(
+        draft_outline,
+        lambda i, out: ask(f"outline_{i}", "Approved?", input=out, choice=["Yes", "No"], returns=GoalApproval),
+    )
+    sections = [
+        await goal(
+            pipeline(
+                lambda section: draft_section(angle, research, section),
+                humanize,
+            ),
+            lambda i, out: ask(f"section_{i}", "Approved?", input=out, choice=["Yes", "No"], returns=GoalApproval),
+            initial=outline,
+        )
+    ]
+    draft = "\n\n".join(section.render() for section in sections)
+    draft = humanize(draft)
+    return draft
 
 
 @workflow
@@ -132,6 +210,19 @@ async def goal_feedback_workflow(inputs):
     draft = await goal(draft_with_goal_feedback, approve_goal_candidate, max_iters=3)
     return draft.text
 
+
+
+@workflow
+async def dataclass_review_artifact_workflow(inputs):
+    artifact = ReviewArtifact(title="typed artifact", packets=[DraftPacket(text="draft")])
+    decision = await ask(
+        "Review typed artifact",
+        key="review_typed_artifact",
+        input=artifact,
+        choice=["approve", "request_changes"],
+        returns=ReviewDecision,
+    )
+    return {"action": decision.action}
 
 @workflow
 async def typed_input_workflow(inputs: TypedWorkflowInput):
@@ -415,6 +506,71 @@ def test_goal_criteria_can_return_feedback_and_yes_no_decision(tmp_path):
 
     assert result.status == "completed"
     assert result.result == "draft-2:make it sharper"
+
+
+def test_async_content_creation_shape_preserves_skylar_sketch_structure(tmp_path):
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        if request["name"].startswith("research_"):
+            return {"output": "research on workflow ergonomics"}
+        if request["name"] == "angles":
+            return {"output": [{"id": "a", "title": "Safe angle"}, {"id": "b", "title": "Sharp angle"}]}
+        if request["name"] == "draft_outline":
+            return {"output": {"text": "outline v1"}}
+        if request["name"] == "draft_section":
+            return {"output": {"title": "Section", "text": f"{request['input']['angle']['title']} from research"}}
+        raise AssertionError(request)
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+    first = engine.run_until_idle(
+        async_dspy_like_content_creation_workflow,
+        {"topic": "workflow ergonomics", "k": 2},
+        workflow_id="wf_async_dspy_like_content",
+    )
+
+    assert first.status == "waiting"
+    assert engine.workflow_status("wf_async_dspy_like_content")["review_requests"][0]["key"] == "select_angle"
+    assert calls[0]["name"] == "research_workflow_ergonomics"
+    assert calls[0]["returns"] == "json"
+    assert "research on workflow ergonomics" in calls[1]["rendered_prompt"]
+
+    engine.submit_operator_response(
+        workflow_id="wf_async_dspy_like_content",
+        key="select_angle",
+        payload={"id": "b"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-select"},
+    )
+    second = engine.drain("wf_async_dspy_like_content")
+
+    assert second.status == "waiting"
+    assert engine.workflow_status("wf_async_dspy_like_content")["review_requests"][1]["key"] == "outline_0"
+
+    engine.submit_operator_response(
+        workflow_id="wf_async_dspy_like_content",
+        key="outline_0",
+        payload={"decision": "Yes", "feedback": "good"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-outline"},
+    )
+    third = engine.drain("wf_async_dspy_like_content")
+
+    assert third.status == "waiting"
+    assert engine.workflow_status("wf_async_dspy_like_content")["review_requests"][2]["key"] == "section_0"
+
+    engine.submit_operator_response(
+        workflow_id="wf_async_dspy_like_content",
+        key="section_0",
+        payload={"decision": "Yes", "feedback": "ship"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-section"},
+    )
+    result = engine.drain("wf_async_dspy_like_content")
+
+    assert result.status == "completed"
+    assert "Sharp angle from research [human]" in result.result
+    assert result.result.endswith("[human]")
+    assert calls[-1]["input"]["angle"] == {"id": "b", "title": "Sharp angle"}
 
 
 def test_workflow_coerces_raw_json_to_typed_dataclass_input(tmp_path):
