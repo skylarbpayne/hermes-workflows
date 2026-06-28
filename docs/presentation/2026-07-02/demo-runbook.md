@@ -2,6 +2,8 @@
 
 Purpose: run a no-side-effect demo that proves the public model: `run` records/replays, `worker` owns continuation, `ask(...)` produces a typed Review Queue request, and dynamic workflows can generate child runs.
 
+Live recommendation: run Demo 1 and Demo 2 only. The coding/content/email/event lanes are portfolio proof and backup material, not the main stage path unless the audience asks for that lane.
+
 ## Preflight
 
 ```bash
@@ -191,6 +193,18 @@ What to point at:
 - timeline covers venue, promotion, direct outreach, comms, waivers, logistics, run-of-show, follow-up, and due dates/T-minus markers.
 - `approve_event_ops_packet` gates the local packet.
 - no emails, invites, posts, bookings, purchases, or waiver requests happen.
+
+## Dashboard / Review Queue note
+
+The Review Queue API/tool can read the repo-local presentation DB directly, and the verified fallback packet includes that transcript. The live Palmer dashboard plugin currently points at a separate clean runtime DB, not the repo-local presentation DB. Do not demo the public presentation run against the wrong DB alias.
+
+For a browser dashboard demo, pre-configure a temporary dashboard alias for:
+
+```text
+/Users/skylarpayne/code/hermes-workflows/.hermes/presentation-july2/workflows.sqlite
+```
+
+Otherwise, show `hermes-workflows status` plus the Review Queue transcript in `fallback-packet.md`.
 
 ## Known footgun
 

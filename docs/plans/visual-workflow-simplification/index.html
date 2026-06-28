@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hermes Workflows Simplification Map</title>
+<style>
+:root{
+  --bg:#0b1020; --panel:#11182d; --panel2:#0f172a; --ink:#e8eefc; --muted:#91a2c7;
+  --red:#fb7185; --orange:#f59e0b; --green:#34d399; --cyan:#22d3ee; --blue:#60a5fa; --violet:#a78bfa;
+  --line:#2b3a62; --card:#151f3a; --soft:#1d2a4d; --white:#fff;
+  --shadow: 0 18px 60px rgba(0,0,0,.38);
+}
+*{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at 20% 0%,#1e2b55 0,#0b1020 34%,#070b16 100%);color:var(--ink);font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;}
+main{max-width:1440px;margin:0 auto;padding:36px 36px 54px}.hero{display:grid;grid-template-columns:1.05fr .95fr;gap:22px;align-items:stretch;margin-bottom:22px}.hero-card{background:linear-gradient(145deg,rgba(21,31,58,.92),rgba(12,17,33,.92));border:1px solid rgba(148,163,184,.18);border-radius:28px;box-shadow:var(--shadow);padding:30px;position:relative;overflow:hidden}.hero-card:before{content:"";position:absolute;inset:-1px;background:radial-gradient(circle at 88% 0%,rgba(34,211,238,.25),transparent 38%),radial-gradient(circle at 0% 100%,rgba(167,139,250,.18),transparent 42%);pointer-events:none}h1{font-size:46px;line-height:1.02;margin:0 0 16px;letter-spacing:-.05em;position:relative}.subtitle{font-size:18px;color:#b8c5e6;line-height:1.5;max-width:880px;position:relative}.badge-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px;position:relative}.badge{font-size:13px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.72);border-radius:999px;padding:8px 12px;color:#cad7f5}.verdict{display:grid;gap:12px;position:relative}.verdict .big{font-size:26px;line-height:1.15;font-weight:760;letter-spacing:-.035em}.verdict .big span{color:var(--orange)}.callout{background:rgba(251,113,133,.12);border:1px solid rgba(251,113,133,.34);border-radius:18px;padding:16px;color:#ffd6dd;line-height:1.4}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:18px}.card{background:rgba(17,24,45,.86);border:1px solid rgba(148,163,184,.16);border-radius:24px;box-shadow:0 12px 36px rgba(0,0,0,.22);padding:22px}.span-4{grid-column:span 4}.span-5{grid-column:span 5}.span-7{grid-column:span 7}.span-8{grid-column:span 8}.span-12{grid-column:span 12}h2{font-size:22px;margin:0 0 14px;letter-spacing:-.03em}.kicker{font-size:12px;text-transform:uppercase;letter-spacing:.13em;color:var(--cyan);font-weight:800;margin-bottom:8px}.pill{display:inline-flex;align-items:center;gap:8px;font-weight:720;font-size:13px;padding:7px 10px;border-radius:999px;background:rgba(96,165,250,.13);border:1px solid rgba(96,165,250,.28);color:#d7e8ff}.pill.bad{background:rgba(251,113,133,.12);border-color:rgba(251,113,133,.36);color:#ffd5db}.pill.good{background:rgba(52,211,153,.11);border-color:rgba(52,211,153,.32);color:#c7ffeb}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}.stack{display:grid;gap:12px}.box{background:rgba(15,23,42,.64);border:1px solid rgba(148,163,184,.14);border-radius:18px;padding:14px}.box strong{display:block;margin-bottom:5px}.muted{color:var(--muted);line-height:1.45;font-size:14px}.flow{width:100%;height:440px;border-radius:18px;background:linear-gradient(180deg,rgba(15,23,42,.8),rgba(10,15,28,.94));border:1px solid rgba(148,163,184,.14)}.lane-title{font-weight:800;fill:#dbe7ff;font-size:14px}.node{rx:14;filter:drop-shadow(0 8px 16px rgba(0,0,0,.26))}.node-text{font-size:13px;font-weight:720;fill:#eef4ff}.node-sub{font-size:11px;fill:#a8b6d6}.arrow{stroke:#556894;stroke-width:2.4;fill:none;marker-end:url(#arrow)}.badline{stroke:var(--red)}.goodline{stroke:var(--green)}.phase-strip{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-top:12px}.phase{min-height:116px;border-radius:18px;border:1px solid rgba(148,163,184,.16);background:rgba(15,23,42,.55);padding:13px;position:relative}.phase b{display:block;font-size:13px;margin-bottom:7px}.phase .num{position:absolute;right:12px;top:10px;color:rgba(232,238,252,.22);font-size:24px;font-weight:900}.phase .txt{font-size:12.5px;line-height:1.35;color:#aebcdb}.risk-list{display:grid;gap:10px}.risk{display:grid;grid-template-columns:24px 1fr;gap:10px;align-items:start}.dot{width:12px;height:12px;border-radius:50%;margin-top:5px;background:var(--orange);box-shadow:0 0 0 5px rgba(245,158,11,.13)}.dot.red{background:var(--red);box-shadow:0 0 0 5px rgba(251,113,133,.13)}.dot.green{background:var(--green);box-shadow:0 0 0 5px rgba(52,211,153,.13)}.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#c8d8ff;background:#07101f;border:1px solid rgba(148,163,184,.16);border-radius:16px;padding:14px;white-space:pre-wrap;line-height:1.4}.footer{margin-top:20px;color:#7f8fb2;font-size:13px;display:flex;justify-content:space-between;gap:20px}.legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}.legend span{font-size:12px;color:#b8c5e6}.swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}@media(max-width:960px){main{padding:18px}.hero{grid-template-columns:1fr}.grid{display:block}.card{margin-bottom:16px}.phase-strip{grid-template-columns:1fr}.two-col{grid-template-columns:1fr}h1{font-size:34px}.flow{height:auto;min-height:440px}}
+</style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div class="hero-card">
+      <h1>Hermes Workflows: shrink the framework surface, move the ugly stuff down.</h1>
+      <p class="subtitle">A visual map of what is wrong, what the framework should own, and the safest PR sequence. This is the thing the Markdown plan needed to be: a reviewable artifact, not a wall of prose.</p>
+      <div class="badge-row">
+        <span class="badge">Audit artifact</span><span class="badge">Repo: hermes-workflows</span><span class="badge">No actor identities in core</span><span class="badge">Small-start migration</span>
+      </div>
+    </div>
+    <div class="hero-card verdict">
+      <div class="kicker">Verdict</div>
+      <div class="big">Skylar’s critique is right: the framework abstracted <span>too little of the painful stuff</span> and exposed too much ceremony.</div>
+      <div class="callout"><b>Call:</b> stop expanding the giant content/code/event workflows. First make the authoring surface boring: typed inputs, review requests, artifacts, prompt files, workspace-aware agents.</div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card span-7">
+      <div class="kicker">Boundary map</div>
+      <h2>Current wrong shape → target clean shape</h2>
+      <svg class="flow" viewBox="0 0 820 440" role="img" aria-label="Current versus target Hermes Workflows architecture map">
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#7c8eb8"/></marker>
+        </defs>
+        <text x="34" y="36" class="lane-title">today: workflow code owns framework jobs</text>
+        <rect x="32" y="60" width="172" height="62" fill="#2a1020" stroke="#fb7185" class="node"/><text x="50" y="86" class="node-text">raw JSON parsing</text><text x="50" y="106" class="node-sub">from_value / sanitizer</text>
+        <rect x="232" y="60" width="172" height="62" fill="#2a1020" stroke="#fb7185" class="node"/><text x="250" y="86" class="node-text">approver identity</text><text x="250" y="106" class="node-sub">human:* / agent:*</text>
+        <rect x="432" y="60" width="172" height="62" fill="#2a1020" stroke="#fb7185" class="node"/><text x="450" y="86" class="node-text">magic artifacts</text><text x="450" y="106" class="node-sub">dicts + render strings</text>
+        <rect x="632" y="60" width="150" height="62" fill="#2a1020" stroke="#fb7185" class="node"/><text x="650" y="86" class="node-text">inline prompts</text><text x="650" y="106" class="node-sub">Markdown f-strings</text>
+        <path d="M204 91 L232 91" class="arrow badline"/><path d="M404 91 L432 91" class="arrow badline"/><path d="M604 91 L632 91" class="arrow badline"/>
+        <rect x="248" y="158" width="320" height="74" fill="#341525" stroke="#fb7185" class="node"/><text x="274" y="188" class="node-text">316-line workflow bodies</text><text x="274" y="210" class="node-sub">business flow + rendering + policy + side-effect ledger</text>
+        <path d="M118 122 C118 150 300 140 330 158" class="arrow badline"/><path d="M318 122 C330 146 358 142 382 158" class="arrow badline"/><path d="M518 122 C508 146 458 143 438 158" class="arrow badline"/><path d="M704 122 C680 158 565 144 494 158" class="arrow badline"/>
+
+        <text x="34" y="282" class="lane-title">target: framework owns platform seams; workflows stay boring</text>
+        <rect x="32" y="306" width="150" height="62" fill="#0f2a25" stroke="#34d399" class="node"/><text x="50" y="332" class="node-text">typed input</text><text x="50" y="352" class="node-sub">dataclass / schema</text>
+        <rect x="206" y="306" width="150" height="62" fill="#10223d" stroke="#60a5fa" class="node"/><text x="224" y="332" class="node-text">ReviewRequest</text><text x="224" y="352" class="node-sub">actions + policy</text>
+        <rect x="380" y="306" width="150" height="62" fill="#201a3d" stroke="#a78bfa" class="node"/><text x="398" y="332" class="node-text">Artifact</text><text x="398" y="352" class="node-sub">metadata + render</text>
+        <rect x="554" y="306" width="150" height="62" fill="#13283a" stroke="#22d3ee" class="node"/><text x="572" y="332" class="node-text">prompt files</text><text x="572" y="352" class="node-sub">path + hashes</text>
+        <rect x="268" y="386" width="284" height="38" fill="#0f172a" stroke="#34d399" class="node"/><text x="292" y="411" class="node-text">small workflow: step → agent → ask → artifact</text>
+        <path d="M182 337 L206 337" class="arrow goodline"/><path d="M356 337 L380 337" class="arrow goodline"/><path d="M530 337 L554 337" class="arrow goodline"/><path d="M106 368 C120 395 220 402 268 405" class="arrow goodline"/><path d="M280 368 C300 382 324 392 354 386" class="arrow goodline"/><path d="M456 368 C452 380 446 384 436 386" class="arrow goodline"/><path d="M628 368 C610 394 568 400 552 405" class="arrow goodline"/>
+      </svg>
+      <div class="legend"><span><i class="swatch" style="background:#fb7185"></i>workflow-owned mess</span><span><i class="swatch" style="background:#34d399"></i>framework-owned seam</span><span><i class="swatch" style="background:#60a5fa"></i>review queue</span><span><i class="swatch" style="background:#a78bfa"></i>Hermes UI artifact</span></div>
+    </div>
+
+    <div class="card span-5">
+      <div class="kicker">Kill list</div>
+      <h2>Concepts to remove from the authoring surface</h2>
+      <div class="stack">
+        <div class="box"><span class="pill bad">kill</span><strong>`PUBLIC_APPROVAL_GATES`</strong><div class="muted">Derive review/gate state from runtime events. No upfront topology theater.</div></div>
+        <div class="box"><span class="pill bad">kill</span><strong>`approver`, `human:*`, `agent:*`</strong><div class="muted">Core should model review requests and provenance, not people/agent identity policy.</div></div>
+        <div class="box"><span class="pill bad">kill</span><strong>workflow-local `from_value`</strong><div class="muted">The framework parses raw JSON into typed workflow input before execution.</div></div>
+        <div class="box"><span class="pill bad">kill</span><strong>magic render dicts</strong><div class="muted">Use base Artifact + derived renderable types with required metadata.</div></div>
+      </div>
+    </div>
+
+    <div class="card span-12">
+      <div class="kicker">PR sequence</div>
+      <h2>Small-start migration, not a big-bang rewrite</h2>
+      <div class="phase-strip">
+        <div class="phase"><span class="num">1</span><b>Types</b><div class="txt">`JsonValue`, `JsonObject`, shared normalizer, field descriptions.</div></div>
+        <div class="phase"><span class="num">2</span><b>Input parsing</b><div class="txt">Engine parses raw JSON into dataclass/typed inputs before workflow body.</div></div>
+        <div class="phase"><span class="num">3</span><b>Review model</b><div class="txt">Neutral `ReviewRequest` / `ReviewResponse`; legacy approval as adapter alias.</div></div>
+        <div class="phase"><span class="num">4</span><b>Artifacts</b><div class="txt">Base artifact metadata + Markdown/JSON/File/Link/Python derived types.</div></div>
+        <div class="phase"><span class="num">5</span><b>Prompt files</b><div class="txt">`prompt_file()` with template/rendered hashes; move giant f-strings out.</div></div>
+        <div class="phase"><span class="num">6</span><b>Workspace agents</b><div class="txt">`agent(..., workspace_dir=...)`; optional worktree helper later.</div></div>
+        <div class="phase"><span class="num">7</span><b>Prune examples</b><div class="txt">Tiny starter examples; big lanes move to advanced/private/presentation.</div></div>
+      </div>
+    </div>
+
+    <div class="card span-4">
+      <div class="kicker">What framework owns</div>
+      <div class="risk-list">
+        <div class="risk"><span class="dot green"></span><div><strong>Input boundary</strong><div class="muted">raw → typed, with validation errors before decider execution.</div></div></div>
+        <div class="risk"><span class="dot green"></span><div><strong>Review boundary</strong><div class="muted">actions, schemas, policy, provenance; no approver identities.</div></div></div>
+        <div class="risk"><span class="dot green"></span><div><strong>Artifact boundary</strong><div class="muted">metadata, render descriptor, hash/reference, legacy normalization.</div></div></div>
+        <div class="risk"><span class="dot green"></span><div><strong>Execution boundary</strong><div class="muted">agent workspace dir, runner cwd, prompt template receipts.</div></div></div>
+      </div>
+    </div>
+
+    <div class="card span-4">
+      <div class="kicker">What workflow owns</div>
+      <div class="risk-list">
+        <div class="risk"><span class="dot"></span><div><strong>Business sequence</strong><div class="muted">what happens first, second, next; not how UI should render it.</div></div></div>
+        <div class="risk"><span class="dot"></span><div><strong>Domain decisions</strong><div class="muted">what needs review, what counts as done, what outputs matter.</div></div></div>
+        <div class="risk"><span class="dot"></span><div><strong>Small structured state</strong><div class="muted">typed inputs/outputs, not giant Markdown packets assembled inline.</div></div></div>
+      </div>
+    </div>
+
+    <div class="card span-4">
+      <div class="kicker">What UI/plugin owns</div>
+      <div class="risk-list">
+        <div class="risk"><span class="dot red"></span><div><strong>Rendering</strong><div class="muted">display declared artifact descriptors; stop guessing from random keys.</div></div></div>
+        <div class="risk"><span class="dot red"></span><div><strong>Adapter policy</strong><div class="muted">auth/session/user provenance stays outside core workflow semantics.</div></div></div>
+        <div class="risk"><span class="dot red"></span><div><strong>Progressive disclosure</strong><div class="muted">show active review/tasks first; hide implementation metadata until needed.</div></div></div>
+      </div>
+    </div>
+
+    <div class="card span-8">
+      <div class="kicker">Target authoring feel</div>
+      <h2>Boring code is the win</h2>
+      <div class="code">@workflow
+async def repo_change(inputs: RepoInput):
+    status = await inspect_repo(inputs)
+
+    plan = await agent(
+        "plan_change",
+        prompt=prompt_file("prompts/plan_change.md").render(inputs=inputs, status=status),
+        workspace_dir=inputs.repo_path,
+        returns=MarkdownArtifact,
+    )
+
+    decision = await ask(
+        "Review the plan",
+        input=plan,
+        returns=ReviewDecision,
+        actions=("approve", "request_changes"),
+        policy={"side_effect": "repo_write"},
+    )
+
+    if decision.action != "approve":
+        return {"status": "changes_requested", "feedback": decision.feedback}
+
+    return await agent("implement_change", prompt=..., workspace_dir=inputs.repo_path)</div>
+    </div>
+
+    <div class="card span-4">
+      <div class="kicker">Immediate call</div>
+      <h2>Do this next</h2>
+      <div class="stack">
+        <div class="box"><span class="pill good">now</span><strong>PR 1: JsonValue + field descriptions</strong><div class="muted">Small, mechanical, stabilizes boundaries.</div></div>
+        <div class="box"><span class="pill good">next</span><strong>PR 2: typed input parser</strong><div class="muted">Deletes `from_value` from normal workflows.</div></div>
+        <div class="box"><span class="pill bad">not now</span><strong>More giant workflow demos</strong><div class="muted">That’s polishing the wrong layer. Don’t feed the monster.</div></div>
+      </div>
+    </div>
+  </section>
+  <div class="footer"><span>Source plan: docs/plans/2026-06-23-workflow-framework-simplification-audit.md</span><span>Generated for visual review · 2026-06-23</span></div>
+</main>
+</body>
+</html>

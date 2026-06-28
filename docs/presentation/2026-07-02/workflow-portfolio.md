@@ -35,17 +35,16 @@ Core line: agents do the work; workflows own the state, checks, receipts, and ap
    - Then show the workflow: worktree, implementation, real local validation evidence, diff, review, PR gate.
    - Then broaden to content/communication/event lanes as proof it is a general operating pattern, not a coding-only trick.
 
-## What needs implementation polish next
+## What needs polish next
 
-Priority order:
+Priority order for July 2:
 
-1. Run the updated coding-review lane with a real local validator so the review packet contains curl/screenshot or request/response evidence.
-2. Improve artifact rendering / Review Queue display for diff, validation, PR draft, and markdown packets — likely issue #55.
-3. Add request-changes iteration loop — likely issue #61.
-4. Build the private communication-intelligence workflow: unredacted accessible comms → extracted people/projects/commitments → Obsidian/Skyvault proposal notes → gated sends/tasks/archives.
-5. Extend that workflow beyond email to iMessage and any other accessible channel.
-6. Tighten the live demo packet into one command sequence and one fallback sequence.
-7. Rewrite the blogpost after the hero demo output exists.
+1. Use `reviewable-draft` + `dynamic-workflow-return` as the live hero path. Do **not** try to live-demo every portfolio lane.
+2. If showing the dashboard live, pre-configure a temporary dashboard DB alias for `.hermes/presentation-july2/workflows.sqlite`; otherwise use the CLI/Review Queue transcript in `fallback-packet.md`.
+3. Run the coding-review lane only as a backup technical demo if the audience specifically wants code-agent workflow detail.
+4. Build the private communication-intelligence workflow after the talk: unredacted accessible comms → extracted people/projects/commitments → Obsidian/Skyvault proposal notes → gated sends/tasks/archives.
+5. Request-changes iteration loop remains useful follow-up work, but it should not block July 2 unless the talk explicitly promises live iteration.
+6. Rewrite/trim the blogpost only after Skylar approves the hero path and title.
 
 ## Side-effect rules for July 2
 
