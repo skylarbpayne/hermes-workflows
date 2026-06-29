@@ -222,28 +222,6 @@ def _status_packet(
     return packet
 
 
-def _dashboard_decision_by_id() -> str | None:
-    """Return the server-configured label dashboard decisions may use."""
-    env_value = os.getenv("HERMES_WORKFLOWS_DASHBOARD_DECISION_BY")
-    if env_value and env_value.strip():
-        return env_value.strip()
-    try:
-        from hermes_cli.config import cfg_get, load_config  # type: ignore
-
-        config = load_config()
-        for key in ("dashboard_decision_by_id", "decision_by"):
-            value = cfg_get(config, "plugins", "entries", "hermes-workflows-approvals", key, default=None)
-            if value and str(value).strip():
-                return str(value).strip()
-    except Exception:
-        pass
-    return None
-
-
-def _dashboard_decision_actor(configured_actor: str) -> str:
-    """Return the server-configured actor label to store as decision provenance."""
-    return configured_actor
-
 
 def _workflow_count_for_dashboard_db(path: str) -> int:
     db_path = Path(path).expanduser()
@@ -1476,12 +1454,12 @@ async def respond_operator_step(body: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/review-requests/response")
 async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
-    decision_by = _dashboard_decision_by_id()
-    if not decision_by:
-        raise HTTPException(
-            status_code=403,
-            detail="Dashboard review responses require server-configured dashboard_decision_by_id.",
-        )
+    # Typed Review Queue/operator responses are input values, not approval
+    # decisions. The browser still cannot supply trusted provenance, but local
+    # dashboard responses should not require operators to configure or invent an
+    # approver identity just to answer select(...)/ask(...) gates. Stamp the
+    # response with server-generated dashboard event provenance and keep the
+    # typed payload free of spoofable by/source fields.
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
     workflow_id = str(body.get("workflow_id") or "").strip()
     key = str(body.get("key") or "").strip()
@@ -1490,9 +1468,7 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
     raw_payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
     if not raw_payload:
         raise HTTPException(status_code=400, detail="review response payload is required")
-    decision_actor = _dashboard_decision_actor(decision_by)
     payload = {key: value for key, value in raw_payload.items() if key not in {"by", "source"}}
-    payload["by"] = decision_actor
     message_id = f"dashboard:{uuid.uuid4()}"
 
     def record_and_resume() -> tuple[Any, dict[str, Any]]:
@@ -1502,8 +1478,6 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
             key=key,
             payload=payload,
             source={
-                "kind": "human",
-                "id": decision_actor,
                 "channel": "hermes-dashboard",
                 "message_id": message_id,
             },
@@ -1525,6 +1499,7 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"review response/resume failed: {type(exc).__name__}: {exc}") from exc
     receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
+    receipt_payload.pop("by", None)
     return {
         "success": True,
         "db_alias": db_alias,
@@ -1536,15 +1511,9 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/approvals/decision")
 async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
-    # Dashboard approvals derive human provenance from server-side plugin
-    # configuration, never from untrusted browser JSON. After recording the
-    # decision they immediately resume trusted local workflow code.
-    decision_by = _dashboard_decision_by_id()
-    if not decision_by:
-        raise HTTPException(
-            status_code=403,
-            detail="Dashboard approvals require server-configured dashboard_decision_by_id.",
-        )
+    # Dashboard approval buttons are local operator actions, not an identity or
+    # permission system. Ignore browser-supplied actor/provenance fields and
+    # stamp only dashboard event provenance for audit/replay.
     db_alias, db_path = _resolve_dashboard_db(body.get("db"))
     action = str(body.get("action") or "approve").strip().lower()
     if action not in {"approve", "reject"}:
@@ -1554,16 +1523,12 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
     if not workflow_id or not key:
         raise HTTPException(status_code=400, detail="workflow_id and key are required")
 
-    decision_actor = _dashboard_decision_actor(decision_by)
     message_id = f"dashboard:{uuid.uuid4()}"
     decision = ApprovalDecisionInput(
         workflow_id=workflow_id,
         key=key,
         action=action,
-        by=decision_actor,
         source={
-            "kind": "human",
-            "id": decision_actor,
             "channel": "hermes-dashboard",
             "message_id": message_id,
         },
@@ -1589,6 +1554,7 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"approval decision/resume failed: {type(exc).__name__}: {exc}") from exc
     receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
+    receipt_payload.pop("by", None)
     return {
         "success": True,
         "db_alias": db_alias,
