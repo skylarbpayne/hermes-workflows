@@ -36,7 +36,7 @@ class ApprovalDecision(Mapping[str, Any]):
     """
 
     action: str
-    by: str
+    by: str | None = None
     source: dict[str, Any] | None = None
     note: str | None = None
     reason: str | None = None
@@ -61,7 +61,9 @@ class ApprovalDecision(Mapping[str, Any]):
         return self.direct_feedback or self.reason or self.note or self.message or self.comment
 
     def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"action": self.action, "by": self.by}
+        data: dict[str, Any] = {"action": self.action}
+        if self.by is not None:
+            data["by"] = self.by
         for key in ("note", "reason", "message", "comment"):
             value = getattr(self, key)
             if value is not None:
@@ -92,8 +94,8 @@ class ApprovalDecisionInput:
     workflow_id: str
     key: str
     action: str
-    by: str
-    source: dict[str, Any]
+    by: str | None = None
+    source: dict[str, Any] | None = None
     note: str | None = None
     reason: str | None = None
     idempotency_key: str | None = None
@@ -106,7 +108,7 @@ class ApprovalReceipt:
     workflow_id: str
     key: str
     action: str
-    by: str
+    by: str | None
     source: dict[str, Any]
     status: str
     waiting_on: str | None

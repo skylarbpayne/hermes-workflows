@@ -437,7 +437,9 @@ class WorkflowEngine:
 
         self._ensure_writable("submit approval decisions")
         sanitized_source = _sanitize_approval_source(decision.source)
-        payload: dict[str, Any] = {"action": decision.action, "by": decision.by}
+        payload: dict[str, Any] = {"action": decision.action}
+        if decision.by:
+            payload["by"] = decision.by
         if decision.note is not None:
             payload["note"] = _sanitize_approval_text(decision.note)
         if decision.reason is not None:
@@ -2851,7 +2853,7 @@ class ApprovalClient:
         source = _validate_approval_source(key, decision, decision_event.get("source"))
         return ApprovalDecision(
             action=str(decision.get("action") or ""),
-            by=str(decision.get("by") or ""),
+            by=decision.get("by") if isinstance(decision.get("by"), str) and decision.get("by") else None,
             source=source,
             note=decision.get("note"),
             reason=decision.get("reason"),

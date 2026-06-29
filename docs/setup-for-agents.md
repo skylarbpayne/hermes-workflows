@@ -238,17 +238,15 @@ plugins:
           project_root: /absolute/path/to/workspace
           python_paths:
             - /absolute/path/to/hermes-workflows/src
-      dashboard_decision_by_id: operator
 ```
 
-The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Review Queue responses/approval decisions default to `resume=true` so a person can click/respond and see the run continue. Remote or untrusted adapters may pass `resume=false` for record-only behavior; a resident Workflow Worker remains the continuation path in that mode.
+The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Dashboard approval decisions and typed Review Queue responses from `ask(...)` / `select(...)` do not use dashboard approver ids. The backend strips browser-supplied actor/provenance fields and stamps dashboard event provenance. Review Queue responses/approval decisions default to `resume=true` so a person can click/respond and see the run continue. Remote or untrusted adapters may pass `resume=false` for record-only behavior; a resident Workflow Worker remains the continuation path in that mode.
 
 Environment fallback for local smokes:
 
 ```bash
 export HERMES_WORKFLOWS_DBS='{"default":"/absolute/path/to/workspace/.hermes/workflows.sqlite"}'
 export HERMES_WORKFLOWS_CATALOG='[{"name":"reviewable-draft","workflow_ref":"hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow","db":"default","project_root":"/absolute/path/to/workspace"}]'
-export HERMES_WORKFLOWS_DASHBOARD_DECISION_BY=operator
 ```
 
 Dashboard routes intentionally use configured aliases instead of arbitrary DB paths. That keeps the Hermes process from becoming a local SQLite file browser.
