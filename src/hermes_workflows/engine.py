@@ -3153,6 +3153,10 @@ def _from_jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         if value.get("__hermes_type__") == "Workflow":
             return Workflow.from_json(value)
+        if value.get("__hermes_type__") == "Artifact":
+            from .artifacts import Artifact
+
+            return Artifact.from_json(value)
         return {key: _from_jsonable(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_from_jsonable(item) for item in value]

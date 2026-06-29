@@ -57,6 +57,8 @@ def coerce_workflow_input(value: Any, input_type: Any) -> Any:
     origin = get_origin(input_type)
     if origin is not None:
         return _coerce_generic(value, input_type)
+    if _is_artifact_type(input_type):
+        return _coerce_artifact(value)
     if is_dataclass(input_type) and isinstance(input_type, type):
         return _coerce_dataclass(value, input_type)
     if input_type in (str, int, float, bool):
@@ -100,6 +102,24 @@ def _safe_type_hints(target: Any) -> dict[str, Any]:
         return get_type_hints(target, include_extras=True)
     except Exception:
         return dict(getattr(target, "__annotations__", {}) or {})
+
+
+def _is_artifact_type(input_type: Any) -> bool:
+    try:
+        from .artifacts import Artifact
+    except Exception:  # pragma: no cover - import-cycle defense.
+        return False
+    return input_type is Artifact
+
+
+def _coerce_artifact(value: Any) -> Any:
+    from .artifacts import Artifact
+
+    if isinstance(value, Artifact):
+        return value
+    if isinstance(value, Mapping) and value.get("__hermes_type__") == "Artifact":
+        return Artifact.from_json(dict(value))
+    raise TypeError(f"expected Artifact input, got {type(value).__name__}")
 
 
 def _coerce_generic(value: Any, annotation: Any) -> Any:
