@@ -1485,6 +1485,70 @@ def test_dashboard_run_dag_preserves_pipeline_item_lanes(tmp_path, monkeypatch):
     assert (draft_b, humanize_a) not in edges
 
 
+def test_dashboard_run_dag_pairs_parallel_draft_sections_with_their_review_gates():
+    api = load_dashboard_api()
+    status = {
+        "workflow_id": "wf_section_reviews",
+        "events": [
+            {"seq": 1, "type": "WorkflowStarted", "payload": {}},
+            {"seq": 2, "type": "StepRequested", "payload": {"key": "draft:intro", "step_name": "draft section"}},
+            {"seq": 3, "type": "StepRequested", "payload": {"key": "draft:workflow", "step_name": "draft section"}},
+            {"seq": 4, "type": "ParallelWaiting", "payload": {"kind": "parallel", "pending": ["draft:intro", "draft:workflow"]}},
+            {
+                "seq": 5,
+                "type": "StepCompleted",
+                "payload": {"key": "draft:intro", "output": {"title": "Intro", "text": "Five agents made one mess."}},
+            },
+            {
+                "seq": 6,
+                "type": "StepCompleted",
+                "payload": {"key": "draft:workflow", "output": {"title": "Workflow", "text": "Promote repeated failures into gates."}},
+            },
+            {
+                "seq": 7,
+                "type": "StepRequested",
+                "payload": {
+                    "key": "review:intro",
+                    "step_name": "Approved?",
+                    "completion_mode": "operator",
+                    "request": {
+                        "key": "review:intro",
+                        "kind": "operator.request.v1",
+                        "prompt": "Approved?",
+                        "artifact": {"kind": "markdown", "title": "Intro", "markdown": "## Intro\nFive agents made one mess."},
+                    },
+                },
+            },
+            {"seq": 8, "type": "ApprovalRequested", "payload": {"key": "review:intro", "kind": "operator.request.v1", "prompt": "Approved?"}},
+            {
+                "seq": 9,
+                "type": "StepRequested",
+                "payload": {
+                    "key": "review:workflow",
+                    "step_name": "Approved?",
+                    "completion_mode": "operator",
+                    "request": {
+                        "key": "review:workflow",
+                        "kind": "operator.request.v1",
+                        "prompt": "Approved?",
+                        "artifact": {"kind": "markdown", "title": "Workflow", "markdown": "## Workflow\nPromote repeated failures into gates."},
+                    },
+                },
+            },
+            {"seq": 10, "type": "ApprovalRequested", "payload": {"key": "review:workflow", "kind": "operator.request.v1", "prompt": "Approved?"}},
+            {"seq": 11, "type": "ParallelWaiting", "payload": {"kind": "parallel", "pending": ["review:intro", "review:workflow"]}},
+        ],
+    }
+
+    dag = api._run_dag_payload(status, [])
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+
+    assert ("draft:intro", "review:intro") in edges
+    assert ("draft:workflow", "review:workflow") in edges
+    assert ("draft:intro", "review:workflow") not in edges
+    assert ("draft:workflow", "review:intro") not in edges
+
+
 def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):
     from tests.test_dynamic_workflow_return import dynamic_processor_pipeline
 

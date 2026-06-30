@@ -844,14 +844,30 @@ def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
 def _payload_contains_value(container: Any, value: Any) -> bool:
     """Return true when a request payload concretely carries a prior output.
 
-    Pipeline stages feed each item output into the next stage request. When the
-    run history shows that exact value inside a later request payload, the DAG
-    can keep that lane's edge narrow instead of connecting every previous
-    parallel item to every next-stage item.
+    Pipeline stages and per-item review gates often feed each item output into
+    the next request. The next request is not always the exact raw value: review
+    gates commonly wrap a draft into a Markdown artifact. Match transformed
+    payloads by requiring the later payload to contain the meaningful pieces of
+    the prior output, then only narrow the graph edge when exactly one parent
+    matches.
     """
 
     if container == value:
         return True
+    if isinstance(value, str):
+        if isinstance(container, str):
+            return value in container
+        if isinstance(container, dict):
+            return any(_payload_contains_value(item, value) for item in container.values())
+        if isinstance(container, (list, tuple)):
+            return any(_payload_contains_value(item, value) for item in container)
+        return False
+    if isinstance(value, dict):
+        meaningful_values = [item for item in value.values() if item not in (None, "", [], {})]
+        return bool(meaningful_values) and all(_payload_contains_value(container, item) for item in meaningful_values)
+    if isinstance(value, (list, tuple)):
+        meaningful_items = [item for item in value if item not in (None, "", [], {})]
+        return bool(meaningful_items) and all(_payload_contains_value(container, item) for item in meaningful_items)
     if isinstance(container, dict):
         return any(_payload_contains_value(item, value) for item in container.values())
     if isinstance(container, (list, tuple)):
