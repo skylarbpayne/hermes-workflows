@@ -41,8 +41,8 @@ waiting workflow
   -> adapter displays the prompt, schema/actions, and redacted artifact
   -> human submits an approve/reject decision or typed response
   -> adapter captures provenance
-  -> adapter records the response/decision; default is resume=true
-  -> run continues immediately, unless the adapter explicitly passed resume=false for record-only behavior
+  -> adapter records the response/decision; default is resume=true for trusted local adapters
+  -> operators verify returned status plus command history; remote/untrusted adapters pass resume=false for record-only behavior
 ```
 
 For `ask(...)`, adapters record typed responses matching the request schema. For approval gates, adapters record approve/reject decisions. They should not invent a parallel review path. Remote or untrusted callbacks should pass `resume=false` rather than running workflow code in the gateway process.
@@ -66,7 +66,7 @@ The plugin adds profile-aware Review Queue operations without changing core:
 - render review cards in Hermes chat/dashboard
 - capture human/channel/message provenance automatically
 - record typed review responses and approval decisions
-- resume immediately by default, with explicit `resume=false` available for record-only adapters
+- return observable post-response status by default for trusted local adapters, with explicit `resume=false` available for record-only adapters
 
 Implemented public tool names:
 
@@ -85,14 +85,14 @@ hwf-approval:v1:approve:<structured-token>
 hwf-approval:v1:reject:<structured-token>
 ```
 
-The plugin should remain a thin adapter over `hermes_workflows`. It should not own validation, workflow execution policy, or worker lifecycle. Review actions default to `resume=true` because that is what operators expect: click/respond and the run continues. Remote or untrusted adapters can still pass `resume=false` when they need record-only behavior and a resident Workflow Worker will continue later.
+The plugin should remain a thin adapter over `hermes_workflows`. It should not own validation, workflow execution policy, or worker lifecycle. Review actions default to `resume=true` for trusted local adapters, but the user-facing truth is the returned workflow status plus command history. Remote or untrusted adapters can pass `resume=false` when they need record-only behavior and a resident Workflow Worker will continue later.
 
 ## Continuation after review
 
 After an adapter records a response or approval with `resume=false`, the workflow may remain waiting/runnable until the trusted local worker sees the durable transition. The normal follow-up path is not `resume-trusted` or a gateway-side engine call. It is the resident worker for the same registry/DB:
 
 ```bash
-hermes-workflows worker --config .hermes/workflows.registry.json
+hermes-workflows runner run --config .hermes/workflows.registry.json
 ```
 
 For smokes and controlled repairs, bound the worker:

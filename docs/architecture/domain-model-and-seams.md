@@ -113,7 +113,7 @@ Provider credentials are owned by the provider CLI or the Hermes/operator enviro
 
 ### Approval decisions
 
-Approval adapters record human provenance. Review actions default to immediate continuation (`resume=true`) because operators expect the run to move after they respond. A remote or untrusted adapter can pass `resume=false` for record-only behavior, then the resident `hermes-workflows worker --config ...` process observes the durable response/decision and continues the workflow from the same registry/DB.
+Approval adapters record human provenance. Review actions may use `resume=true` when the adapter is trusted to run local workflow code, but operators should treat the returned workflow status and command history as the truth. A remote or untrusted adapter can pass `resume=false` for record-only behavior, then the resident `hermes-workflows runner run --config ...` process observes the durable response/decision and continues the workflow from the same registry/DB.
 
 ## Seams and extension points
 

@@ -328,7 +328,7 @@ def _artifact_descriptor(artifact: Any) -> dict[str, Any]:
 
 def _runtime_semantics() -> dict[str, Any]:
     return {
-        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally; review responses and approval decisions resume trusted local workflow code when requested.",
+        "execution_environment": "Workflow code is imported and executed in the Python process that owns the WorkflowEngine for the configured workflow state source. The dashboard API route runs that engine locally for trusted sources; review responses and approval decisions return observable workflow status and command history.",
         "state_source": "The dashboard uses the configured workflow DB alias as its state source. Raw SQLite paths are intentionally hidden from browser responses; the review UI shows the active source instead of making users choose debug databases.",
         "agent_requests": "Worker-capable steps are queued, claimed, executed, and completed with step output/provenance. agent(...) calls run through the engine's configured agent_runner when present; runner requests and live responses are persisted as step metadata for replay.",
         "review_responses": "Human input requests are completed by trusted review surfaces setting typed step output with provenance.",
@@ -1108,7 +1108,7 @@ def _risk_for_approval(approval: dict[str, Any]) -> dict[str, str]:
         return {"level": "high", "reason": "The approval appears to authorize an external, destructive, financial, or credential-affecting action."}
     if any(word in text for word in ("email", "calendar", "schedule", "deploy", "post", "message")):
         return {"level": "medium", "reason": "The approval may affect people, publishing, scheduling, or deployment state."}
-    return {"level": "low", "reason": "Approval records human provenance and resumes the trusted local workflow; no obvious external/destructive keyword was detected."}
+    return {"level": "low", "reason": "Approval records human provenance and creates observable continuation state; no obvious external/destructive keyword was detected."}
 
 
 def _review_request_schema_descriptor(schema_id: str) -> dict[str, Any]:

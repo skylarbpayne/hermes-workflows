@@ -295,6 +295,6 @@ A review adapter is just an input surface over durable workflow state. It should
 2. Render each request's `prompt`, `artifact`/`input`, `request_schema`, and action choices.
 3. Collect a payload that matches the request schema.
 4. Record it with `WorkflowEngine.submit_operator_response(...)` or the `workflow_review_respond` plugin tool, including `by`, `channel`, and `message_id`/`event_id` provenance.
-5. Let the default `resume=True` continue the run immediately when the adapter is trusted to run local workflow code. If the adapter is remote/untrusted, pass `resume=False` and rely on the resident Workflow Worker for continuation.
+5. Use `resume=True` only when the adapter is trusted to run local workflow code, and still show the returned workflow status/command history as the operator truth. If the adapter is remote/untrusted, pass `resume=False` and rely on the resident Workflow Worker for continuation.
 
 Do not invent a second source of truth. The workflow DB stays canonical; the adapter only displays waiting requests and records typed responses with provenance.
