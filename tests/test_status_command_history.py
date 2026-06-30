@@ -27,6 +27,9 @@ def test_status_command_history_is_opt_in_and_shows_failed_command_details(tmp_p
     assert result.status == "failed"
     default_status = engine.workflow_status("wf_status_history", recent_events=1)
     assert default_status["pending_commands"] == []
+    assert default_status["runtime_state"]["primary"] == "failed"
+    assert default_status["runtime_state"]["terminal"] is True
+    assert default_status["runtime_state"]["command"] is None
     assert "command_history" not in default_status
 
     status = engine.workflow_status(
@@ -38,6 +41,7 @@ def test_status_command_history_is_opt_in_and_shows_failed_command_details(tmp_p
     )
 
     assert status["pending_commands"] == []
+    assert status["runtime_state"]["primary"] == "failed"
     assert status["command_history_mode"] == "failed"
     assert status["command_history_truncated"] is False
     assert len(status["command_history"]) == 1
@@ -77,6 +81,7 @@ def test_status_cli_accepts_commands_failed_flag(capsys, tmp_path):
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["workflow_id"] == "wf_status_history_cli"
+    assert payload["runtime_state"]["primary"] == "failed"
     assert payload["command_history_mode"] == "failed"
     assert [command["status"] for command in payload["command_history"]] == ["failed"]
     assert payload["command_history"][0]["last_error"]["type"] == "ValueError"

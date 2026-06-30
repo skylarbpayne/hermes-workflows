@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .types import to_json_value
 from .workflow_values import Workflow
+
+
+TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
 
 
 class JsonCodec:
@@ -104,6 +108,8 @@ class StatusProjection:
         steps = self._step_summaries(events)
         approvals = self._approval_summaries(events)
         human_inputs = self._operator_step_summaries(events, steps=steps)
+        review_requests = self._review_request_summaries(human_inputs, approvals=approvals)
+        diagnostics = self._command_diagnostics(pending_commands)
         status = {
             "workflow_id": row["id"],
             "workflow_name": row["workflow_name"],
@@ -118,11 +124,17 @@ class StatusProjection:
             "event_count": len(events),
             "events": events[-recent_events:],
             "pending_commands": pending_commands,
-            "diagnostics": self._command_diagnostics(pending_commands),
+            "diagnostics": diagnostics,
+            "runtime_state": self._runtime_state_projection(
+                row,
+                pending_commands=pending_commands,
+                diagnostics=diagnostics,
+                review_requests=review_requests,
+            ),
             "child_workflows": child_workflows,
             "approvals": approvals,
             "operator_steps": human_inputs,
-            "review_requests": self._review_request_summaries(human_inputs, approvals=approvals),
+            "review_requests": review_requests,
             "steps": steps,
         }
         if command_history is not None:
@@ -176,6 +188,91 @@ class StatusProjection:
         truncated = len(rows) > limit
         commands = self._enrich_command_payloads([self._command_payload(row) for row in rows[:limit]])
         return [_history_command_payload(command, payload_chars=payload_chars) for command in commands], truncated
+
+    def _runtime_state_projection(
+        self,
+        row: sqlite3.Row,
+        *,
+        pending_commands: List[Dict[str, Any]],
+        diagnostics: List[Dict[str, Any]],
+        review_requests: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        workflow_status = str(row["status"])
+        waiting_on = row["waiting_on"]
+        terminal = workflow_status in TERMINAL_WORKFLOW_STATUSES
+
+        diagnostic_by_command: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for diagnostic in diagnostics:
+            key = (str(diagnostic.get("command_type") or ""), str(diagnostic.get("command_key") or ""))
+            diagnostic_by_command.setdefault(key, []).append(diagnostic)
+
+        runnable_commands = [
+            command
+            for command in pending_commands
+            if "runnable_work" in set(command.get("diagnostic_labels") or [])
+        ]
+        current_command = runnable_commands[0] if runnable_commands else (pending_commands[0] if pending_commands else None)
+
+        if terminal:
+            primary = workflow_status
+            reason = f"workflow_{workflow_status}"
+            label = workflow_status.capitalize()
+            next_action = None
+        elif runnable_commands:
+            command = runnable_commands[0]
+            lease_expires_at = command.get("lease_expires_at")
+            if command.get("status") == "running" and isinstance(lease_expires_at, int) and lease_expires_at <= now:
+                primary = "stuck"
+                reason = "lease_expired"
+                label = "Stuck"
+                next_action = "Restart or repair the runner; this command lease has expired."
+            elif command.get("status") == "running":
+                primary = "running"
+                reason = "runnable_command_claimed"
+                label = "Running"
+                next_action = "Wait for the runner heartbeat/lease to advance or expire."
+            else:
+                primary = "queued"
+                reason = "runnable_command_unclaimed"
+                label = "Queued"
+                next_action = "Start or repair the runner for this workflow source."
+        elif waiting_on:
+            wait = _runtime_wait_summary(str(waiting_on))
+            is_human_wait = wait.get("kind") in {"approval", "operator"} or _has_pending_review_requests(review_requests)
+            primary = "waiting_on_human" if is_human_wait else "waiting"
+            reason = str(wait.get("reason") or "waiting_on_external_input")
+            label = "Waiting on Skylar" if primary == "waiting_on_human" else "Waiting"
+            next_action = "Submit the requested human response." if primary == "waiting_on_human" else "Wait for the external dependency to resolve."
+        else:
+            primary = "running" if workflow_status == "running" else workflow_status
+            reason = "workflow_non_terminal_no_active_command"
+            label = "Running" if primary == "running" else str(primary).replace("_", " ").capitalize()
+            next_action = "Inspect recent events; workflow is non-terminal with no active command or wait."
+
+        command_payload = None
+        if current_command is not None:
+            command_payload = _runtime_command_summary(
+                current_command,
+                diagnostics=diagnostic_by_command.get(
+                    (str(current_command.get("type") or ""), str(current_command.get("key") or "")),
+                    [],
+                ),
+            )
+
+        return {
+            "schema_version": "runtime_state.v1",
+            "primary": primary,
+            "label": label,
+            "reason": reason,
+            "workflow_status": workflow_status,
+            "waiting_on": waiting_on,
+            "terminal": terminal,
+            "current_wait": _runtime_wait_summary(str(waiting_on)) if waiting_on else None,
+            "command": command_payload,
+            "worker": None,
+            "next_action": next_action,
+        }
 
     def _terminal_reason(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as con:
@@ -665,6 +762,82 @@ def _command_matches_current_wait(command: Dict[str, Any], waiting_on: str, expe
     if not waiting_on.startswith(multi_prefix):
         return False
     return approval_key in {part for part in waiting_on[len(multi_prefix) :].split(",") if part}
+
+
+def _runtime_command_summary(command: Dict[str, Any], *, diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "id": command.get("id"),
+        "type": command.get("type"),
+        "key": command.get("key"),
+        "status": command.get("status"),
+        "created_at": command.get("created_at"),
+        "updated_at": command.get("updated_at"),
+        "attempts": command.get("attempts"),
+        "claimed_by": command.get("claimed_by"),
+        "lease_expires_at": command.get("lease_expires_at"),
+        "last_error": command.get("last_error"),
+        "diagnostic_labels": list(command.get("diagnostic_labels") or []),
+        "diagnostics": diagnostics,
+    }
+
+
+def _has_pending_review_requests(review_requests: list[dict[str, Any]]) -> bool:
+    return any(request.get("status") == "waiting" for request in review_requests)
+
+
+def _runtime_wait_summary(waiting_on: str) -> dict[str, Any]:
+    if waiting_on.startswith("signal:approval.decision:"):
+        return {
+            "kind": "approval",
+            "key": waiting_on.removeprefix("signal:approval.decision:"),
+            "reason": "waiting_on_approval_decision",
+            "raw": waiting_on,
+        }
+    if waiting_on.startswith("signals:approval.decision:"):
+        return {
+            "kind": "approval",
+            "keys": [part for part in waiting_on.removeprefix("signals:approval.decision:").split(",") if part],
+            "reason": "waiting_on_approval_decision",
+            "raw": waiting_on,
+        }
+    if waiting_on.startswith("signal:operator.response:"):
+        return {
+            "kind": "operator",
+            "key": waiting_on.removeprefix("signal:operator.response:"),
+            "reason": "waiting_on_operator_response",
+            "raw": waiting_on,
+        }
+    if waiting_on.startswith("signal:agent.completed:"):
+        return {
+            "kind": "agent",
+            "key": waiting_on.removeprefix("signal:agent.completed:"),
+            "reason": "waiting_on_agent_completion",
+            "raw": waiting_on,
+        }
+    if waiting_on.startswith("child:"):
+        return {
+            "kind": "child_workflow",
+            "key": waiting_on.removeprefix("child:"),
+            "reason": "waiting_on_child_workflow",
+            "raw": waiting_on,
+        }
+    if waiting_on.startswith("child-gather:"):
+        return {
+            "kind": "child_workflow_gather",
+            "count": waiting_on.removeprefix("child-gather:"),
+            "reason": "waiting_on_child_workflow_gather",
+            "raw": waiting_on,
+        }
+    if waiting_on.startswith("gather:") or waiting_on.startswith("parallel:") or waiting_on.startswith("group:"):
+        kind, _, value = waiting_on.partition(":")
+        return {
+            "kind": kind,
+            "key": value,
+            "reason": f"waiting_on_{kind}",
+            "raw": waiting_on,
+        }
+    return {"kind": "unknown", "reason": "waiting_on_external_input", "raw": waiting_on}
+
 
 def _agent_request_public_field(payload: Dict[str, Any], field: str) -> Any:
     if payload.get(field) is not None:
