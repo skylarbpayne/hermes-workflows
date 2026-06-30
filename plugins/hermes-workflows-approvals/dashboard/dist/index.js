@@ -429,11 +429,12 @@
     }
     function submitPayload(payload) {
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) { setUi(Object.assign({}, ui, { error: "Payload must be a JSON object" })); return; }
+      const requestId = "dashboard:" + ((globalThis.crypto && globalThis.crypto.randomUUID && globalThis.crypto.randomUUID()) || (Date.now() + "-" + Math.random().toString(16).slice(2)));
       setUi(Object.assign({}, ui, { busy: true, error: null, done: null }));
       SDK.fetchJSON(API + "/review-requests/response", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ db: props.db, workflow_id: step.workflow_id, key: step.key, payload: payload, resume: true })
+        body: JSON.stringify({ db: props.db, workflow_id: step.workflow_id, key: step.key, payload: payload, resume: true, idempotency_key: requestId })
       }).then(function (data) {
         setUi(Object.assign({}, ui, { busy: false, error: null, done: data.receipt && data.receipt.status || "recorded" }));
         if (props.onResponded) props.onResponded();

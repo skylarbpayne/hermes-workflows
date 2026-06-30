@@ -1511,7 +1511,10 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
     if not raw_payload:
         raise HTTPException(status_code=400, detail="review response payload is required")
     payload = {key: value for key, value in raw_payload.items() if key not in {"by", "source"}}
-    message_id = f"dashboard:{uuid.uuid4()}"
+    raw_idempotency_key = str(body.get("idempotency_key") or body.get("event_id") or "").strip()
+    message_id = raw_idempotency_key or f"dashboard:{uuid.uuid4()}"
+    if not message_id.startswith("dashboard:"):
+        message_id = f"dashboard:{message_id}"
 
     def record_and_resume() -> tuple[Any, dict[str, Any]]:
         _ensure_workflow_project_on_path(db_path)

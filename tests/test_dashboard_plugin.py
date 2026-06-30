@@ -182,6 +182,38 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def dashboard_operator_response_counts(db: Path, workflow_id: str, key: str) -> dict[str, int | str | None]:
+    engine = WorkflowEngine(db)
+    with engine._connect() as con:
+        signal_count = con.execute(
+            """
+            SELECT COUNT(*) FROM workflow_events
+            WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
+            """,
+            (workflow_id, f"signal:operator.response:{key}"),
+        ).fetchone()[0]
+        step_count = con.execute(
+            """
+            SELECT COUNT(*) FROM workflow_events
+            WHERE workflow_id = ? AND type = 'StepCompleted' AND key = ?
+            """,
+            (workflow_id, key),
+        ).fetchone()[0]
+        command_rows = con.execute(
+            """
+            SELECT status FROM workflow_commands_outbox
+            WHERE workflow_id = ? AND type = 'run_workflow' AND key = 'workflow:run'
+            """,
+            (workflow_id,),
+        ).fetchall()
+    return {
+        "signals": signal_count,
+        "steps": step_count,
+        "commands": len(command_rows),
+        "command_status": command_rows[0]["status"] if command_rows else None,
+    }
+
+
 def configure_test_dbs(
     monkeypatch,
     tmp_path,
@@ -230,6 +262,7 @@ def test_dashboard_plugin_manifest_assets_and_backend_are_present():
     assert "approval." + "approver" not in index_js
     assert "approver" + ":" not in index_js
     assert "window.prompt" not in index_js
+    assert "idempotency_key" in index_js
     assert "dashboard-user" not in index_js
 
 
@@ -734,6 +767,12 @@ def test_dashboard_review_response_does_not_require_or_invent_approver_identity(
 
     assert receipt["success"] is True
     assert "by" not in receipt["receipt"]
+    assert dashboard_operator_response_counts(db, "wf_dashboard_ask_response", "review_dashboard_payload") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
     completed = WorkflowEngine(db).drain("wf_dashboard_ask_response")
     assert completed.status == "completed"
     assert completed.result["response"] == {"action": "approve"}
@@ -743,6 +782,131 @@ def test_dashboard_review_response_does_not_require_or_invent_approver_identity(
         "channel": "hermes-dashboard",
         "message_id": signal["payload"]["source"]["message_id"],
     }
+
+
+def test_dashboard_review_response_idempotency_key_replay_does_not_duplicate_continuation(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_ask_workflow,
+        {},
+        workflow_id="wf_dashboard_ask_idempotent_response",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_ask_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+    body = {
+        "db": "runtime-smoke",
+        "workflow_id": "wf_dashboard_ask_idempotent_response",
+        "key": "review_dashboard_payload",
+        "payload": {"action": "approve"},
+        "idempotency_key": "review-response-idempotency-key-1",
+    }
+
+    first = run(api.respond_review_request(body))
+    second = run(api.respond_review_request(body))
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert dashboard_operator_response_counts(db, "wf_dashboard_ask_idempotent_response", "review_dashboard_payload") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+    signal = [event for event in WorkflowEngine(db).events("wf_dashboard_ask_idempotent_response") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["source"]["message_id"] == "dashboard:review-response-idempotency-key-1"
+
+    conflicting_body = dict(body)
+    conflicting_body["payload"] = {"action": "request_changes", "feedback": "same key different payload"}
+    with pytest.raises(Exception, match="idempotency key was reused with a different decision/response"):
+        run(api.respond_review_request(conflicting_body))
+    assert dashboard_operator_response_counts(db, "wf_dashboard_ask_idempotent_response", "review_dashboard_payload") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+
+def test_dashboard_review_response_conflicting_retry_does_not_duplicate_continuation(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_ask_workflow,
+        {},
+        workflow_id="wf_dashboard_ask_conflicting_response",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_ask_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_ask_conflicting_response",
+                "key": "review_dashboard_payload",
+                "payload": {"action": "approve"},
+            }
+        )
+    )
+    with pytest.raises(Exception, match="already has a recorded decision/response"):
+        run(
+            api.respond_review_request(
+                {
+                    "db": "runtime-smoke",
+                    "workflow_id": "wf_dashboard_ask_conflicting_response",
+                    "key": "review_dashboard_payload",
+                    "payload": {"action": "request_changes", "feedback": "conflicting retry"},
+                }
+            )
+        )
+
+    assert dashboard_operator_response_counts(db, "wf_dashboard_ask_conflicting_response", "review_dashboard_payload") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+
+def test_dashboard_review_response_rolls_back_if_continuation_enqueue_fails(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_ask_workflow,
+        {},
+        workflow_id="wf_dashboard_ask_atomic_rollback",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_ask_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("forced enqueue failure")
+
+    monkeypatch.setattr(api.WorkflowEngine, "_enqueue_workflow_run_row", fail_enqueue)
+
+    with pytest.raises(Exception, match="forced enqueue failure"):
+        run(
+            api.respond_review_request(
+                {
+                    "db": "runtime-smoke",
+                    "workflow_id": "wf_dashboard_ask_atomic_rollback",
+                    "key": "review_dashboard_payload",
+                    "payload": {"action": "approve"},
+                }
+            )
+        )
+
+    assert dashboard_operator_response_counts(db, "wf_dashboard_ask_atomic_rollback", "review_dashboard_payload") == {
+        "signals": 0,
+        "steps": 0,
+        "commands": 1,
+        "command_status": "completed",
+    }
+    status = WorkflowEngine(db).workflow_status("wf_dashboard_ask_atomic_rollback")
+    assert status["status"] == "waiting"
+    assert status["waiting_on"] == "signal:operator.response:review_dashboard_payload"
+    assert status["review_requests"][0]["status"] == "waiting"
 
 
 def test_dashboard_review_response_with_feedback_is_not_silent_approval(tmp_path, monkeypatch):

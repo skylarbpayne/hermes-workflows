@@ -927,6 +927,182 @@ def test_operator_response_can_be_recorded_without_inline_resume(tmp_path):
     assert result.result == {"angle_id": "resumable", "rationale": "proves decoupled response recording"}
 
 
+def _operator_response_invariant_counts(engine: WorkflowEngine, workflow_id: str, key: str) -> dict[str, int | str | None]:
+    with engine._connect() as con:
+        signal_count = con.execute(
+            """
+            SELECT COUNT(*) FROM workflow_events
+            WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
+            """,
+            (workflow_id, f"signal:operator.response:{key}"),
+        ).fetchone()[0]
+        step_count = con.execute(
+            """
+            SELECT COUNT(*) FROM workflow_events
+            WHERE workflow_id = ? AND type = 'StepCompleted' AND key = ?
+            """,
+            (workflow_id, key),
+        ).fetchone()[0]
+        command_rows = con.execute(
+            """
+            SELECT status FROM workflow_commands_outbox
+            WHERE workflow_id = ? AND type = 'run_workflow' AND key = 'workflow:run'
+            """,
+            (workflow_id,),
+        ).fetchall()
+    return {
+        "signals": signal_count,
+        "steps": step_count,
+        "commands": len(command_rows),
+        "command_status": command_rows[0]["status"] if command_rows else None,
+    }
+
+
+def test_operator_response_records_signal_and_continuation_atomically(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(
+        ask_angle_workflow,
+        {"angles": ["inspectable", "resumable"]},
+        workflow_id="wf_operator_atomic_response",
+    )
+
+    assert first.status == "waiting"
+    receipt = engine.submit_operator_response(
+        workflow_id="wf_operator_atomic_response",
+        key="choose_angle",
+        payload={"angle_id": "inspectable", "rationale": "visible continuation command"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-atomic"},
+        idempotency_key="operator-response-atomic-1",
+        resume=False,
+    )
+
+    assert receipt.status == "response_recorded"
+    assert _operator_response_invariant_counts(engine, "wf_operator_atomic_response", "choose_angle") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+
+def test_idempotent_operator_response_replay_does_not_duplicate_continuation(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        ask_angle_workflow,
+        {"angles": ["inspectable", "resumable"]},
+        workflow_id="wf_operator_idempotent_response",
+    )
+    kwargs = {
+        "workflow_id": "wf_operator_idempotent_response",
+        "key": "choose_angle",
+        "payload": {"angle_id": "resumable", "rationale": "same response replayed"},
+        "source": {"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-idempotent"},
+        "idempotency_key": "operator-response-idempotent-1",
+        "resume": False,
+    }
+
+    first = engine.submit_operator_response(**kwargs)
+    second = engine.submit_operator_response(**kwargs)
+
+    assert first.status == "response_recorded"
+    assert second.status == "response_recorded"
+    assert _operator_response_invariant_counts(engine, "wf_operator_idempotent_response", "choose_angle") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+    with pytest.raises(ValueError, match="idempotency key was reused with a different decision/response"):
+        engine.submit_operator_response(
+            workflow_id="wf_operator_idempotent_response",
+            key="choose_angle",
+            payload={"angle_id": "inspectable", "rationale": "same key different payload"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-idempotent"},
+            idempotency_key="operator-response-idempotent-1",
+            resume=False,
+        )
+    assert _operator_response_invariant_counts(engine, "wf_operator_idempotent_response", "choose_angle") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+
+def test_conflicting_operator_response_does_not_enqueue_second_continuation(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        ask_angle_workflow,
+        {"angles": ["inspectable", "resumable"]},
+        workflow_id="wf_operator_conflicting_response",
+    )
+    engine.submit_operator_response(
+        workflow_id="wf_operator_conflicting_response",
+        key="choose_angle",
+        payload={"angle_id": "inspectable", "rationale": "first response wins"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-conflict-1"},
+        idempotency_key="operator-response-conflict-1",
+        resume=False,
+    )
+
+    with pytest.raises(ValueError, match="already has a recorded decision/response"):
+        engine.submit_operator_response(
+            workflow_id="wf_operator_conflicting_response",
+            key="choose_angle",
+            payload={"angle_id": "resumable", "rationale": "conflicting second response"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-conflict-2"},
+            idempotency_key="operator-response-conflict-2",
+            resume=False,
+        )
+
+    assert _operator_response_invariant_counts(engine, "wf_operator_conflicting_response", "choose_angle") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+
+def test_operator_response_rolls_back_if_continuation_enqueue_fails(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        ask_angle_workflow,
+        {"angles": ["inspectable", "resumable"]},
+        workflow_id="wf_operator_atomic_rollback",
+    )
+
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("forced enqueue failure")
+
+    monkeypatch.setattr(engine, "_enqueue_workflow_run_row", fail_enqueue)
+
+    with pytest.raises(RuntimeError, match="forced enqueue failure"):
+        engine.submit_operator_response(
+            workflow_id="wf_operator_atomic_rollback",
+            key="choose_angle",
+            payload={"angle_id": "inspectable", "rationale": "should roll back"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-rollback"},
+            idempotency_key="operator-response-rollback-1",
+            resume=False,
+        )
+
+    assert _operator_response_invariant_counts(engine, "wf_operator_atomic_rollback", "choose_angle") == {
+        "signals": 0,
+        "steps": 0,
+        "commands": 1,
+        "command_status": "completed",
+    }
+    status = engine.workflow_status("wf_operator_atomic_rollback")
+    assert status["status"] == "waiting"
+    assert status["waiting_on"] == "signal:operator.response:choose_angle"
+    assert status["operator_steps"][0]["status"] == "waiting"
+
+
 def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
