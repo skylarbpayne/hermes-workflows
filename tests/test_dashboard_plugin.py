@@ -1402,6 +1402,21 @@ def test_dashboard_frontend_renders_special_artifact_types_without_serving_priva
     assert ".hwf-file-reference" in style_css
 
 
+def test_dashboard_frontend_markdown_review_artifacts_are_primary_not_forced_raw_pre():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+
+    assert "function ArtifactReviewRawDump" in index_js
+    assert 'render.render === "inline-markdown"' in index_js
+    assert 'e("details", { className: "hwf-raw-json" }' in index_js
+    assert 'e("summary", null, "Raw JSON")' in index_js
+    assert 'e(ArtifactReviewRawDump, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact })' in index_js
+    assert 'e(ArtifactReviewRawDump, { render: step.artifact_render, value: step.artifact_preview || step.artifact })' in index_js
+    assert 'e(ArtifactReviewRawDump, { render: what.artifact_render || approval.artifact_render, value: what.artifact || approval.artifact_preview })' in index_js
+    assert 'e(ArtifactInlinePreview, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact }),\n            e("pre", null, pretty(approval.artifact_preview || approval.artifact))' not in index_js
+    assert 'e(ArtifactInlinePreview, { render: step.artifact_render, value: step.artifact_preview || step.artifact }),\n            e("pre", null, pretty(step.artifact_preview || step.artifact))' not in index_js
+    assert 'e(ArtifactInlinePreview, { render: what.artifact_render || approval.artifact_render, value: what.artifact || approval.artifact_preview }),\n          e("pre", null, pretty(what.artifact || approval.artifact_preview))' not in index_js
+
+
 def test_dashboard_frontend_exposes_custom_artifact_renderer_fallback_and_diff_preview():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
     style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()

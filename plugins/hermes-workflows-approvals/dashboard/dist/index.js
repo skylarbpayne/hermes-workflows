@@ -178,6 +178,17 @@
     return null;
   }
 
+  function ArtifactReviewRawDump(props) {
+    const render = props.render || {};
+    const value = props.value;
+    if (render.render === "inline-markdown") {
+      return e("details", { className: "hwf-raw-json" },
+        e("summary", null, "Raw JSON"),
+        e("pre", null, pretty(value)));
+    }
+    return e("pre", null, pretty(value));
+  }
+
   function MarkdownArtifactPreview(props) {
     const lines = String(props.markdown || "").split(/\r?\n/);
     const nodes = [];
@@ -450,7 +461,7 @@
             e("div", { className: "hwf-section-title" }, "Artifact preview"),
             e(ArtifactRenderSummary, { render: approval.artifact_render }),
             e(ArtifactInlinePreview, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact }),
-            e("pre", null, pretty(approval.artifact_preview || approval.artifact)))),
+            e(ArtifactReviewRawDump, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact }))),
         e(ApprovalActions, { db: props.db, approval: approval, onDecided: props.onRefresh })));
   }
 
@@ -562,7 +573,7 @@
             e("div", { className: "hwf-section-title" }, "Artifact preview"),
             e(ArtifactRenderSummary, { render: step.artifact_render }),
             e(ArtifactInlinePreview, { render: step.artifact_render, value: step.artifact_preview || step.artifact }),
-            e("pre", null, pretty(step.artifact_preview || step.artifact)))),
+            e(ArtifactReviewRawDump, { render: step.artifact_render, value: step.artifact_preview || step.artifact }))),
         e(HumanInputActions, { db: props.db, step: step, onResponded: props.onRefresh })));
   }
 
@@ -626,7 +637,7 @@
           e("p", null, what.prompt || approval.prompt || approval.key),
           e(ArtifactRenderSummary, { render: what.artifact_render || approval.artifact_render }),
           e(ArtifactInlinePreview, { render: what.artifact_render || approval.artifact_render, value: what.artifact || approval.artifact_preview }),
-          e("pre", null, pretty(what.artifact || approval.artifact_preview))),
+          e(ArtifactReviewRawDump, { render: what.artifact_render || approval.artifact_render, value: what.artifact || approval.artifact_preview })),
         e("div", null,
           e("div", { className: "hwf-section-title" }, "Consequence"),
           e("p", { className: "hwf-consequence" }, data.consequence || approval.consequence),
