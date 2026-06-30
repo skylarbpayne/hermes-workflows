@@ -1093,7 +1093,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
     def parents_for_request(request_payload: dict[str, Any], request_id: str | None = None) -> set[str]:
         parents = set(frontier or {"workflow:start"})
 
-        def best_matching_parent_ids(candidates: set[str]) -> set[str]:
+        def scored_matching_parent_ids(candidates: set[str]) -> list[tuple[int, str]]:
             candidate_ids = set(candidates)
             if request_id is not None:
                 candidate_ids.discard(request_id)
@@ -1109,23 +1109,84 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
                         best_score = max(best_score, score)
                 if best_score:
                     scored.append((best_score, parent_id))
+            return sorted(scored, reverse=True)
+
+        def best_matching_parent_ids(candidates: set[str], *, include_same_stage_fan_in: bool = True) -> set[str]:
+            scored = scored_matching_parent_ids(candidates)
             if not scored:
                 return set()
-            max_score = max(score for score, _ in scored)
-            return {parent_id for score, parent_id in scored if score == max_score}
+            top_score, top_parent = scored[0]
+            top_node = nodes.get(top_parent, {})
+            top_kind = top_node.get("kind")
+            top_label = top_node.get("label")
+            if include_same_stage_fan_in and top_kind == "step" and top_label:
+                same_stage = {
+                    parent_id
+                    for score, parent_id in scored
+                    if score > 0
+                    and nodes.get(parent_id, {}).get("kind") == top_kind
+                    and nodes.get(parent_id, {}).get("label") == top_label
+                }
+                if same_stage:
+                    return same_stage
+            return {parent_id for score, parent_id in scored if score == top_score}
+
+        def review_feedback_parent_ids() -> set[str]:
+            feedback_text = ""
+            raw_args = request_payload.get("args") if isinstance(request_payload.get("args"), list) else []
+            raw_request_value = request_payload.get("request")
+            raw_request = raw_request_value if isinstance(raw_request_value, dict) else {}
+            raw_input = raw_request.get("input")
+            candidates = [raw_input]
+            candidates.extend(arg.get("input") for arg in raw_args if isinstance(arg, dict))
+            for candidate in candidates:
+                if isinstance(candidate, dict) and isinstance(candidate.get("feedback"), str):
+                    feedback_text = candidate["feedback"].strip()
+                    break
+            if not feedback_text:
+                return set()
+            review_nodes = {
+                node_id
+                for node_id, node in nodes.items()
+                if node.get("completion_mode") in {"operator", "approval"}
+                and ("SignalReceived" in node.get("event_types", []) or "StepCompleted" in node.get("event_types", []))
+            }
+            matches = {
+                node_id
+                for node_id in review_nodes
+                for value in match_values_by_node.get(node_id, [])
+                if isinstance(value, str) and value.strip() == feedback_text
+            }
+            return matches
+
+        feedback_matches = review_feedback_parent_ids()
+        if len(feedback_matches) == 1:
+            return feedback_matches
 
         if len(parents) > 1:
-            matching_parents = best_matching_parent_ids(parents)
-            if len(matching_parents) == 1:
+            is_review_request = str(request_payload.get("completion_mode") or "") in {"operator", "approval"}
+            raw_request_for_kind = request_payload.get("request")
+            if isinstance(raw_request_for_kind, dict) and str(raw_request_for_kind.get("kind") or "").startswith(("operator.", "human_input.")):
+                is_review_request = True
+            matching_parents = best_matching_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
+            if matching_parents:
                 return matching_parents
         if any(nodes.get(parent_id, {}).get("kind") == "gather" for parent_id in parents):
             return parents
 
-        # Retry/rejoin patterns can leave only the most recent branch in the
-        # frontier even though a later per-item request belongs to an older
-        # approved branch. If exactly one prior review node's artifact/output
-        # matches the new request, use that edge instead of drawing the
-        # misleading "latest node -> every next item" fan-out.
+        # Prefer data lineage over the current control frontier. This keeps
+        # final/output steps attached to the draft they consume, not to an old
+        # approval or selection node that merely happened to be the latest
+        # frontier after retries and fan-ins.
+        non_review_nodes = {
+            node_id
+            for node_id, node in nodes.items()
+            if node.get("completion_mode") not in {"operator", "approval"}
+        }
+        data_matches = best_matching_parent_ids(non_review_nodes)
+        if data_matches:
+            return data_matches
+
         review_nodes = {
             node_id
             for node_id, node in nodes.items()
@@ -1133,12 +1194,9 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             and ("SignalReceived" in node.get("event_types", []) or "StepCompleted" in node.get("event_types", []))
         }
         review_matches = best_matching_parent_ids(review_nodes)
-        if len(review_matches) == 1:
+        if review_matches:
             return review_matches
 
-        global_matches = best_matching_parent_ids(set(match_values_by_node))
-        if len(global_matches) == 1:
-            return global_matches
         return parents
 
     for event in events:
@@ -1175,6 +1233,10 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
                 flush_sequential_until(node_id)
         elif event_type in {"ApprovalRequested", "AgentRequested"}:
             if node_id in pending_requests:
+                if any(payload.get(field) not in (None, "", [], {}) for field in ("artifact", "request", "args")):
+                    refined_parents = parents_for_request(payload, node_id)
+                    if refined_parents:
+                        pending_parents[node_id] = refined_parents
                 continue
             flush_sequential_until()
             if node_id not in frontier or "StepRequested" not in nodes[node_id].get("event_types", []):

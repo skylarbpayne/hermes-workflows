@@ -1594,6 +1594,18 @@ def test_dashboard_run_dag_shows_review_feedback_and_pairs_retries_and_rejoins()
             {"seq": 19, "type": "StepCompleted", "payload": {"key": "review:intro:retry", "completion_mode": "operator", "output": {"action": "approve"}}},
             {"seq": 20, "type": "StepRequested", "payload": {"key": "humanize:intro", "step_name": "humanize section", "args": [{"input": {"title": "Intro", "text": "Five agents made one smaller mess."}}]}},
             {"seq": 21, "type": "StepRequested", "payload": {"key": "humanize:workflow", "step_name": "humanize section", "args": [{"input": {"title": "Workflow", "text": "Promote repeated failures into gates."}}]}},
+            {"seq": 22, "type": "ParallelWaiting", "payload": {"kind": "parallel", "pending": ["humanize:intro", "humanize:workflow"]}},
+            {"seq": 23, "type": "StepCompleted", "payload": {"key": "humanize:intro", "output": {"title": "Intro", "text": "Five agents made one smaller, sharper mess."}}},
+            {"seq": 24, "type": "StepCompleted", "payload": {"key": "humanize:workflow", "output": {"title": "Workflow", "text": "Repeated failures become gates."}}},
+            {
+                "seq": 25,
+                "type": "StepRequested",
+                "payload": {"key": "humanize:draft", "step_name": "humanize draft", "args": [{"input": [{"title": "Intro", "text": "Five agents made one smaller, sharper mess."}, {"title": "Workflow", "text": "Repeated failures become gates."}]}]},
+            },
+            {"seq": 26, "type": "StepCompleted", "payload": {"key": "humanize:draft", "output": "FINAL DRAFT"}},
+            {"seq": 27, "type": "StepRequested", "payload": {"key": "content_artifacts", "step_name": "content_artifacts", "args": [{"input": {"draft": "FINAL DRAFT"}}]}},
+            {"seq": 28, "type": "StepCompleted", "payload": {"key": "content_artifacts", "output": ["artifact"]}},
+            {"seq": 29, "type": "WorkflowCompleted", "payload": {"artifact_count": 1}},
         ],
     }
 
@@ -1605,9 +1617,16 @@ def test_dashboard_run_dag_shows_review_feedback_and_pairs_retries_and_rejoins()
     assert nodes["review:intro"]["review_feedback"] == "less AI please"
     assert ("review:intro", "draft:intro:retry") in edges
     assert ("review:workflow", "draft:intro:retry") not in edges
-    assert ("review:intro:retry", "humanize:intro") in edges
-    assert ("review:workflow", "humanize:workflow") in edges
-    assert ("review:intro:retry", "humanize:workflow") not in edges
+    assert ("draft:intro:retry", "humanize:intro") in edges
+    assert ("draft:workflow", "humanize:workflow") in edges
+    assert ("review:intro:retry", "humanize:intro") not in edges
+    assert ("review:workflow", "humanize:workflow") not in edges
+    assert ("draft:intro:retry", "humanize:workflow") not in edges
+    assert ("humanize:intro", "humanize:draft") in edges
+    assert ("humanize:workflow", "humanize:draft") in edges
+    assert ("humanize:draft", "content_artifacts") in edges
+    assert ("content_artifacts", "workflow:completed") in edges
+    assert ("draft:intro:retry", "workflow:completed") not in edges
 
 
 def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):
