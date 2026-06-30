@@ -169,7 +169,7 @@ Input:
 }
 ```
 
-`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters; the response still records a durable operator response and should leave a visible continuation command for a trusted `runner run` / `runner once` process to consume.
+`resume` defaults to `true` for trusted local adapters, but the operator truth is still the returned post-resume status plus command history. Pass `resume=false` for remote/untrusted record-only adapters; the response still records a durable operator response and leaves a visible continuation command for a trusted `runner run` / `runner once` process to consume.
 
 ### `workflow_approval_decide`
 
@@ -190,7 +190,7 @@ Input:
 }
 ```
 
-`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters; the decision should still be followed by an observable continuation path through a trusted runner, not by pretending a chat callback completed work invisibly.
+`resume` defaults to `true` for trusted local adapters, but the decision must still produce observable status/command history. Pass `resume=false` for remote/untrusted record-only adapters; the decision should still be followed by an observable continuation path through a trusted runner, not by pretending a chat callback completed work invisibly.
 
 The product surface is the Review Queue plus `workflow_review_requests_list`, `workflow_review_respond`, and `workflow_approval_decide`.
 

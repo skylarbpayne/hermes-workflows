@@ -264,6 +264,9 @@ def test_dashboard_plugin_manifest_assets_and_backend_are_present():
     assert "window.prompt" not in index_js
     assert "idempotency_key" in index_js
     assert "dashboard-user" not in index_js
+    assert "resumes trusted workflow code" not in index_js
+    assert "resumes the workflow" not in index_js
+    assert "Record and resume" not in index_js
 
 
 def test_dashboard_run_rows_truncate_long_ids_and_waiting_keys_without_vertical_wrap():
@@ -1921,7 +1924,7 @@ def test_dashboard_plugin_frontend_exposes_full_workflows_console_navigation():
         "Human input",
         "Submit input",
         "What you are approving",
-        "Record and resume",
+        "Record and continue",
         "View approval",
         "Run history",
         "Source",

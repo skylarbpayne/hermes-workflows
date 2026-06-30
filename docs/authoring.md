@@ -254,7 +254,7 @@ A workflow run records state and queues work. A resident Workflow Worker drains 
 
 ```bash
 hermes-workflows run my-alias --config .hermes/workflows.registry.json --id wf_example
-hermes-workflows worker --config .hermes/workflows.registry.json --worker-id local-worker
+hermes-workflows runner run --config .hermes/workflows.registry.json --worker-id local-worker
 ```
 
 For `agent(..., model=...)`, configure the worker runner/model mapping. For Hermes CLI one-shot style runners, the existing adapter path is:

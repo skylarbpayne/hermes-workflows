@@ -1608,7 +1608,7 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         "consequence": card["consequence"],
         "decision_semantics": {
             "resume": True,
-            "label": "Record and resume",
+            "label": "Record and continue",
             "description": "The dashboard records approve/reject with server-derived human provenance and creates an inspectable continuation; trusted runners consume the queued workflow work.",
         },
         "timeline": timeline,
