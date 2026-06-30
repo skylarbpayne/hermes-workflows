@@ -40,6 +40,54 @@
     return "hwf-muted";
   }
 
+  function runtimeStateLabel(runtime) {
+    runtime = runtime || {};
+    if (runtime.label) return runtime.label;
+    const primary = runtime.primary || "unknown";
+    const command = runtime.command || {};
+    const worker = runtime.worker || {};
+    const workerId = worker.worker_id || command.claimed_by;
+    if (primary === "waiting_on_human") return "Waiting on Skylar";
+    if (primary === "queued") return "Queued — no worker has claimed this yet";
+    if (primary === "running" && workerId) return "Running — claimed by " + workerId;
+    if (primary === "running") return "Running";
+    if (primary === "stuck") return "Stuck — " + String(runtime.reason || command.last_error || "unknown reason").replace(/_/g, " ");
+    return String(primary).replace(/_/g, " ").replace(/^./, function (ch) { return ch.toUpperCase(); });
+  }
+
+  function runtimeStateClass(runtime) {
+    const primary = runtime && runtime.primary;
+    if (["completed"].includes(primary)) return "hwf-ok";
+    if (["failed", "cancelled", "stuck"].includes(primary)) return "hwf-bad";
+    if (["queued", "running", "waiting", "waiting_on_human"].includes(primary)) return "hwf-warn";
+    return "hwf-muted";
+  }
+
+  function RuntimeStatePill(props) {
+    const runtime = props.runtime;
+    if (!runtime) return null;
+    return e(Pill, { label: runtimeStateLabel(runtime), className: runtimeStateClass(runtime) });
+  }
+
+  function RuntimeFacts(props) {
+    const runtime = props.runtime;
+    if (!runtime) return null;
+    const command = runtime.command || {};
+    const worker = runtime.worker || {};
+    const source = runtime.source || {};
+    const env = worker.environment || {};
+    return e("div", { className: "hwf-runtime-facts" },
+      e("div", { className: "hwf-section-title" }, "Runtime facts"),
+      e("div", { className: "hwf-meta" },
+        e(RuntimeStatePill, { runtime: runtime }),
+        source.alias && e(Pill, { label: "Source: " + source.alias }),
+        command.status && e(Pill, { label: "command: " + command.status }),
+        command.type && e(Pill, { label: command.type }),
+        worker.worker_id && e(Pill, { label: "worker: " + worker.worker_id }),
+        env.workspace_relation && e(Pill, { label: "workspace: " + env.workspace_relation.replace(/_/g, " ") })),
+      runtime.next_action && e("p", { className: "hwf-muted" }, runtime.next_action));
+  }
+
   function riskClass(level) {
     if (level === "high") return "hwf-risk-high";
     if (level === "medium") return "hwf-risk-medium";
@@ -386,6 +434,7 @@
           e(CardTitle, null, approval.headline || approval.prompt || approval.key),
           e("div", { className: "hwf-meta" },
             e(Pill, { label: approval.status || "waiting", className: statusClass(approval.status) }),
+            e(RuntimeStatePill, { runtime: approval.runtime_state }),
             e(Pill, { label: "risk: " + (risk.level || "low"), className: riskClass(risk.level) }),
             approval.workflow_name && e(Pill, { label: approval.workflow_name }))),
         e("div", { className: "hwf-row-actions" },
@@ -497,6 +546,7 @@
           e(CardTitle, null, step.headline || step.prompt || step.key),
           e("div", { className: "hwf-meta" },
             e(Pill, { label: step.status || "waiting", className: statusClass(step.status) }),
+            e(RuntimeStatePill, { runtime: step.runtime_state }),
             e(Pill, { label: "Human input" }),
             e(Pill, { label: "risk: " + (risk.level || "low"), className: riskClass(risk.level) }),
             step.workflow_name && e(Pill, { label: step.workflow_name }),
@@ -1041,6 +1091,7 @@
           e("code", { className: "hwf-run-id", title: run.workflow_id }, shortId(run.workflow_id)),
           e("div", { className: "hwf-run-signals" },
             e(Pill, { label: run.status, className: statusClass(run.status) }),
+            e(RuntimeStatePill, { runtime: run.runtime_state }),
             e("span", { className: "hwf-muted hwf-waiting-on", title: run.waiting_on || "not waiting" }, run.waiting_on || "not waiting")),
           e("div", { className: "hwf-run-tail" },
             e(Button, { variant: "outline", onClick: function () { props.onInspect(run); } }, "Inspect run")))));
@@ -1074,9 +1125,11 @@
           runStatus && e("div", null,
             e("div", { className: "hwf-meta" },
               e(Pill, { label: runStatus.status, className: statusClass(runStatus.status) }),
+              e(RuntimeStatePill, { runtime: runStatus.runtime_state }),
               e(Pill, { label: "events: " + runStatus.event_count }),
               e(Pill, { label: "artifacts: " + runArtifacts.length }),
               e("code", { className: "hwf-run-id", title: runStatus.workflow_id }, shortId(runStatus.workflow_id))),
+            e(RuntimeFacts, { runtime: runStatus.runtime_state }),
             e("div", { className: "hwf-section-title" }, "Run DAG"),
             e(RunDag, { db: props.db, workflowId: selected.workflow_id, refreshKey: props.refreshKey }),
             e("div", { className: "hwf-section-title" }, "Human input requests in this run"),

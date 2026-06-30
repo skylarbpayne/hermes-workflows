@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import uuid
@@ -103,6 +104,113 @@ def _strip_internal_fields(value: Any) -> Any:
 def _looks_like_local_path(value: str) -> bool:
     cleaned = value.strip()
     return cleaned.startswith(("/", "./", "../", "~", "file://")) or re.match(r"^[A-Za-z]:[\\/]", cleaned) is not None
+
+
+def _path_environment_relation(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        worker_path = Path(value).expanduser().resolve()
+        dashboard_path = Path.cwd().resolve()
+    except Exception:
+        return "unknown"
+    return "same_as_dashboard" if worker_path == dashboard_path else "different_from_dashboard"
+
+
+def _dashboard_runtime_label(state: dict[str, Any]) -> str:
+    primary = str(state.get("primary") or "unknown")
+    command = state.get("command") if isinstance(state.get("command"), dict) else {}
+    worker = state.get("worker") if isinstance(state.get("worker"), dict) else {}
+    worker_id = worker.get("worker_id") or command.get("claimed_by")
+    if primary == "waiting_on_human":
+        return "Waiting on Skylar"
+    if primary == "queued":
+        return "Queued — no worker has claimed this yet"
+    if primary == "running" and worker_id:
+        return f"Running — claimed by {worker_id}"
+    if primary == "running":
+        return "Running"
+    if primary == "stuck":
+        reason = str(state.get("reason") or command.get("last_error") or "unknown reason").replace("_", " ")
+        return f"Stuck — {reason}"
+    return str(state.get("label") or primary.replace("_", " ").capitalize())
+
+
+def _dashboard_runtime_state(runtime_state: Any, *, db_alias: str | None) -> dict[str, Any] | None:
+    """Sanitize runtime_state for browser packets.
+
+    The engine projection is intentionally detailed enough for local CLI/debugging.
+    The dashboard should show the configured source alias and useful lease/worker
+    facts without exposing raw SQLite paths, worker cwd, or Python executable paths.
+    """
+
+    if not isinstance(runtime_state, dict):
+        return None
+    state = _strip_internal_fields(_redact(runtime_state))
+    if not isinstance(state, dict):
+        return None
+    state = dict(state)
+    if db_alias:
+        state["source"] = {"alias": db_alias}
+    command = state.get("command")
+    if isinstance(command, dict):
+        safe_command = dict(command)
+        safe_command.pop("claimed_by_instance_id", None)
+        state["command"] = safe_command
+    worker = state.get("worker")
+    if isinstance(worker, dict):
+        safe_worker = dict(worker)
+        environment = safe_worker.get("environment") if isinstance(safe_worker.get("environment"), dict) else {}
+        safe_worker["environment"] = {
+            "hostname": environment.get("hostname"),
+            "pid": environment.get("pid"),
+            "platform": environment.get("platform"),
+            "python_version": environment.get("python_version"),
+            "python_executable": Path(str(environment.get("python_executable") or "")).name or None,
+            "hermes_version": environment.get("hermes_version"),
+            "agent_runner_enabled": bool(environment.get("agent_runner_enabled")),
+            "workspace_relation": _path_environment_relation(environment.get("cwd")),
+        }
+        state["worker"] = safe_worker
+    state["label"] = _dashboard_runtime_label(state)
+    return state
+
+
+def _active_worker_warning(engine: WorkflowEngine) -> dict[str, Any] | None:
+    now = int(time.time())
+    try:
+        with engine._connect() as con:
+            rows = con.execute(
+                """
+                SELECT worker_id, worker_instance_id, status, heartbeat_expires_at, cwd
+                FROM workflow_workers
+                WHERE status != 'stopped' AND heartbeat_expires_at > ?
+                ORDER BY last_heartbeat_at DESC
+                """,
+                (now,),
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+    if len(rows) <= 1:
+        return None
+    cwd_counts: dict[str, int] = {}
+    for row in rows:
+        cwd = str(row["cwd"] or "")
+        if cwd:
+            cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
+    same_workspace_count = max(cwd_counts.values(), default=0)
+    message = "Multiple active workflow workers are heartbeating for this state source. Leases should fence duplicate claims, but verify the worker deployment."
+    if same_workspace_count > 1:
+        message = "Multiple active workflow workers are heartbeating for this state source and workspace. Leases should fence duplicate claims, but verify the worker deployment."
+    return {
+        "level": "warning",
+        "code": "multiple_active_workers",
+        "message": message,
+        "active_worker_count": len(rows),
+        "worker_ids": sorted({str(row["worker_id"]) for row in rows}),
+    }
 
 
 def _redact_artifact_local_refs(value: Any) -> Any:
@@ -206,6 +314,7 @@ def _status_packet(
     commands: str = "recent",
     command_limit: int,
     command_payload_chars: int,
+    db_alias: str | None = None,
 ) -> dict[str, Any]:
     packet = _redact(
         engine.workflow_status(
@@ -217,6 +326,9 @@ def _status_packet(
         )
     )
     packet = _redact_artifact_local_refs(_strip_internal_fields(packet))
+    runtime_state = _dashboard_runtime_state(packet.get("runtime_state"), db_alias=db_alias)
+    if runtime_state is not None:
+        packet["runtime_state"] = runtime_state
     packet["recent_events"] = packet.get("events", [])
     packet["run_id"] = packet.get("workflow_id")
     return packet
@@ -403,6 +515,71 @@ def _run_counts(runs: list[dict[str, Any]]) -> dict[str, Any]:
         status = str(run.get("status") or "unknown")
         by_status[status] = by_status.get(status, 0) + 1
     return {"total": len(runs), "by_status": by_status}
+
+
+def _runtime_state_for_run(engine: WorkflowEngine, workflow_id: Any, *, db_alias: str, cache: dict[str, dict[str, Any] | None]) -> dict[str, Any] | None:
+    run_id = str(workflow_id or "")
+    if not run_id:
+        return None
+    if run_id not in cache:
+        try:
+            status = engine.workflow_status(run_id, recent_events=1, command_history="recent", command_limit=5, command_payload_chars=500)
+            cache[run_id] = _dashboard_runtime_state(status.get("runtime_state"), db_alias=db_alias)
+        except Exception:
+            cache[run_id] = None
+    return cache[run_id]
+
+
+def _runs_with_runtime_state(engine: WorkflowEngine, rows: list[dict[str, Any]], *, db_alias: str) -> list[dict[str, Any]]:
+    cache: dict[str, dict[str, Any] | None] = {}
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(_strip_internal_fields(row))
+        runtime_state = _runtime_state_for_run(engine, item.get("workflow_id"), db_alias=db_alias, cache=cache)
+        if runtime_state is not None:
+            item["runtime_state"] = runtime_state
+        enriched.append(item)
+    return enriched
+
+
+def _include_review_card_for_status(card: dict[str, Any], requested_status: str | None) -> bool:
+    if requested_status is None:
+        return True
+    card_status = str(card.get("status") or "")
+    if card_status == requested_status:
+        return True
+    if requested_status != "waiting":
+        return False
+    runtime_state = card.get("runtime_state") if isinstance(card.get("runtime_state"), dict) else {}
+    # After a review response is recorded, the review item should not vanish while
+    # the trusted continuation is queued/running/stuck. Keep it visible with the
+    # continuation state until the workflow reaches a terminal/non-active state.
+    return card_status in {"completed", "approve", "reject", "response_recorded", "decision_recorded"} and runtime_state.get("primary") in {"queued", "running", "stuck"}
+
+
+def _review_cards(engine: WorkflowEngine, *, db_alias: str, status: str | None, limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    runtime_cache: dict[str, dict[str, Any] | None] = {}
+    approvals: list[dict[str, Any]] = []
+    for approval in engine.list_approvals(status=None):
+        payload = approval_view_to_dict(approval)
+        runtime_state = _runtime_state_for_run(engine, payload.get("workflow_id"), db_alias=db_alias, cache=runtime_cache)
+        card = _approval_card(payload, db_alias=db_alias, runtime_state=runtime_state)
+        if _include_review_card_for_status(card, status):
+            approvals.append(card)
+        if len(approvals) >= limit:
+            break
+    human_inputs: list[dict[str, Any]] = []
+    remaining = max(0, limit - len(approvals))
+    if remaining:
+        for step in engine.list_operator_steps(status=None):
+            payload = _strip_internal_fields(step)
+            runtime_state = _runtime_state_for_run(engine, payload.get("workflow_id"), db_alias=db_alias, cache=runtime_cache)
+            card = _operator_step_card(payload, db_alias=db_alias, runtime_state=runtime_state)
+            if _include_review_card_for_status(card, status):
+                human_inputs.append(card)
+            if len(human_inputs) >= remaining:
+                break
+    return approvals + human_inputs, approvals, human_inputs
 
 
 def _definition_payload(definition: dict[str, Any], engine: WorkflowEngine) -> dict[str, Any]:
@@ -1010,7 +1187,7 @@ def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
     return {"level": "low", "reason": "This human input request records input/provenance for the trusted local workflow."}
 
 
-def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
+def _operator_step_card(step: dict[str, Any], *, db_alias: str, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_request = step.get("request")
     request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
     artifact = _operator_approval_artifact(step.get("artifact") if step.get("artifact") is not None else request.get("artifact"))
@@ -1018,7 +1195,7 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
     schema_id = str(step.get("schema") or request.get("schema") or "json")
     raw_descriptor = step.get("schema_descriptor") if isinstance(step.get("schema_descriptor"), dict) else request.get("schema_descriptor")
     descriptor = raw_descriptor if isinstance(raw_descriptor, dict) else _review_request_schema_descriptor(schema_id)
-    return {
+    card = {
         "db_alias": db_alias,
         "workflow_id": step.get("workflow_id"),
         "workflow_name": step.get("workflow_name"),
@@ -1041,12 +1218,15 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str) -> dict[str, Any
         "risk": _risk_for_operator_step(step),
         "consequence": "Records typed human input with provenance, then the workflow worker or trusted runtime can continue.",
     }
+    if runtime_state is not None:
+        card["runtime_state"] = runtime_state
+    return card
 
 
-def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]:
+def _approval_card(approval: dict[str, Any], *, db_alias: str, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
     prompt = approval.get("prompt") or approval.get("key") or "Approval needed"
     artifact = _operator_approval_artifact(approval.get("artifact"))
-    return {
+    card = {
         "db_alias": db_alias,
         "workflow_id": approval.get("workflow_id"),
         "workflow_name": approval.get("workflow_name"),
@@ -1079,6 +1259,9 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str) -> dict[str, Any]
         "consequence": "Records approve/reject with human provenance, then resumes the trusted local workflow immediately.",
         "detail_url": f"/approvals/detail?db={db_alias}&workflow_id={approval.get('workflow_id')}&key={approval.get('key')}",
     }
+    if runtime_state is not None:
+        card["runtime_state"] = runtime_state
+    return card
 
 
 def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1257,6 +1440,7 @@ async def run_workflow(body: dict[str, Any]) -> dict[str, Any]:
             commands="recent",
             command_limit=20,
             command_payload_chars=2000,
+            db_alias=db_alias,
         )
         return result, status
 
@@ -1283,8 +1467,8 @@ async def runs(
 ) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
-    rows = _all_runs(engine, status=status, limit=_int(limit, default=100, maximum=500))
-    return {"db_alias": db_alias, "count": len(rows), "runs": rows, "counts": _run_counts(rows), "runtime_semantics": _runtime_semantics()}
+    rows = _runs_with_runtime_state(engine, _all_runs(engine, status=status, limit=_int(limit, default=100, maximum=500)), db_alias=db_alias)
+    return {"db_alias": db_alias, "count": len(rows), "runs": rows, "counts": _run_counts(rows), "runtime_semantics": _runtime_semantics(), "worker_warning": _active_worker_warning(engine)}
 
 
 @router.get("/runs/{workflow_id}")
@@ -1305,9 +1489,10 @@ async def run_status(
         commands=commands,
         command_limit=_int(command_limit, default=20, maximum=200),
         command_payload_chars=_int(command_payload_chars, default=1000, maximum=20000),
+        db_alias=db_alias,
     )
     artifacts = _artifacts_from_status(packet)
-    return {"db_alias": db_alias, "run": packet, "artifacts": artifacts, "runtime_semantics": _runtime_semantics()}
+    return {"db_alias": db_alias, "run": packet, "artifacts": artifacts, "runtime_semantics": _runtime_semantics(), "worker_warning": _active_worker_warning(engine)}
 
 
 @router.get("/runs/{workflow_id}/artifacts")
@@ -1343,11 +1528,8 @@ async def run_dag(workflow_id: str, db: str | None = None, recent_events: int = 
 async def active_operator_steps(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
-    operator_steps = [
-        _operator_step_card(_strip_internal_fields(step), db_alias=db_alias)
-        for step in engine.list_operator_steps(status=status)[: _int(limit, default=100, maximum=500)]
-    ]
-    return {"db_alias": db_alias, "count": len(operator_steps), "operator_steps": operator_steps, "runtime_semantics": _runtime_semantics()}
+    _review_requests, _approvals, operator_steps = _review_cards(engine, db_alias=db_alias, status=status, limit=_int(limit, default=100, maximum=500))
+    return {"db_alias": db_alias, "count": len(operator_steps), "operator_steps": operator_steps, "runtime_semantics": _runtime_semantics(), "worker_warning": _active_worker_warning(engine)}
 
 
 @router.get("/review-requests")
@@ -1355,28 +1537,16 @@ async def active_review_requests(db: str | None = None, status: str | None = "wa
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     max_items = _int(limit, default=100, maximum=500)
-    approvals = [
-        _approval_card(approval_view_to_dict(approval), db_alias=db_alias)
-        for approval in engine.list_approvals(status=status)[:max_items]
-    ]
-    remaining = max(0, max_items - len(approvals))
-    human_inputs = [
-        _operator_step_card(_strip_internal_fields(step), db_alias=db_alias)
-        for step in engine.list_operator_steps(status=status)[:remaining]
-    ]
-    review_requests = approvals + human_inputs
-    return {"db_alias": db_alias, "count": len(review_requests), "review_requests": review_requests, "runtime_semantics": _runtime_semantics()}
+    review_requests, _approvals, _human_inputs = _review_cards(engine, db_alias=db_alias, status=status, limit=max_items)
+    return {"db_alias": db_alias, "count": len(review_requests), "review_requests": review_requests, "runtime_semantics": _runtime_semantics(), "worker_warning": _active_worker_warning(engine)}
 
 
 @router.get("/approvals")
 async def active_approvals(db: str | None = None, status: str | None = "waiting", limit: int = 100) -> dict[str, Any]:
     db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
-    approvals = [
-        _approval_card(approval_view_to_dict(approval), db_alias=db_alias)
-        for approval in engine.list_approvals(status=status)[: _int(limit, default=100, maximum=500)]
-    ]
-    return {"db_alias": db_alias, "count": len(approvals), "approvals": approvals, "runtime_semantics": _runtime_semantics()}
+    _review_requests, approvals, _human_inputs = _review_cards(engine, db_alias=db_alias, status=status, limit=_int(limit, default=100, maximum=500))
+    return {"db_alias": db_alias, "count": len(approvals), "approvals": approvals, "runtime_semantics": _runtime_semantics(), "worker_warning": _active_worker_warning(engine)}
 
 
 @router.get("/approvals/detail")
@@ -1387,10 +1557,10 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
     engine = WorkflowEngine(db_path, read_only=True)
     approval = _redact_artifact_local_refs(_strip_internal_fields(approval_view_to_dict(engine.get_approval(workflow_id, key))))
     approval["artifact"] = _operator_approval_artifact(approval.get("artifact"))
-    status = _status_packet(engine, workflow_id, recent_events=100, commands="recent", command_limit=20, command_payload_chars=5000)
+    status = _status_packet(engine, workflow_id, recent_events=100, commands="recent", command_limit=20, command_payload_chars=5000, db_alias=db_alias)
     timeline = [event for event in engine.events(workflow_id) if event.get("seq", 0) <= (approval.get("requested_seq") or 10**9)]
     timeline = _redact_artifact_local_refs(_redact(timeline))
-    card = _approval_card(approval, db_alias=db_alias)
+    card = _approval_card(approval, db_alias=db_alias, runtime_state=status.get("runtime_state"))
     return {
         "db_alias": db_alias,
         "workflow": status,
@@ -1437,6 +1607,7 @@ async def overview(
             commands=commands,
             command_limit=_int(command_limit, default=10, maximum=100),
             command_payload_chars=_int(command_payload_chars, default=1000, maximum=10000),
+            db_alias=db_alias,
         )
         for row in workflow_rows
     ]
@@ -1446,9 +1617,7 @@ async def overview(
         counts_by_status[str(item.get("status") or "unknown")] = counts_by_status.get(str(item.get("status") or "unknown"), 0) + 1
         artifacts.extend(_artifacts_from_status(item))
     definitions = [_definition_payload(definition, engine) for definition in _catalog_for_engine(engine)]
-    approvals = [_approval_card(approval_view_to_dict(approval), db_alias=db_alias) for approval in engine.list_approvals(status="waiting")[:50]]
-    operator_steps = [_operator_step_card(_strip_internal_fields(step), db_alias=db_alias) for step in engine.list_operator_steps(status="waiting")[:50]]
-    review_requests = approvals + operator_steps
+    review_requests, approvals, operator_steps = _review_cards(engine, db_alias=db_alias, status="waiting", limit=50)
     return {
         "db_alias": db_alias,
         "workflow_count": len(workflows),
@@ -1465,6 +1634,7 @@ async def overview(
         "artifact_count": len(artifacts),
         "artifacts": artifacts[:50],
         "runtime_semantics": _runtime_semantics(),
+        "worker_warning": _active_worker_warning(engine),
     }
 
 
@@ -1477,7 +1647,7 @@ async def workflow_status(
     command_limit: int = 20,
     command_payload_chars: int = 1000,
 ) -> dict[str, Any]:
-    _db_alias, db_path = _resolve_dashboard_db(db)
+    db_alias, db_path = _resolve_dashboard_db(db)
     engine = WorkflowEngine(db_path, read_only=True)
     return _status_packet(
         engine,
@@ -1486,6 +1656,7 @@ async def workflow_status(
         commands=commands,
         command_limit=_int(command_limit, default=20, maximum=200),
         command_payload_chars=_int(command_payload_chars, default=1000, maximum=20000),
+        db_alias=db_alias,
     )
 
 
@@ -1538,6 +1709,7 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
             commands="recent",
             command_limit=20,
             command_payload_chars=2000,
+            db_alias=db_alias,
         )
         return receipt, post_resume
 
@@ -1593,6 +1765,7 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
             commands="recent",
             command_limit=20,
             command_payload_chars=2000,
+            db_alias=db_alias,
         )
         return receipt, post_resume
 

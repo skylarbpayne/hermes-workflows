@@ -1180,6 +1180,116 @@ def test_dashboard_inferred_history_definitions_are_not_browser_runnable(tmp_pat
     assert getattr(excinfo.value, "status_code", None) == 403
     assert "workflow_catalog" in str(getattr(excinfo.value, "detail", excinfo.value))
 
+def test_dashboard_runtime_state_packets_are_sanitized_and_labeled(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_ask_workflow,
+        {},
+        workflow_id="wf_dashboard_runtime_state",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_ask_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    waiting = run(api.run_status("wf_dashboard_runtime_state", db="runtime-smoke"))
+    waiting_state = waiting["run"]["runtime_state"]
+    assert waiting_state["primary"] == "waiting_on_human"
+    assert waiting_state["label"] == "Waiting on Skylar"
+    assert waiting_state["source"] == {"alias": "runtime-smoke"}
+    assert str(db) not in json.dumps(waiting)
+
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_runtime_state",
+                "key": "review_dashboard_payload",
+                "payload": {"answer": "ship it"},
+            }
+        )
+    )
+    queued_state = receipt["post_resume"]["runtime_state"]
+    assert queued_state["primary"] == "queued"
+    assert queued_state["label"] == "Queued — no worker has claimed this yet"
+
+    review_queue = run(api.active_review_requests(db="runtime-smoke"))
+    review_card = next(item for item in review_queue["review_requests"] if item["workflow_id"] == "wf_dashboard_runtime_state")
+    assert review_card["status"] == "completed"
+    assert review_card["runtime_state"]["label"] == "Queued — no worker has claimed this yet"
+    assert str(db) not in json.dumps(review_queue)
+
+
+def test_dashboard_runtime_state_hides_worker_paths_and_warns_on_multiple_workers(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        dashboard_ask_workflow,
+        {},
+        workflow_id="wf_dashboard_runtime_worker",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_ask_workflow",
+    )
+    engine.submit_operator_response(
+        workflow_id="wf_dashboard_runtime_worker",
+        key="review_dashboard_payload",
+        payload={"answer": "continue"},
+        source={"channel": "test", "message_id": "test-runtime-worker"},
+        resume=True,
+    )
+    secret_cwd = tmp_path / "private-workspace"
+    secret_cwd.mkdir()
+    secret_python = tmp_path / "private-python" / "bin" / "python"
+    secret_python.parent.mkdir(parents=True)
+    secret_python.write_text("python")
+    engine.record_worker_heartbeat(
+        worker_id="worker-a",
+        worker_instance_id="worker-a-1",
+        identity={
+            "hostname": "test-host",
+            "pid": 4242,
+            "cwd": str(secret_cwd),
+            "python_executable": str(secret_python),
+            "python_version": "3.test",
+            "platform": "test-platform",
+            "hermes_version": "test-version",
+            "agent_runner_enabled": True,
+        },
+    )
+    engine.record_worker_heartbeat(
+        worker_id="worker-b",
+        worker_instance_id="worker-b-1",
+        identity={"cwd": str(secret_cwd), "python_executable": str(secret_python)},
+    )
+    claimed = engine.claim_command(
+        "wf_dashboard_runtime_worker",
+        worker_id="worker-a",
+        worker_instance_id="worker-a-1",
+        command_type="run_workflow",
+        lease_seconds=60,
+    )
+    assert claimed is not None
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    status = run(api.run_status("wf_dashboard_runtime_worker", db="runtime-smoke"))
+    runtime_state = status["run"]["runtime_state"]
+    assert runtime_state["primary"] == "running"
+    assert runtime_state["label"] == "Running — claimed by worker-a"
+    assert runtime_state["worker"]["environment"]["python_executable"] == "python"
+    assert runtime_state["worker"]["environment"]["workspace_relation"] == "different_from_dashboard"
+    packet = json.dumps(status)
+    assert str(db) not in packet
+    assert str(secret_cwd) not in packet
+    assert str(secret_python) not in packet
+    assert status["worker_warning"]["code"] == "multiple_active_workers"
+    assert status["worker_warning"]["active_worker_count"] == 2
+
+    runs = run(api.runs(db="runtime-smoke"))
+    row = next(item for item in runs["runs"] if item["workflow_id"] == "wf_dashboard_runtime_worker")
+    assert row["runtime_state"]["label"] == "Running — claimed by worker-a"
+    assert runs["worker_warning"]["code"] == "multiple_active_workers"
+    assert str(secret_cwd) not in json.dumps(runs)
+
+
 def test_dashboard_artifact_render_descriptors_keep_local_media_paths_visible():
     api = load_dashboard_api()
 
