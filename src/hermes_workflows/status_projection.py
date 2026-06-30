@@ -251,6 +251,7 @@ class StatusProjection:
             next_action = "Inspect recent events; workflow is non-terminal with no active command or wait."
 
         command_payload = None
+        worker_payload = None
         if current_command is not None:
             command_payload = _runtime_command_summary(
                 current_command,
@@ -259,6 +260,13 @@ class StatusProjection:
                     [],
                 ),
             )
+            worker_instance_id = current_command.get("claimed_by_instance_id")
+            if (
+                current_command.get("status") == "running"
+                and current_command.get("claimed_by")
+                and worker_instance_id
+            ):
+                worker_payload = self._worker_snapshot(str(worker_instance_id), now=now)
 
         return {
             "schema_version": "runtime_state.v1",
@@ -270,8 +278,47 @@ class StatusProjection:
             "terminal": terminal,
             "current_wait": _runtime_wait_summary(str(waiting_on)) if waiting_on else None,
             "command": command_payload,
-            "worker": None,
+            "worker": worker_payload,
             "next_action": next_action,
+        }
+
+    def _worker_snapshot(self, worker_instance_id: str, *, now: int) -> Dict[str, Any] | None:
+        try:
+            with self._connect() as con:
+                row = con.execute(
+                    "SELECT * FROM workflow_workers WHERE worker_instance_id = ?",
+                    (worker_instance_id,),
+                ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table: workflow_workers" in str(exc):
+                return None
+            raise
+        if row is None:
+            return None
+        raw_status = str(row["status"] or "running")
+        heartbeat_expires_at = row["heartbeat_expires_at"]
+        active = raw_status != "stopped" and isinstance(heartbeat_expires_at, int) and heartbeat_expires_at > now
+        projected_status = "stopped" if raw_status == "stopped" else ("running" if active else "stale")
+        return {
+            "worker_instance_id": row["worker_instance_id"],
+            "worker_id": row["worker_id"],
+            "status": projected_status,
+            "active": active,
+            "first_seen_at": row["first_seen_at"],
+            "last_heartbeat_at": row["last_heartbeat_at"],
+            "heartbeat_expires_at": heartbeat_expires_at,
+            "heartbeat_age_seconds": max(0, now - int(row["last_heartbeat_at"])),
+            "environment": {
+                "hostname": row["hostname"],
+                "pid": row["pid"],
+                "cwd": row["cwd"],
+                "python_executable": row["python_executable"],
+                "python_version": row["python_version"],
+                "platform": row["platform"],
+                "hermes_version": row["hermes_version"],
+                "agent_runner_enabled": bool(row["agent_runner_enabled"]),
+            },
+            "metadata": {},
         }
 
     def _terminal_reason(self, workflow_id: str) -> Optional[Dict[str, Any]]:
@@ -774,6 +821,7 @@ def _runtime_command_summary(command: Dict[str, Any], *, diagnostics: list[dict[
         "updated_at": command.get("updated_at"),
         "attempts": command.get("attempts"),
         "claimed_by": command.get("claimed_by"),
+        "claimed_by_instance_id": command.get("claimed_by_instance_id"),
         "lease_expires_at": command.get("lease_expires_at"),
         "last_error": command.get("last_error"),
         "diagnostic_labels": list(command.get("diagnostic_labels") or []),

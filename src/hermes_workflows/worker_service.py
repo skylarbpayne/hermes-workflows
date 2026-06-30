@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+import socket
 import sys
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -36,6 +42,7 @@ class WorkerServiceExecution:
 @dataclass
 class WorkerServiceTick:
     worker_id: str
+    worker_instance_id: str
     executed: int = 0
     idle: bool = True
     executions: list[WorkerServiceExecution] = field(default_factory=list)
@@ -44,6 +51,7 @@ class WorkerServiceTick:
     def to_payload(self) -> dict[str, Any]:
         return {
             "worker_id": self.worker_id,
+            "worker_instance_id": self.worker_instance_id,
             "executed": self.executed,
             "idle": self.idle,
             "executions": [execution.__dict__ for execution in self.executions],
@@ -73,8 +81,11 @@ class WorkflowWorkerService:
         if not self.sources:
             raise ValueError("worker service needs at least one workflow DB source")
         self.worker_id = worker_id
+        self.worker_instance_id = _new_worker_instance_id(worker_id)
         self.lease_seconds = lease_seconds
+        self.heartbeat_ttl_seconds = max(lease_seconds * 3, 30)
         self.agent_runner = agent_runner
+        self._identity = _worker_identity(agent_runner_enabled=agent_runner is not None)
 
     @classmethod
     def from_registry(
@@ -100,11 +111,12 @@ class WorkflowWorkerService:
         Use `max_commands=1` for a single global lease/execute operation.
         """
 
-        summary = WorkerServiceTick(worker_id=self.worker_id)
+        summary = WorkerServiceTick(worker_id=self.worker_id, worker_instance_id=self.worker_instance_id)
         skipped_commands: set[tuple[str, int]] = set()
         while max_commands is None or summary.executed < max_commands:
             executed_one = False
             for source in self.sources:
+                self._heartbeat_source(source)
                 candidate = self._next_runnable(source, skipped_commands=skipped_commands)
                 if candidate is None:
                     continue
@@ -140,28 +152,32 @@ class WorkflowWorkerService:
     ) -> WorkerServiceTick:
         """Run a resident worker loop until budget, idle timeout, or KeyboardInterrupt."""
 
-        aggregate = WorkerServiceTick(worker_id=self.worker_id)
+        aggregate = WorkerServiceTick(worker_id=self.worker_id, worker_instance_id=self.worker_instance_id)
         idle_started_at: float | None = None
-        while max_commands is None or aggregate.executed < max_commands:
-            remaining = None if max_commands is None else max_commands - aggregate.executed
-            tick = self.tick(max_commands=remaining)
-            _log_tick(tick)
-            aggregate.executed += tick.executed
-            aggregate.executions.extend(tick.executions)
-            aggregate.errors.extend(tick.errors)
-            if tick.executed:
-                aggregate.idle = False
-                idle_started_at = None
-                if max_commands is not None and aggregate.executed >= max_commands:
-                    break
-                continue
-            now = time.monotonic()
-            if idle_exit_after is not None:
-                if idle_started_at is None:
-                    idle_started_at = now
-                if now - idle_started_at >= idle_exit_after:
-                    break
-            time.sleep(poll_interval)
+        try:
+            while max_commands is None or aggregate.executed < max_commands:
+                remaining = None if max_commands is None else max_commands - aggregate.executed
+                tick = self.tick(max_commands=remaining)
+                _log_tick(tick)
+                aggregate.executed += tick.executed
+                aggregate.executions.extend(tick.executions)
+                aggregate.errors.extend(tick.errors)
+                if tick.executed:
+                    aggregate.idle = False
+                    idle_started_at = None
+                    if max_commands is not None and aggregate.executed >= max_commands:
+                        break
+                    continue
+                now = time.monotonic()
+                if idle_exit_after is not None:
+                    if idle_started_at is None:
+                        idle_started_at = now
+                    if now - idle_started_at >= idle_exit_after:
+                        break
+                time.sleep(min(poll_interval, max(1.0, float(self.heartbeat_ttl_seconds) / 3.0)))
+        finally:
+            for source in self.sources:
+                self._mark_source_stopped(source)
         return aggregate
 
     def _next_runnable(
@@ -186,6 +202,7 @@ class WorkflowWorkerService:
             workflow_id=workflow_id,
             workflow_ref=str(workflow_ref) if workflow_ref else None,
         )
+        stop, heartbeat_thread = self._start_source_heartbeat(source)
         try:
             if not workflow_ref:
                 raise ValueError("worker service requires stored workflow_ref on runnable workflow instances")
@@ -206,13 +223,58 @@ class WorkflowWorkerService:
             result = engine.worker_once(
                 workflow_id,
                 worker_id=self.worker_id,
+                worker_instance_id=self.worker_instance_id,
                 lease_seconds=self.lease_seconds,
             )
         except Exception as exc:
             execution.error = f"{type(exc).__name__}: {exc}"
             return execution
+        finally:
+            stop.set()
+            heartbeat_thread.join(timeout=1.0)
+            try:
+                self._heartbeat_source(source)
+            except Exception:
+                pass
         _copy_result(result, execution)
         return execution
+
+    def _heartbeat_source(self, source: WorkerServiceSource) -> None:
+        engine = WorkflowEngine(Path(source.path), agent_runner=self.agent_runner)
+        engine.record_worker_heartbeat(
+            worker_id=self.worker_id,
+            worker_instance_id=self.worker_instance_id,
+            heartbeat_ttl_seconds=self.heartbeat_ttl_seconds,
+            identity=self._identity,
+        )
+
+    def _mark_source_stopped(self, source: WorkerServiceSource) -> None:
+        try:
+            WorkflowEngine(Path(source.path), agent_runner=self.agent_runner).mark_worker_stopped(
+                worker_id=self.worker_id,
+                worker_instance_id=self.worker_instance_id,
+            )
+        except Exception:
+            return
+
+    def _start_source_heartbeat(self, source: WorkerServiceSource) -> tuple[threading.Event, threading.Thread]:
+        interval = max(1.0, min(float(self.heartbeat_ttl_seconds) / 3.0, 10.0))
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(interval):
+                try:
+                    self._heartbeat_source(source)
+                except Exception:
+                    continue
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name=f"workflow-worker-heartbeat:{self.worker_instance_id}:{source.name}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
 
 
 def _copy_result(result: RunResult, execution: WorkerServiceExecution) -> None:
@@ -235,6 +297,7 @@ def _log_tick(tick: WorkerServiceTick) -> None:
     payload = {
         "event": "workflow_worker_tick",
         "worker_id": tick.worker_id,
+        "worker_instance_id": tick.worker_instance_id,
         "executed": tick.executed,
         "idle": tick.idle,
         "executions": [
@@ -252,6 +315,29 @@ def _log_tick(tick: WorkerServiceTick) -> None:
         "errors": tick.errors,
     }
     print(json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
+
+
+def _new_worker_instance_id(worker_id: str) -> str:
+    safe_worker_id = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in worker_id)
+    return f"{safe_worker_id}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+
+
+def _worker_identity(*, agent_runner_enabled: bool) -> dict[str, Any]:
+    try:
+        hermes_version = importlib_metadata.version("hermes-workflows")
+    except importlib_metadata.PackageNotFoundError:
+        hermes_version = None
+    return {
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "cwd": str(Path.cwd()),
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "hermes_version": hermes_version,
+        "agent_runner_enabled": agent_runner_enabled,
+        "metadata": {},
+    }
 
 
 def _sources_from_registry(registry: WorkflowRegistry, *, db: str | None = None) -> list[WorkerServiceSource]:

@@ -313,7 +313,7 @@ def run_worker_registry_cli(args: argparse.Namespace) -> int:
         raise SystemExit(str(exc)) from exc
 
     if args.once:
-        result = service.tick(max_commands=1)
+        result = service.serve(poll_interval=args.poll_interval, max_commands=1, idle_exit_after=0)
     else:
         result = service.serve(
             poll_interval=args.poll_interval,

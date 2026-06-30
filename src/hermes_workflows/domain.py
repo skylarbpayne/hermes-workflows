@@ -209,6 +209,7 @@ class WorkflowCommand:
     id: int | None = None
     status: str | None = None
     claimed_by: str | None = None
+    claimed_by_instance_id: str | None = None
     lease_expires_at: int | None = None
     lease_seconds: int = 0
     attempts: int = 0
@@ -225,6 +226,7 @@ class WorkflowCommand:
             "payload": self.payload,
             "status": self.status,
             "claimed_by": self.claimed_by,
+            "claimed_by_instance_id": self.claimed_by_instance_id,
             "lease_expires_at": self.lease_expires_at,
             "lease_seconds": self.lease_seconds,
             "attempts": self.attempts,
@@ -330,6 +332,7 @@ def make_command(
     id: int | None = None,
     status: str | None = None,
     claimed_by: str | None = None,
+    claimed_by_instance_id: str | None = None,
     lease_expires_at: int | None = None,
     lease_seconds: int = 0,
     attempts: int = 0,
@@ -348,6 +351,7 @@ def make_command(
         id=id,
         status=status,
         claimed_by=claimed_by,
+        claimed_by_instance_id=claimed_by_instance_id,
         lease_expires_at=lease_expires_at,
         lease_seconds=lease_seconds,
         attempts=attempts,
@@ -377,6 +381,7 @@ def decode_command_row(row: Any) -> WorkflowCommand:
         id=_optional_int(_row_get(row, "id", default=None)),
         status=_optional_str(_row_get(row, "status", default=None)),
         claimed_by=_optional_str(_row_get(row, "claimed_by", default=None)),
+        claimed_by_instance_id=_optional_str(_row_get(row, "claimed_by_instance_id", default=None)),
         lease_expires_at=_optional_int(_row_get(row, "lease_expires_at", default=None)),
         lease_seconds=_lease_seconds_from_values(
             _row_get(row, "lease_expires_at", default=None),

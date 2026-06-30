@@ -859,6 +859,7 @@ class WorkflowEngine:
         workflow_id: str,
         *,
         worker_id: str,
+        worker_instance_id: str | None = None,
         lease_seconds: int = 30,
         command_type: Optional[str] = "run_step",
         include_external_agent: bool = False,
@@ -904,10 +905,11 @@ class WorkflowEngine:
             con.execute(
                 """
                 UPDATE workflow_commands_outbox
-                SET status = 'running', claimed_by = ?, lease_expires_at = ?, attempts = ?, updated_at = ?
+                SET status = 'running', claimed_by = ?, claimed_by_instance_id = ?,
+                    lease_expires_at = ?, attempts = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (worker_id, lease_expires_at, attempts, now, row["id"]),
+                (worker_id, worker_instance_id, lease_expires_at, attempts, now, row["id"]),
             )
             self._append_event(
                 con,
@@ -918,6 +920,7 @@ class WorkflowEngine:
                     "command_id": row["id"],
                     "command_type": row["type"],
                     "worker_id": worker_id,
+                    "worker_instance_id": worker_instance_id,
                     "attempt": attempts,
                     "lease_expires_at": lease_expires_at,
                 },
@@ -1006,10 +1009,18 @@ class WorkflowEngine:
             stop.set()
             thread.join(timeout=1.0)
 
-    def worker_once(self, workflow_id: str, *, worker_id: str, lease_seconds: int = 30) -> RunResult:
+    def worker_once(
+        self,
+        workflow_id: str,
+        *,
+        worker_id: str,
+        worker_instance_id: str | None = None,
+        lease_seconds: int = 30,
+    ) -> RunResult:
         command = self.claim_command(
             workflow_id,
             worker_id=worker_id,
+            worker_instance_id=worker_instance_id,
             lease_seconds=lease_seconds,
             command_type=None,
             include_external_agent=self.agent_runner is not None,
@@ -1023,6 +1034,7 @@ class WorkflowEngine:
         workflow_id: str,
         *,
         worker_id: str,
+        worker_instance_id: str | None = None,
         lease_seconds: int = 30,
         max_commands: Optional[int] = None,
     ) -> RunResult:
@@ -1032,6 +1044,7 @@ class WorkflowEngine:
             command = self.claim_command(
                 workflow_id,
                 worker_id=worker_id,
+                worker_instance_id=worker_instance_id,
                 lease_seconds=lease_seconds,
                 command_type=None,
                 include_external_agent=self.agent_runner is not None,
@@ -1091,6 +1104,125 @@ class WorkflowEngine:
         with self._connect() as con:
             rows = con.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def record_worker_heartbeat(
+        self,
+        *,
+        worker_id: str,
+        worker_instance_id: str,
+        heartbeat_ttl_seconds: int = 90,
+        identity: Optional[Dict[str, Any]] = None,
+        status: str = "running",
+    ) -> Dict[str, Any]:
+        """Upsert a durable worker-process heartbeat for dashboard/runtime diagnostics."""
+
+        self._ensure_writable("record workflow worker heartbeat")
+        if not worker_id:
+            raise ValueError("worker_id is required")
+        if not worker_instance_id:
+            raise ValueError("worker_instance_id is required")
+        now = _now()
+        ttl = max(1, int(heartbeat_ttl_seconds))
+        identity = identity or {}
+        row_values = {
+            "worker_instance_id": worker_instance_id,
+            "worker_id": worker_id,
+            "status": status,
+            "first_seen_at": now,
+            "last_heartbeat_at": now,
+            "heartbeat_expires_at": now + ttl,
+            "hostname": identity.get("hostname"),
+            "pid": identity.get("pid"),
+            "cwd": identity.get("cwd"),
+            "python_executable": identity.get("python_executable"),
+            "python_version": identity.get("python_version"),
+            "platform": identity.get("platform"),
+            "hermes_version": identity.get("hermes_version"),
+            "agent_runner_enabled": 1 if identity.get("agent_runner_enabled") else 0,
+            "metadata_json": JsonCodec.dumps({}),
+        }
+        with self._connect() as con:
+            con.execute(
+                """
+                INSERT INTO workflow_workers(
+                  worker_instance_id, worker_id, status, first_seen_at, last_heartbeat_at,
+                  heartbeat_expires_at, hostname, pid, cwd, python_executable,
+                  python_version, platform, hermes_version, agent_runner_enabled, metadata_json
+                )
+                VALUES (
+                  :worker_instance_id, :worker_id, :status, :first_seen_at, :last_heartbeat_at,
+                  :heartbeat_expires_at, :hostname, :pid, :cwd, :python_executable,
+                  :python_version, :platform, :hermes_version, :agent_runner_enabled, :metadata_json
+                )
+                ON CONFLICT(worker_instance_id) DO UPDATE SET
+                  worker_id = excluded.worker_id,
+                  status = excluded.status,
+                  last_heartbeat_at = excluded.last_heartbeat_at,
+                  heartbeat_expires_at = excluded.heartbeat_expires_at,
+                  hostname = excluded.hostname,
+                  pid = excluded.pid,
+                  cwd = excluded.cwd,
+                  python_executable = excluded.python_executable,
+                  python_version = excluded.python_version,
+                  platform = excluded.platform,
+                  hermes_version = excluded.hermes_version,
+                  agent_runner_enabled = excluded.agent_runner_enabled,
+                  metadata_json = excluded.metadata_json
+                """,
+                row_values,
+            )
+            row = con.execute(
+                "SELECT * FROM workflow_workers WHERE worker_instance_id = ?",
+                (worker_instance_id,),
+            ).fetchone()
+        return _worker_payload(row, now=now)
+
+    def mark_worker_stopped(self, *, worker_instance_id: str, worker_id: str | None = None) -> None:
+        self._ensure_writable("mark workflow worker stopped")
+        now = _now()
+        with self._connect() as con:
+            if worker_id is None:
+                con.execute(
+                    """
+                    UPDATE workflow_workers
+                    SET status = 'stopped', last_heartbeat_at = ?, heartbeat_expires_at = ?
+                    WHERE worker_instance_id = ?
+                    """,
+                    (now, now, worker_instance_id),
+                )
+            else:
+                con.execute(
+                    """
+                    UPDATE workflow_workers
+                    SET status = 'stopped', last_heartbeat_at = ?, heartbeat_expires_at = ?
+                    WHERE worker_instance_id = ? AND worker_id = ?
+                    """,
+                    (now, now, worker_instance_id, worker_id),
+                )
+
+    def list_workers(self, *, active_only: bool = False) -> List[Dict[str, Any]]:
+        now = _now()
+        where = ""
+        params: list[Any] = []
+        if active_only:
+            where = "WHERE status != 'stopped' AND heartbeat_expires_at > ?"
+            params.append(now)
+        with self._connect() as con:
+            try:
+                rows = con.execute(
+                    f"""
+                    SELECT *
+                    FROM workflow_workers
+                    {where}
+                    ORDER BY last_heartbeat_at DESC, worker_instance_id ASC
+                    """,
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such table: workflow_workers" in str(exc):
+                    return []
+                raise
+        return [_worker_payload(row, now=now) for row in rows]
 
     def events(self, workflow_id: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         self._instance(workflow_id)
@@ -1727,7 +1859,8 @@ class WorkflowEngine:
                 changed = con.execute(
                     """
                     UPDATE workflow_commands_outbox
-                    SET status = 'pending', payload_json = ?, claimed_by = NULL, lease_expires_at = NULL,
+                    SET status = 'pending', payload_json = ?, claimed_by = NULL, claimed_by_instance_id = NULL,
+                        lease_expires_at = NULL,
                         last_error_json = NULL, updated_at = ?
                     WHERE id = ?
                       AND status = 'running'
@@ -2161,6 +2294,7 @@ class WorkflowEngine:
                   payload_json TEXT NOT NULL,
                   status TEXT NOT NULL DEFAULT 'pending',
                   claimed_by TEXT,
+                  claimed_by_instance_id TEXT,
                   lease_expires_at INTEGER,
                   attempts INTEGER NOT NULL DEFAULT 0,
                   last_error_json TEXT,
@@ -2168,10 +2302,36 @@ class WorkflowEngine:
                   updated_at INTEGER,
                   UNIQUE(workflow_id, key)
                 );
+
+                CREATE TABLE IF NOT EXISTS workflow_workers(
+                  worker_instance_id TEXT PRIMARY KEY,
+                  worker_id TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'running',
+                  first_seen_at INTEGER NOT NULL,
+                  last_heartbeat_at INTEGER NOT NULL,
+                  heartbeat_expires_at INTEGER NOT NULL,
+                  hostname TEXT,
+                  pid INTEGER,
+                  cwd TEXT,
+                  python_executable TEXT,
+                  python_version TEXT,
+                  platform TEXT,
+                  hermes_version TEXT,
+                  agent_runner_enabled INTEGER NOT NULL DEFAULT 0,
+                  metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workflow_workers_worker_id
+                ON workflow_workers(worker_id, last_heartbeat_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_workflow_workers_active
+                ON workflow_workers(status, heartbeat_expires_at);
+
                 """
             )
             self._ensure_instance_columns(con)
             self._ensure_command_columns(con)
+            self._ensure_command_indexes(con)
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
@@ -2311,7 +2471,8 @@ class WorkflowEngine:
         changed = con.execute(
             """
             UPDATE workflow_commands_outbox
-            SET status = 'pending', payload_json = ?, claimed_by = NULL, lease_expires_at = NULL,
+            SET status = 'pending', payload_json = ?, claimed_by = NULL, claimed_by_instance_id = NULL,
+                lease_expires_at = NULL,
                 last_error_json = NULL, updated_at = ?
             WHERE id = ? AND status NOT IN ('pending', 'running')
             """,
@@ -2333,6 +2494,7 @@ class WorkflowEngine:
         existing = {row["name"] for row in con.execute("PRAGMA table_info(workflow_commands_outbox)").fetchall()}
         migrations = {
             "claimed_by": "ALTER TABLE workflow_commands_outbox ADD COLUMN claimed_by TEXT",
+            "claimed_by_instance_id": "ALTER TABLE workflow_commands_outbox ADD COLUMN claimed_by_instance_id TEXT",
             "lease_expires_at": "ALTER TABLE workflow_commands_outbox ADD COLUMN lease_expires_at INTEGER",
             "attempts": "ALTER TABLE workflow_commands_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "last_error_json": "ALTER TABLE workflow_commands_outbox ADD COLUMN last_error_json TEXT",
@@ -2341,6 +2503,15 @@ class WorkflowEngine:
         for column, sql in migrations.items():
             if column not in existing:
                 con.execute(sql)
+
+    def _ensure_command_indexes(self, con: sqlite3.Connection) -> None:
+        con.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workflow_commands_claimed_by_instance
+            ON workflow_commands_outbox(claimed_by_instance_id)
+            WHERE claimed_by_instance_id IS NOT NULL
+            """
+        )
 
     def _command_payload(self, row: sqlite3.Row) -> Dict[str, Any]:
         return decode_command_row(row).to_public_dict()
@@ -3234,6 +3405,36 @@ def _format_error(error: Any) -> Optional[str]:
 
 def _now() -> int:
     return int(time.time())
+
+
+def _worker_payload(row: sqlite3.Row, *, now: int | None = None) -> Dict[str, Any]:
+    now = _now() if now is None else now
+    raw_status = str(row["status"] or "running")
+    heartbeat_expires_at = row["heartbeat_expires_at"]
+    active = raw_status != "stopped" and isinstance(heartbeat_expires_at, int) and heartbeat_expires_at > now
+    projected_status = "stopped" if raw_status == "stopped" else ("running" if active else "stale")
+    environment = {
+        "hostname": row["hostname"],
+        "pid": row["pid"],
+        "cwd": row["cwd"],
+        "python_executable": row["python_executable"],
+        "python_version": row["python_version"],
+        "platform": row["platform"],
+        "hermes_version": row["hermes_version"],
+        "agent_runner_enabled": bool(row["agent_runner_enabled"]),
+    }
+    return {
+        "worker_instance_id": row["worker_instance_id"],
+        "worker_id": row["worker_id"],
+        "status": projected_status,
+        "active": active,
+        "first_seen_at": row["first_seen_at"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        "heartbeat_expires_at": heartbeat_expires_at,
+        "heartbeat_age_seconds": max(0, now - int(row["last_heartbeat_at"])),
+        "environment": environment,
+        "metadata": {},
+    }
 
 
 def _lease_seconds_from_row(row: sqlite3.Row) -> int:

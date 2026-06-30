@@ -470,6 +470,241 @@ def test_runnable_workflows_lists_pending_commands_without_known_workflow_id(tmp
     assert [row["command_key"] for row in runnable_after_workflow_run] == ["step:worker_left:0", "step:worker_right:0"]
 
 
+def test_worker_heartbeat_lifecycle_and_runtime_projection(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    heartbeat = engine.record_worker_heartbeat(
+        worker_id="resident-worker",
+        worker_instance_id="resident-worker:instance-a",
+        heartbeat_ttl_seconds=60,
+        identity={
+            "hostname": "test-host",
+            "pid": 12345,
+            "cwd": "/tmp/workflows",
+            "python_executable": sys.executable,
+            "python_version": "3.test",
+            "platform": "test-platform",
+            "hermes_version": "test-version",
+            "agent_runner_enabled": False,
+            "metadata": {"unsafe_user_supplied_metadata_is_not_persisted": "value"},
+        },
+    )
+
+    assert heartbeat["worker_id"] == "resident-worker"
+    assert heartbeat["worker_instance_id"] == "resident-worker:instance-a"
+    assert heartbeat["status"] == "running"
+    assert heartbeat["active"] is True
+    assert heartbeat["environment"]["hostname"] == "test-host"
+    assert heartbeat["metadata"] == {}
+    assert engine.list_workers(active_only=True)[0]["worker_instance_id"] == "resident-worker:instance-a"
+
+    engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_worker_identity")
+    claimed = engine.claim_command(
+        "wf_worker_identity",
+        worker_id="resident-worker",
+        worker_instance_id="resident-worker:instance-a",
+        lease_seconds=60,
+        command_type=None,
+    )
+
+    assert claimed is not None
+    assert claimed["claimed_by"] == "resident-worker"
+    assert claimed["claimed_by_instance_id"] == "resident-worker:instance-a"
+    status = engine.workflow_status("wf_worker_identity")
+    assert status["runtime_state"]["primary"] == "running"
+    assert status["runtime_state"]["command"]["claimed_by_instance_id"] == "resident-worker:instance-a"
+    assert status["runtime_state"]["worker"]["worker_instance_id"] == "resident-worker:instance-a"
+    assert status["runtime_state"]["worker"]["status"] == "running"
+
+    engine.mark_worker_stopped(worker_id="resident-worker", worker_instance_id="resident-worker:instance-a")
+    stopped = engine.list_workers()[0]
+    assert stopped["status"] == "stopped"
+    assert stopped["active"] is False
+
+
+def test_requeued_workflow_command_clears_stale_worker_instance(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_requeue_identity")
+    claimed = engine.claim_command(
+        "wf_requeue_identity",
+        worker_id="resident-worker",
+        worker_instance_id="resident-worker:stale-instance",
+        lease_seconds=60,
+        command_type=None,
+    )
+    assert claimed is not None
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "UPDATE workflow_commands_outbox SET status = 'completed', lease_expires_at = NULL WHERE id = ?",
+            (claimed["id"],),
+        )
+    with engine._connect() as con:
+        changed = engine._enqueue_workflow_run_row(con, "wf_requeue_identity", reason="test_requeue")
+
+    assert changed is True
+    row = command_row(db, "workflow:run")
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["claimed_by"] is None
+    assert row["claimed_by_instance_id"] is None
+    status = engine.workflow_status("wf_requeue_identity")
+    assert status["runtime_state"]["primary"] == "queued"
+    assert status["runtime_state"]["worker"] is None
+
+
+def test_read_only_old_db_without_worker_table_lists_no_workers(tmp_path):
+    db = tmp_path / "old.sqlite"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE old_schema_marker(id TEXT PRIMARY KEY)")
+
+    assert WorkflowEngine(db, read_only=True).list_workers() == []
+
+
+def test_worker_heartbeat_projects_stale_workers(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.record_worker_heartbeat(
+        worker_id="resident-worker",
+        worker_instance_id="resident-worker:stale",
+        heartbeat_ttl_seconds=60,
+        identity={"hostname": "test-host"},
+    )
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "UPDATE workflow_workers SET heartbeat_expires_at = 1, last_heartbeat_at = 1 WHERE worker_instance_id = ?",
+            ("resident-worker:stale",),
+        )
+
+    worker = engine.list_workers()[0]
+    assert worker["status"] == "stale"
+    assert worker["active"] is False
+    assert engine.list_workers(active_only=True) == []
+
+
+def test_worker_service_records_heartbeat_and_claims_with_worker_instance(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).start(
+        worker_gather_workflow,
+        {"left": 1, "right": 2},
+        workflow_id="wf_service_identity",
+        workflow_ref="tests.test_worker:worker_gather_workflow",
+    )
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "service-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+
+    summary = service.tick(max_commands=1)
+
+    assert summary.executed == 1
+    assert summary.worker_id == "resident-worker"
+    assert summary.worker_instance_id == service.worker_instance_id
+    workers = WorkflowEngine(db).list_workers(active_only=True)
+    assert [worker["worker_instance_id"] for worker in workers] == [service.worker_instance_id]
+    row = command_row(db, "workflow:run")
+    assert row is not None
+    assert row["claimed_by"] == "resident-worker"
+    assert row["claimed_by_instance_id"] == service.worker_instance_id
+
+
+def test_worker_service_serve_marks_worker_stopped_for_one_shot_execution(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).start(
+        worker_gather_workflow,
+        {"left": 1, "right": 2},
+        workflow_id="wf_service_once_identity",
+        workflow_ref="tests.test_worker:worker_gather_workflow",
+    )
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "service-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+
+    summary = service.serve(max_commands=1, idle_exit_after=0)
+
+    assert summary.executed == 1
+    workers = WorkflowEngine(db).list_workers()
+    assert [worker["worker_instance_id"] for worker in workers] == [service.worker_instance_id]
+    assert workers[0]["status"] == "stopped"
+    assert workers[0]["active"] is False
+
+
+def test_worker_service_serve_marks_idle_one_shot_worker_stopped(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "service-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+
+    summary = service.serve(max_commands=1, idle_exit_after=0)
+
+    assert summary.executed == 0
+    workers = WorkflowEngine(db).list_workers()
+    assert [worker["worker_instance_id"] for worker in workers] == [service.worker_instance_id]
+    assert workers[0]["status"] == "stopped"
+    assert workers[0]["active"] is False
+
+
+def test_worker_service_sleep_is_capped_by_heartbeat_ttl(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "service-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+    service.heartbeat_ttl_seconds = 9
+    sleeps = []
+
+    def stop_after_first_sleep(duration):
+        sleeps.append(duration)
+        raise RuntimeError("stop after sleep observation")
+
+    monkeypatch.setattr("hermes_workflows.worker_service.time.sleep", stop_after_first_sleep)
+
+    try:
+        service.serve(poll_interval=999, max_commands=1, idle_exit_after=60)
+    except RuntimeError as exc:
+        assert str(exc) == "stop after sleep observation"
+    else:
+        raise AssertionError("serve should have reached the monkeypatched sleep")
+
+    assert sleeps == [3.0]
+    assert WorkflowEngine(db).list_workers()[0]["status"] == "stopped"
+
+
+def test_list_workers_reraises_unexpected_operational_errors(tmp_path):
+    db = tmp_path / "broken.sqlite"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE VIEW workflow_workers AS SELECT * FROM missing_backing_table")
+
+    try:
+        WorkflowEngine(db, read_only=True).list_workers()
+    except sqlite3.OperationalError as exc:
+        assert "missing_backing_table" in str(exc)
+    else:
+        raise AssertionError("unexpected workflow_workers OperationalError should be re-raised")
+
+
 CLI_WORKFLOW_MODULE = '''
 from hermes_workflows import step, workflow
 
