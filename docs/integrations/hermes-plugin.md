@@ -5,7 +5,7 @@ title: Hermes Agent Review Queue plugin
 
 # Hermes Agent Review Queue plugin
 
-`hermes-workflows` ships a thin Hermes Agent plugin for workflow review surfaces. The plugin does not make Hermes the workflow runtime. It lists Review Queue requests and records human responses/approval decisions against configured workflow DB aliases; the resident Workflow Worker owns continuation.
+`hermes-workflows` ships a thin Hermes Agent plugin for workflow review surfaces. The plugin does not make Hermes the workflow runtime. It lists Review Queue requests and records human responses/approval decisions against configured workflow DB aliases; Workflow Runner v2 owns continuation. Prove continuation with the foreground `hermes-workflows runner run` command first, and only then supervise the same command as a daemon if needed.
 
 <div class="disclaimer" markdown="1">
 **Affiliation disclaimer:** Hermes Workflows is an independent project by Skylar Payne. It is not affiliated with, endorsed by, sponsored by, or officially connected to Nous Research or the Nous Research Hermes Agent project.
@@ -31,7 +31,7 @@ Hermes will discover the plugin when that environment is on the active Hermes Py
 
 ## Configure workflow DBs and catalog
 
-The plugin can use an explicit SQLite path for low-level tool calls, but dashboard routes should use aliases and catalog entries. The CLI, resident worker, and dashboard must point at the same DB; otherwise the dashboard will show an empty Review Queue while work is waiting elsewhere.
+The plugin can use an explicit SQLite path for low-level tool calls, but dashboard routes should use aliases and catalog entries. The CLI, foreground runner, and dashboard must point at the same DB; otherwise the dashboard will show an empty Review Queue while work is waiting elsewhere.
 
 Hermes config shape:
 
@@ -103,10 +103,10 @@ The dashboard tab at `/workflows` shows:
 
 - active configured workflow source alias and existence status
 - Review Queue requests from `ask(...)` and approval gates
-- workflow waiting/running/completed state
+- Runner v2 state: Waiting on Skylar, Queued, Running, Stuck, Failed, Completed, or Cancelled
 - recent events and command diagnostics
 - redacted artifacts and request schemas
-- trusted review/approval actions that stamp server-configured provenance and resume through the configured workflow source
+- trusted review/approval actions that stamp server-configured provenance and create/consume visible continuation through the configured workflow source
 
 Dashboard HTTP APIs are intentionally alias-only. They reject arbitrary SQLite paths because dashboard routes run inside the Hermes process and must not become local file readers/writers.
 
@@ -169,7 +169,7 @@ Input:
 }
 ```
 
-`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters.
+`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters; the response still records a durable operator response and should leave a visible continuation command for a trusted `runner run` / `runner once` process to consume.
 
 ### `workflow_approval_decide`
 
@@ -190,7 +190,7 @@ Input:
 }
 ```
 
-`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters.
+`resume` defaults to `true`, so the run continues immediately when the adapter is allowed to execute local workflow continuation. Pass `resume=false` only for remote/untrusted record-only adapters; the decision should still be followed by an observable continuation path through a trusted runner, not by pretending a chat callback completed work invisibly.
 
 The product surface is the Review Queue plus `workflow_review_requests_list`, `workflow_review_respond`, and `workflow_approval_decide`.
 
@@ -225,6 +225,25 @@ On exact token match, the hook records the decision with gateway provenance and 
 
 Otherwise it returns no-op so normal Hermes processing continues.
 
+## Runner v2 and provenance rules
+
+- Foreground runner first: use `hermes-workflows runner run --config ... --max-commands ... --idle-exit-after ...` or `runner once` to prove the configured DB/catalog before installing a daemon.
+- Daemon second/deferred: launchd/systemd/s6/tmux may supervise the same `runner run` command after foreground proof. Do not mutate a live workflow DB or start a live daemon from documentation snippets; copy them into a deliberate operator runbook with the target registry/DB reviewed.
+- Response continuation invariant: a Review Queue response or approval decision creates an inspectable continuation path. With `resume=false`, `hermes-workflows status --commands recent` / `hermes-workflows runner status` should show queued runnable work. With trusted `resume=true`, the same local workflow source is resumed and the post-resume status is returned.
+- Dogfood rule: human-gated completion requires real human response provenance. `by`, `channel`, and a message/event id (or equivalent adapter proof) must identify where the human response came from. Test fixtures, local smokes, and manual signals are acceptable only when labeled as test/manual provenance; never present them as real human approval.
+
+State labels in the dashboard and CLI mean:
+
+| State | Meaning | Operator action |
+| --- | --- | --- |
+| Waiting on Skylar | A human Review Queue response/approval is required. | Get a real human response with provenance. |
+| Queued | Runnable continuation exists, unclaimed. | Start/repair `runner run` or use `runner once`. |
+| Running | A runner has claimed work and its lease/heartbeat is live. | Wait or inspect that foreground/supervised process. |
+| Stuck | Repeated failure, expired lease, stale heartbeat, or no healthy runner for old queued work. | Run `runner status`, `runner doctor`, and inspect command history. |
+| Failed | Terminal workflow failure. | Inspect events/commands and relaunch corrected work if needed. |
+| Completed | Terminal success. | Review receipts/artifacts. |
+| Cancelled | Intentional terminal cancellation. | No continuation; launch a new run if needed. |
+
 ## Safe smoke
 
 ```bash
@@ -248,9 +267,9 @@ hermes-workflows run reviewable-draft \
   --input-json '{"topic":"Review Queue smoke"}'
 
 # Drain queued workflow/agent work until the Review Queue request exists.
-hermes-workflows worker \
+hermes-workflows runner run \
   --config "$SMOKE_DIR/.hermes/workflows.registry.json" \
-  --worker-id review-smoke-worker \
+  --worker-id review-smoke-runner \
   --max-commands 5 \
   --idle-exit-after 0.1
 
@@ -272,13 +291,13 @@ print(_handle_workflow_review_respond({
 PY
 ```
 
-Expected: the Review Queue lists the waiting typed review request, the response is recorded with provenance, and the workflow remains waiting/runnable until a trusted worker continues it.
+Expected: the Review Queue lists the waiting typed review request, the response is recorded with explicit `local-smoke` test provenance, and the workflow remains waiting/runnable with a visible continuation command until a trusted runner continues it. This smoke uses a temporary DB only; do not point it at a live workflow DB.
 
 ## Boundaries
 
 - No Hermes imports in `hermes-workflows` core runtime.
 - No fuzzy chat parsing.
 - No public mutation, sends, publishing, deploys, or payments.
-- No downstream workflow execution from gateway/dashboard callbacks by default.
+- No hidden downstream workflow execution from gateway/dashboard callbacks; continuation must be visible via runner status/command history.
 - Review Queue cards/buttons are convenience surfaces over the canonical workflow state, not a separate source of truth.
-- CLI, worker, dashboard, and Review Queue must share the same configured DB alias for a given run.
+- CLI, runner/worker, dashboard, and Review Queue must share the same configured DB alias for a given run.

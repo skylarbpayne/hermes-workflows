@@ -1825,6 +1825,23 @@ def test_internal_run_engine_command_is_hidden_from_top_level_help(tmp_path):
     assert "_run-engine" not in completed.stdout
 
 
+def test_cli_help_marks_runner_v2_and_legacy_worker(tmp_path):
+    top = run_cli_from(tmp_path, [Path.cwd() / "src", tmp_path], "--help").stdout
+    runner_help = run_cli_from(tmp_path, [Path.cwd() / "src", tmp_path], "runner", "--help").stdout
+    worker_help = run_cli_from(tmp_path, [Path.cwd() / "src", tmp_path], "worker", "--help").stdout
+
+    assert "runner" in top
+    assert "Canonical Workflow Runner v2 commands" in top
+    assert "Legacy worker command; prefer `runner run`/`runner" in top
+    assert "once` for resident runners" in top
+    assert "run" in runner_help
+    assert "once" in runner_help
+    assert "status" in runner_help
+    assert "doctor" in runner_help
+    assert "--config CONFIG" in worker_help
+    assert "legacy resident mode" in worker_help
+
+
 RUNNER_WORKFLOW_MODULE = """
 from hermes_workflows import step, workflow
 

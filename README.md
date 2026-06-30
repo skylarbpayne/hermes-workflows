@@ -1,6 +1,6 @@
 # hermes-workflows
 
-`hermes-workflows` makes long-running agent work reviewable instead of ephemeral. It gives trusted Python workflow projects durable state, typed agent work, typed human review, a resident Workflow Worker, and receipts that survive process exits, review pauses, and restarts.
+`hermes-workflows` makes long-running agent work reviewable instead of ephemeral. It gives trusted Python workflow projects durable state, typed agent work, typed human review, a foreground Workflow Runner v2, and receipts that survive process exits, review pauses, and restarts.
 
 > **Affiliation disclaimer:** Hermes Workflows is an independent project by Skylar Payne. It is not affiliated with, endorsed by, sponsored by, or officially connected to Nous Research or the Nous Research Hermes Agent project.
 
@@ -44,7 +44,7 @@ cat > .hermes/workflows.registry.json <<'JSON'
 JSON
 ```
 
-Run the installed facade-first demo and then let the Workflow Worker drain runnable commands until the workflow reaches the typed Review Queue request:
+Run the installed facade-first demo and then run the Workflow Runner v2 in the foreground until it drains runnable commands and the workflow reaches the typed Review Queue request:
 
 ```bash
 hermes-workflows run reviewable-draft \
@@ -52,7 +52,7 @@ hermes-workflows run reviewable-draft \
   --id wf_reviewable_draft_quickstart \
   --input-json '{"topic":"Hermes Workflows launch"}'
 
-hermes-workflows worker \
+hermes-workflows runner run \
   --config .hermes/workflows.registry.json \
   --worker-id quickstart-worker \
   --max-commands 5 \
@@ -63,15 +63,15 @@ hermes-workflows status \
   --id wf_reviewable_draft_quickstart
 ```
 
-`run` records or replays the workflow instance. It does not pretend the current process is a forever worker. The resident `hermes-workflows worker --config ...` command owns continuation: it leases queued workflow/step/agent/bash/child-workflow commands, records outputs, and re-enters the workflow until it is waiting for Review Queue input or terminal.
+`run` records or replays the workflow instance. It does not pretend the current process is a forever worker. The canonical foreground continuation command is `hermes-workflows runner run --config ...`: it leases queued workflow/step/agent/bash/child-workflow commands, records outputs, and re-enters the workflow until it is waiting for Review Queue input or terminal. The older `hermes-workflows worker --config ...` spelling remains a compatibility alias, but new docs and operators should prefer `runner run` / `runner once`.
 
-Respond to the Review Queue request through the Hermes dashboard/plugin or another configured review adapter, then start the worker again if you used the bounded smoke command above. In a real supervised setup, the resident worker keeps running and continues automatically after the response is recorded. The response payload must match the `returns=` dataclass schema and include provenance from the adapter that recorded it.
+Respond to the Review Queue request through the Hermes dashboard/plugin or another configured review adapter, then start the runner again if you used the bounded smoke command above. A recorded operator response always creates a visible durable continuation command; the runner, not a hidden chat callback, consumes that command. In a real supervised setup, keep `runner run` alive under launchd, systemd, s6, tmux, or another supervisor only after the foreground command works in your workspace. The response payload must match the `returns=` dataclass schema and include provenance from the adapter that recorded it.
 
-A real always-on setup runs the worker under launchd, systemd, s6, tmux, or another supervisor without `--idle-exit-after`.
+A real always-on setup runs the runner under launchd, systemd, s6, tmux, or another supervisor without `--idle-exit-after`.
 
 ## Minimal authoring example
 
-Workflow code is ordinary Python. `agent(...)` asks a configured worker/runner for typed work. `bash(...)` runs deterministic shell commands as durable worker steps with captured stdout/stderr, exit status, timing, timeouts, and optional redaction. `ask(...)` creates a typed Review Queue request for a human or external reviewer. `parallel(...)`, `pipeline(...)`, and `goal(...)` compose those calls without exposing runtime bookkeeping in the workflow body.
+Workflow code is ordinary Python. `agent(...)` asks a configured runner for typed work. `bash(...)` runs deterministic shell commands as durable runner steps with captured stdout/stderr, exit status, timing, timeouts, and optional redaction. `ask(...)` creates a typed Review Queue request for a human or external reviewer. `parallel(...)`, `pipeline(...)`, and `goal(...)` compose those calls without exposing runtime bookkeeping in the workflow body.
 
 ```python
 from dataclasses import dataclass
@@ -123,19 +123,55 @@ operator starts/replays workflow
     -> missing workflow/step/agent/child work is queued
     -> command exits after current durable state is recorded
 
-resident Workflow Worker
-  hermes-workflows worker --config .hermes/workflows.registry.json
+foreground Workflow Runner v2
+  hermes-workflows runner run --config .hermes/workflows.registry.json
     -> leases queued commands from configured DBs
     -> executes step/agent/child work through configured runners
     -> replays the workflow against the same DB/run id
     -> stops at Review Queue requests, approvals, or terminal state
 
+optional daemon/supervisor, after foreground proof
+  launchd/systemd/s6/tmux runs the same runner command without bounded smoke flags
+
 review surface
     -> dashboard/chat/CLI records human input or approval with provenance
-    -> the worker observes the durable transition and continues
+    -> durable operator response creates a visible continuation command
+    -> the runner observes the command and continues
 ```
 
-Do not split the CLI, worker, and dashboard across different SQLite files. If the worker drains one DB and the dashboard reads another, approvals will look missing even though the runtime is doing exactly what you configured.
+Do not split the CLI, runner/worker, and dashboard across different SQLite files. If the runner drains one DB and the dashboard reads another, approvals will look missing even though the runtime is doing exactly what you configured.
+
+## Runner v2 operational states
+
+Status surfaces expose these operator-facing states:
+
+| State | Meaning | Typical next action |
+| --- | --- | --- |
+| Waiting on Skylar | The workflow is waiting on a typed Review Queue/human response. | Capture a real human response through the dashboard/plugin/adapter. |
+| Queued | Runnable work exists and no runner has claimed it yet. | Start `hermes-workflows runner run --config ...` or run `runner once` for recovery. |
+| Running | A runner has claimed a command and its heartbeat/lease is current. | Wait, or inspect the runner process if it exceeds expected time. |
+| Stuck | A command repeatedly failed, a lease expired, no healthy worker is present for old queued work, or the claiming heartbeat is stale. | Use `runner status`, `runner doctor`, and command history to repair the runner or retry intentionally. |
+| Failed | The workflow reached a terminal failure. | Inspect events/commands and launch a new corrected run if needed. |
+| Completed | The workflow reached a terminal success. | Review receipts/artifacts. |
+| Cancelled | The workflow was intentionally cancelled. | No continuation; launch a new run if work is still needed. |
+
+Recovery commands are read-only unless they explicitly run work:
+
+```bash
+# Read heartbeat, queued/runnable commands, and recent workflow rows.
+hermes-workflows runner status --db .hermes/workflows.sqlite
+
+# Validate registry, DB alias resolution, workflow imports, and duplicate live workers.
+hermes-workflows runner doctor --config .hermes/workflows.registry.json --db default
+
+# Execute one visible queued command for controlled recovery.
+hermes-workflows runner once --config .hermes/workflows.registry.json --db default
+
+# Foreground runner loop; omit bounded flags only after the foreground loop is proven.
+hermes-workflows runner run --config .hermes/workflows.registry.json --db default --max-commands 10 --idle-exit-after 1
+```
+
+Dogfood and demos must not fake human provenance. Human-gated completion requires a real human response with adapter provenance (`by`, `channel`, message/event id or equivalent). Test fixtures, local smokes, and manual signals are allowed only when clearly labeled as test/manual provenance; do not present them as a human approval.
 
 ## Documentation
 
