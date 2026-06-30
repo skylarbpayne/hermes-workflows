@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -324,12 +327,194 @@ def run_worker_registry_cli(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runner_service_from_args(args: argparse.Namespace) -> WorkflowWorkerService:
+    registry_obj = WorkflowRegistry.from_sources(config_path=args.config)
+    try:
+        return WorkflowWorkerService.from_registry(
+            registry_obj,
+            db=args.db,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+            agent_runner=agent_runner_from_args(args),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def run_runner_run_cli(args: argparse.Namespace) -> int:
+    service = _runner_service_from_args(args)
+    result = service.serve(
+        poll_interval=args.poll_interval,
+        max_commands=args.max_commands,
+        idle_exit_after=args.idle_exit_after,
+    )
+    print_json(result.to_payload())
+    return 0
+
+
+def run_runner_once_cli(args: argparse.Namespace) -> int:
+    service = _runner_service_from_args(args)
+    result = service.tick(max_commands=1)
+    print_json(result.to_payload())
+    return 0
+
+
+def _safe_read_only_projection(label: str, func: Callable[[], Any], errors: list[dict[str, str]]) -> Any:
+    try:
+        return func()
+    except Exception as exc:  # pragma: no cover - exact SQLite/schema errors are environment-specific.
+        errors.append({"projection": label, "error": f"{type(exc).__name__}: {exc}"})
+        return []
+
+
+def run_runner_status_cli(args: argparse.Namespace) -> int:
+    db_path = Path(args.db).expanduser()
+    engine = WorkflowEngine(db_path, read_only=True)
+    errors: list[dict[str, str]] = []
+    workers = _safe_read_only_projection("workers", lambda: engine.list_workers(), errors)
+    active_workers = _safe_read_only_projection("active_workers", lambda: engine.list_workers(active_only=True), errors)
+    runnable_commands = _safe_read_only_projection(
+        "runnable_commands",
+        lambda: engine.runnable_workflows(limit=args.limit, include_external_agent=True),
+        errors,
+    )
+    pending_commands = _safe_read_only_projection(
+        "pending_commands",
+        lambda: engine.outbox_commands(status="pending")[: args.limit],
+        errors,
+    )
+    workflows = _safe_read_only_projection("workflows", lambda: engine.list_workflows()[: args.limit], errors)
+    print_json(
+        {
+            "db": str(db_path),
+            "workers": workers,
+            "active_workers": active_workers,
+            "runnable_commands": runnable_commands,
+            "pending_commands": pending_commands,
+            "workflows": workflows,
+            "errors": errors,
+        }
+    )
+    return 0
+
+
+def _runner_env_fingerprint() -> dict[str, Any]:
+    try:
+        hermes_version = importlib_metadata.version("hermes-workflows")
+    except importlib_metadata.PackageNotFoundError:
+        hermes_version = None
+    return {
+        "cwd": str(Path.cwd()),
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "hermes_version": hermes_version,
+        "agent_runner_configured": bool(os.environ.get("HERMES_WORKFLOWS_AGENT_COMMAND")),
+        "db_env_configured": bool(os.environ.get("HERMES_WORKFLOWS_DB") or os.environ.get("HERMES_WORKFLOWS_DBS")),
+        "path_entries": len(os.environ.get("PATH", "").split(os.pathsep)) if os.environ.get("PATH") else 0,
+    }
+
+
+def run_runner_doctor_cli(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser()
+    checks: dict[str, Any] = {
+        "config": {"path": str(config_path), "exists": config_path.exists(), "loadable": False},
+        "db": {"input": args.db, "resolved": False},
+        "workflow_refs": [],
+        "environment": _runner_env_fingerprint(),
+        "workers": {"active": [], "duplicate_live_worker_ids": []},
+        "warnings": [],
+    }
+    registry_obj: WorkflowRegistry | None = None
+    if not config_path.exists():
+        checks["config"]["error"] = "registry config does not exist"
+    else:
+        try:
+            registry_obj = WorkflowRegistry.from_sources(config_path=config_path)
+        except Exception as exc:  # pragma: no cover - parser details vary by malformed config.
+            checks["config"]["error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            checks["config"]["loadable"] = True
+
+    db_path: Path | None = None
+    if registry_obj is not None:
+        try:
+            db_config = registry_obj.resolve_db(args.db)
+        except Exception as exc:
+            checks["db"]["error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            db_path = Path(db_config.path).expanduser()
+            checks["db"].update(
+                {
+                    "resolved": True,
+                    "name": db_config.name,
+                    "path": str(db_path),
+                    "exists": db_path.exists(),
+                    "parent_exists": db_path.parent.exists(),
+                }
+            )
+
+        for workflow_cfg in sorted(registry_obj.workflows.values(), key=lambda item: item.name):
+            check = {"name": workflow_cfg.name, "workflow_ref": workflow_cfg.workflow_ref, "importable": False}
+            try:
+                if args.db is not None:
+                    cfg_db = registry_obj.resolve_db(workflow_cfg.db) if workflow_cfg.db else registry_obj.resolve_db(None)
+                    if db_path is not None and Path(cfg_db.path).expanduser() != db_path:
+                        check["skipped"] = "different_db"
+                        checks["workflow_refs"].append(check)
+                        continue
+                load_workflow(workflow_cfg.workflow_ref)
+            except Exception as exc:  # pragma: no cover - exact import errors are environment-specific.
+                check["import_error"] = f"{type(exc).__name__}: {exc}"
+            else:
+                check["importable"] = True
+            checks["workflow_refs"].append(check)
+
+    if db_path is not None and db_path.exists():
+        try:
+            active_workers = WorkflowEngine(db_path, read_only=True).list_workers(active_only=True)
+        except Exception as exc:  # pragma: no cover - exact SQLite/schema errors are environment-specific.
+            checks["warnings"].append(f"could not inspect live workers: {type(exc).__name__}: {exc}")
+        else:
+            checks["workers"]["active"] = active_workers
+            counts = Counter(worker.get("worker_id") for worker in active_workers)
+            duplicates = sorted(str(worker_id) for worker_id, count in counts.items() if worker_id and count > 1)
+            checks["workers"]["duplicate_live_worker_ids"] = duplicates
+            for worker_id in duplicates:
+                checks["warnings"].append(f"duplicate live workers detected for worker_id {worker_id!r}")
+
+    import_checks = [check for check in checks["workflow_refs"] if not check.get("skipped")]
+    if registry_obj is not None and not import_checks:
+        checks["warnings"].append("no workflow refs are allowlisted for the selected DB")
+    checks["ok"] = bool(
+        checks["config"].get("loadable")
+        and checks["db"].get("resolved")
+        and import_checks
+        and all(check.get("importable") for check in import_checks)
+    )
+    print_json({"doctor": checks})
+    return 0
+
+
+def add_runner_service_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(".hermes/workflows.registry.json"),
+        help="Workflow registry/config JSON",
+    )
+    parser.add_argument("--db", help="configured DB alias or explicit local DB path")
+    parser.add_argument("--worker-id", default="workflow-worker")
+    parser.add_argument("--lease-seconds", type=int, default=30)
+    add_agent_runner_args(parser)
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     argv = normalize_agent_value_options(raw_argv)
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     visible_commands = (
-        "{registry,invoke,resume-trusted,resume-pending,start,run,worker,signal,"
+        "{registry,invoke,resume-trusted,resume-pending,start,run,runner,worker,signal,"
         "reconcile-child,reconcile-children,cancel,status,list,events,outbox,"
         "dashboard,serve-dashboard,doctor,approve,reject}"
     )
@@ -401,15 +586,44 @@ def main(argv: list[str] | None = None) -> int:
     run_engine.add_argument("--max-resumes", type=positive_int)
     sub._choices_actions = [action for action in sub._choices_actions if action.dest != "_run-engine"]
 
-    worker = sub.add_parser("worker", help="Run the Workflow Worker in resident or scoped mode")
+    runner = sub.add_parser("runner", help="Canonical Workflow Runner v2 commands")
+    runner_sub = runner.add_subparsers(dest="runner_command", required=True)
+
+    runner_run = runner_sub.add_parser("run", help="Run the resident workflow runner loop from a registry")
+    add_runner_service_args(runner_run)
+    runner_run.add_argument("--poll-interval", type=float, default=1.0, help="sleep interval while waiting for work")
+    runner_run.add_argument("--max-commands", type=positive_int, help="Exit after executing this many commands")
+    runner_run.add_argument(
+        "--idle-exit-after",
+        type=float,
+        help="exit after this many idle seconds; omit for an always-on process",
+    )
+
+    runner_once = runner_sub.add_parser("once", help="Run one WorkflowWorkerService tick(max_commands=1)")
+    add_runner_service_args(runner_once)
+
+    runner_doctor = runner_sub.add_parser("doctor", help="Validate runner registry, DB alias, workflow imports, and live workers")
+    runner_doctor.add_argument(
+        "--config",
+        type=Path,
+        default=Path(".hermes/workflows.registry.json"),
+        help="Workflow registry/config JSON",
+    )
+    runner_doctor.add_argument("--db", help="configured DB alias or explicit local DB path")
+
+    runner_status = runner_sub.add_parser("status", help="Read-only heartbeat and command projection for a workflow DB")
+    runner_status.add_argument("--db", required=True, type=Path)
+    runner_status.add_argument("--limit", type=positive_int, default=50, help="Maximum rows per command/workflow projection")
+
+    worker = sub.add_parser("worker", help="Legacy worker command; prefer `runner run`/`runner once` for resident runners")
     worker.add_argument("workflow_ref", nargs="?", help="scoped debug/recovery mode: module:function to drain one workflow id")
-    worker.add_argument("--config", type=Path, help="resident mode: workflow registry/config to scan for runnable work")
+    worker.add_argument("--config", type=Path, help="legacy resident mode: workflow registry/config; prefer `runner run --config ...`")
     worker.add_argument("--db", help="configured DB alias, explicit local DB path, or scoped-mode DB path")
     worker.add_argument("--id", dest="workflow_id", help="scoped debug/recovery mode: workflow instance id")
     worker.add_argument("--worker-id", default="workflow-worker")
     worker.add_argument("--lease-seconds", type=int, default=30)
     worker.add_argument("--poll-interval", type=float, default=1.0, help="resident mode: sleep interval while waiting for work")
-    worker.add_argument("--once", action="store_true", help="Execute at most one command")
+    worker.add_argument("--once", action="store_true", help="Execute at most one command; prefer `runner once` for registry mode")
     worker.add_argument("--max-commands", type=positive_int, help="Exit after executing this many commands")
     worker.add_argument(
         "--idle-exit-after",
@@ -510,6 +724,16 @@ def main(argv: list[str] | None = None) -> int:
             approval.add_argument("--reason")
 
     args = parser.parse_args(argv)
+    if args.command == "runner":
+        if args.runner_command == "run":
+            return run_runner_run_cli(args)
+        if args.runner_command == "once":
+            return run_runner_once_cli(args)
+        if args.runner_command == "doctor":
+            return run_runner_doctor_cli(args)
+        if args.runner_command == "status":
+            return run_runner_status_cli(args)
+        raise SystemExit(f"unknown runner command: {args.runner_command}")
     if args.command == "registry":
         if args.registry_command == "discover":
             project_root = infer_project_root(args.project_root)

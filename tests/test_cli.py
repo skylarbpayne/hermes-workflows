@@ -1823,3 +1823,146 @@ def test_module_ref_run_defaults_db_to_imported_module_project(tmp_path):
 def test_internal_run_engine_command_is_hidden_from_top_level_help(tmp_path):
     completed = run_cli_from(tmp_path, [Path.cwd() / "src", tmp_path], "--help")
     assert "_run-engine" not in completed.stdout
+
+
+RUNNER_WORKFLOW_MODULE = """
+from hermes_workflows import step, workflow
+
+@step
+async def make_runner_plan(inputs):
+    return {"summary": f"Runner plan for {inputs['destination']}"}
+
+@workflow
+async def runner_cli_workflow(inputs):
+    plan = await make_runner_plan(inputs)
+    return {"plan": plan}
+"""
+
+
+def write_runner_fixture(tmp_path):
+    (tmp_path / "runner_wf.py").write_text(RUNNER_WORKFLOW_MODULE)
+    db = tmp_path / "workflow.sqlite"
+    registry = tmp_path / "workflows.registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "dbs": {"palmer": str(db)},
+                "workflows": {
+                    "runner-cli": {"workflow_ref": "runner_wf:runner_cli_workflow", "db": "palmer"}
+                },
+            }
+        )
+    )
+    return db, registry
+
+
+def test_runner_once_status_run_and_doctor_cli(tmp_path):
+    db, registry = write_runner_fixture(tmp_path)
+    started = json.loads(
+        run_cli(
+            tmp_path,
+            "start",
+            "runner_wf:runner_cli_workflow",
+            "--db",
+            str(db),
+            "--id",
+            "wf_runner_cli",
+            "--input-json",
+            '{"destination":"SEA"}',
+        ).stdout
+    )
+    assert started["status"] == "running"
+
+    first_tick = json.loads(
+        run_cli(
+            tmp_path,
+            "runner",
+            "once",
+            "--config",
+            str(registry),
+            "--db",
+            "palmer",
+            "--worker-id",
+            "palmer-workflow-worker",
+        ).stdout
+    )
+    assert first_tick["worker_id"] == "palmer-workflow-worker"
+    assert first_tick["executed"] == 1
+    assert first_tick["executions"][0]["workflow_id"] == "wf_runner_cli"
+
+    status = json.loads(run_cli(tmp_path, "runner", "status", "--db", str(db)).stdout)
+    assert [worker["worker_id"] for worker in status["active_workers"]] == ["palmer-workflow-worker"]
+    assert [command["workflow_id"] for command in status["runnable_commands"]] == ["wf_runner_cli"]
+    assert status["errors"] == []
+
+    completed = json.loads(
+        run_cli(
+            tmp_path,
+            "runner",
+            "run",
+            "--config",
+            str(registry),
+            "--db",
+            "palmer",
+            "--worker-id",
+            "palmer-workflow-worker",
+            "--max-commands",
+            "2",
+            "--idle-exit-after",
+            "0",
+        ).stdout
+    )
+    assert completed["errors"] == []
+    assert completed["executions"][-1]["status"] == "completed"
+
+    workflow_status = json.loads(run_cli(tmp_path, "status", "--db", str(db), "--id", "wf_runner_cli").stdout)
+    assert workflow_status["status"] == "completed"
+    assert workflow_status["result"] == {"plan": {"summary": "Runner plan for SEA"}}
+
+    doctor = json.loads(run_cli(tmp_path, "runner", "doctor", "--config", str(registry), "--db", "palmer").stdout)["doctor"]
+    assert doctor["ok"] is True
+    assert doctor["config"]["exists"] is True
+    assert doctor["db"]["resolved"] is True
+    assert doctor["environment"]["python_executable"]
+    assert doctor["workflow_refs"] == [
+        {
+            "name": "runner-cli",
+            "workflow_ref": "runner_wf:runner_cli_workflow",
+            "importable": True,
+        }
+    ]
+
+
+def test_runner_doctor_warns_on_duplicate_live_workers(tmp_path):
+    db, registry = write_runner_fixture(tmp_path)
+    for suffix in ("a", "b"):
+        run_cli(
+            tmp_path,
+            "start",
+            "runner_wf:runner_cli_workflow",
+            "--db",
+            str(db),
+            "--id",
+            f"wf_runner_duplicate_{suffix}",
+            "--input-json",
+            '{"destination":"SEA"}',
+        )
+        tick = json.loads(
+            run_cli(
+                tmp_path,
+                "runner",
+                "once",
+                "--config",
+                str(registry),
+                "--db",
+                "palmer",
+                "--worker-id",
+                "duplicate-runner",
+            ).stdout
+        )
+        assert tick["executed"] == 1
+
+    doctor = json.loads(run_cli(tmp_path, "runner", "doctor", "--config", str(registry), "--db", "palmer").stdout)["doctor"]
+    assert doctor["ok"] is True
+    assert doctor["workers"]["duplicate_live_worker_ids"] == ["duplicate-runner"]
+    assert any("duplicate live workers" in warning for warning in doctor["warnings"])
