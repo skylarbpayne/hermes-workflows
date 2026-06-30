@@ -446,8 +446,14 @@
       try { payload = JSON.parse(ui.payloadText || "{}"); } catch (err) { setUi(Object.assign({}, ui, { error: "Invalid JSON payload" })); return; }
       submitPayload(payload);
     }
-    function submitReviewDecision(action) {
-      submitPayload({ action: action, feedback: ui.feedback || undefined });
+    function submitReviewDecision(action, actions) {
+      const feedbackText = String(ui.feedback || "").trim();
+      let selectedAction = action;
+      if (feedbackText && String(action || "").toLowerCase().replace(/-/g, "_") === "approve") {
+        const feedbackAction = (actions || []).find(function (item) { return item.requires_feedback && item.value !== "approve"; });
+        if (feedbackAction) selectedAction = feedbackAction.value;
+      }
+      submitPayload({ action: selectedAction, feedback: feedbackText || undefined });
     }
     if (isReviewDecisionStep(step)) {
       const surface = step.input_surface || {};
@@ -461,7 +467,7 @@
               key: action.value,
               disabled: ui.busy,
               variant: action.value === "approve" ? undefined : "outline",
-              onClick: function () { submitReviewDecision(action.value); }
+              onClick: function () { submitReviewDecision(action.value, actions); }
             }, formatActionLabel(action));
           })),
         ui.done && e("span", { className: "hwf-ok" }, ui.done),

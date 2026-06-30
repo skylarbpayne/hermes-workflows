@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +145,7 @@ class WorkflowWorkerService:
         while max_commands is None or aggregate.executed < max_commands:
             remaining = None if max_commands is None else max_commands - aggregate.executed
             tick = self.tick(max_commands=remaining)
+            _log_tick(tick)
             aggregate.executed += tick.executed
             aggregate.executions.extend(tick.executions)
             aggregate.errors.extend(tick.errors)
@@ -217,6 +220,38 @@ def _copy_result(result: RunResult, execution: WorkerServiceExecution) -> None:
     execution.waiting_on = result.waiting_on
     execution.result = result.result
     execution.error = result.error
+
+
+def _log_tick(tick: WorkerServiceTick) -> None:
+    """Emit resident-worker activity as JSONL so daemon logs show live failures.
+
+    The CLI still returns the full aggregate on stdout when the worker exits. Long-lived
+    launchd/systemd-style workers may not exit for weeks, so claim/load/execute failures
+    must be visible immediately in stderr instead of being trapped in memory.
+    """
+
+    if tick.idle and not tick.errors:
+        return
+    payload = {
+        "event": "workflow_worker_tick",
+        "worker_id": tick.worker_id,
+        "executed": tick.executed,
+        "idle": tick.idle,
+        "executions": [
+            {
+                "db_name": execution.db_name,
+                "db_path": execution.db_path,
+                "workflow_id": execution.workflow_id,
+                "workflow_ref": execution.workflow_ref,
+                "status": execution.status,
+                "waiting_on": execution.waiting_on,
+                "error": execution.error,
+            }
+            for execution in tick.executions
+        ],
+        "errors": tick.errors,
+    }
+    print(json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
 
 
 def _sources_from_registry(registry: WorkflowRegistry, *, db: str | None = None) -> list[WorkerServiceSource]:

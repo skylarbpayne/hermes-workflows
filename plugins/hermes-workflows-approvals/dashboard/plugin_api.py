@@ -956,6 +956,48 @@ def _review_action_descriptor(action: Any) -> dict[str, Any]:
     return item
 
 
+def _is_positive_review_action(value: Any) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    return normalized in {"approve", "approved", "accept", "accepted", "yes", "ship", "pass", "passed", "proceed", "continue"}
+
+
+def _feedback_action_for_surface(surface: dict[str, Any]) -> str | None:
+    if surface.get("kind") != "review_decision":
+        return None
+    for action in surface.get("actions") or []:
+        if isinstance(action, dict):
+            value = str(action.get("value") or "").strip()
+            if action.get("requires_feedback") and value:
+                return value
+    for action in surface.get("actions") or []:
+        value = str(action.get("value") if isinstance(action, dict) else action).strip()
+        if value.lower().replace("-", "_") in {"request_changes", "revise", "edit", "rerun", "reject"}:
+            return value
+    return None
+
+
+def _normalize_review_payload_for_dashboard_request(engine: WorkflowEngine, workflow_id: str, key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    # Review-decision cards expose a feedback box whose placeholder is “What should change?”.
+    # If the browser sends approve+feedback, never silently approve and discard the user's correction.
+    feedback = payload.get("feedback")
+    if not isinstance(feedback, str) or not feedback.strip() or not _is_positive_review_action(payload.get("action")):
+        return payload
+    matching_step = next(
+        (step for step in engine.list_operator_steps(status="waiting") if step.get("workflow_id") == workflow_id and step.get("key") == key),
+        None,
+    )
+    if not matching_step:
+        return payload
+    card = _operator_step_card(_strip_internal_fields(matching_step), db_alias="")
+    surface = card.get("input_surface") or {}
+    feedback_action = _feedback_action_for_surface(surface if isinstance(surface, dict) else {})
+    if not feedback_action:
+        return payload
+    normalized = dict(payload)
+    normalized["action"] = feedback_action
+    return normalized
+
+
 def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
     raw_request = step.get("request")
     request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
@@ -1473,10 +1515,12 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
 
     def record_and_resume() -> tuple[Any, dict[str, Any]]:
         _ensure_workflow_project_on_path(db_path)
-        receipt = WorkflowEngine(db_path).submit_operator_response(
+        engine = WorkflowEngine(db_path)
+        normalized_payload = _normalize_review_payload_for_dashboard_request(engine, workflow_id, key, payload)
+        receipt = engine.submit_operator_response(
             workflow_id=workflow_id,
             key=key,
-            payload=payload,
+            payload=normalized_payload,
             source={
                 "channel": "hermes-dashboard",
                 "message_id": message_id,

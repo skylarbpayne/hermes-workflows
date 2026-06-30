@@ -7,8 +7,10 @@ import importlib.util
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 
 import pytest
 
@@ -59,6 +61,24 @@ async def dashboard_ask_workflow(inputs):
         input={"summary": "dashboard ask packet"},
     )
     return {"response": response}
+
+
+@dataclass
+class DashboardReviewDecision:
+    action: Literal["approve", "request_changes"]
+    feedback: str | None = None
+
+
+@workflow
+async def dashboard_review_decision_workflow(inputs):
+    response = await ask(
+        "Review dashboard review decision?",
+        key="review_dashboard_decision",
+        input={"summary": "dashboard review packet"},
+        choice=["approve", "request_changes"],
+        returns=DashboardReviewDecision,
+    )
+    return {"response": {"action": response.action, "feedback": response.feedback}}
 
 
 @workflow
@@ -707,7 +727,7 @@ def test_dashboard_review_response_does_not_require_or_invent_approver_identity(
                 "db": "runtime-smoke",
                 "workflow_id": "wf_dashboard_ask_response",
                 "key": "review_dashboard_payload",
-                "payload": {"action": "approve", "feedback": "ship it", "by": "browser-spoof", "source": {"id": "browser"}},
+                "payload": {"action": "approve", "by": "browser-spoof", "source": {"id": "browser"}},
             }
         )
     )
@@ -716,13 +736,44 @@ def test_dashboard_review_response_does_not_require_or_invent_approver_identity(
     assert "by" not in receipt["receipt"]
     completed = WorkflowEngine(db).drain("wf_dashboard_ask_response")
     assert completed.status == "completed"
-    assert completed.result["response"] == {"action": "approve", "feedback": "ship it"}
+    assert completed.result["response"] == {"action": "approve"}
     signal = [event for event in WorkflowEngine(db).events("wf_dashboard_ask_response") if event["type"] == "SignalReceived"][-1]
-    assert signal["payload"]["payload"] == {"action": "approve", "feedback": "ship it"}
+    assert signal["payload"]["payload"] == {"action": "approve"}
     assert signal["payload"]["source"] == {
         "channel": "hermes-dashboard",
         "message_id": signal["payload"]["source"]["message_id"],
     }
+
+
+def test_dashboard_review_response_with_feedback_is_not_silent_approval(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_review_decision_workflow,
+        {},
+        workflow_id="wf_dashboard_ask_feedback",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_review_decision_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_ask_feedback",
+                "key": "review_dashboard_decision",
+                "payload": {"action": "approve", "feedback": "start from first principles", "by": "browser-spoof"},
+            }
+        )
+    )
+
+    assert receipt["success"] is True
+    completed = WorkflowEngine(db).drain("wf_dashboard_ask_feedback")
+    assert completed.status == "completed"
+    assert completed.result["response"] == {"action": "request_changes", "feedback": "start from first principles"}
+    signal = [event for event in WorkflowEngine(db).events("wf_dashboard_ask_feedback") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["payload"] == {"action": "request_changes", "feedback": "start from first principles"}
+    assert "by" not in signal["payload"]["payload"]
 
 
 def test_dashboard_select_response_does_not_require_dashboard_actor_identity(tmp_path, monkeypatch):
@@ -1629,7 +1680,8 @@ def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_inpu
     assert 'input_surface' in index_js
     assert 'surface.kind === "review_decision"' in index_js
     assert 'normalizeAction' in index_js
-    assert 'submitReviewDecision(action.value)' in index_js
+    assert 'feedbackText && String(action || "").toLowerCase().replace(/-/g, "_") === "approve"' in index_js
+    assert 'submitReviewDecision(action.value, actions)' in index_js
     assert 'formatActionLabel(action)' in index_js
     assert 'Request edits' not in index_js
     assert 'submitReviewDecision("reject")' not in index_js
