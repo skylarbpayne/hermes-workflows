@@ -36,12 +36,12 @@ def render_dashboard(
     ]
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(_render_html(engine.db_path, status_packets), encoding="utf-8")
+    out_path.write_text(_render_html(status_packets), encoding="utf-8")
     return out_path
 
 
-def _render_html(db_path: Path, workflows: list[dict[str, Any]]) -> str:
-    workflow_cards = "\n".join(_workflow_card(packet, db_path=db_path) for packet in workflows)
+def _render_html(workflows: list[dict[str, Any]]) -> str:
+    workflow_cards = "\n".join(_workflow_card(packet) for packet in workflows)
     if not workflow_cards:
         workflow_cards = '<p class="empty">No workflows found for this filter.</p>'
     return f"""<!doctype html>
@@ -74,7 +74,7 @@ def _render_html(db_path: Path, workflows: list[dict[str, Any]]) -> str:
 <body>
   <header>
     <h1>Hermes Workflows Dashboard</h1>
-    <p class="muted">Read-only local dashboard for <code>{_e(str(db_path))}</code>. Approvals must still go through the normal signal path. Use <code>hermes-workflows approve</code>/<code>reject</code> with the workflow ref shown by your run command so the DB keeps one auditable decision shape.</p>
+    <p class="muted">Read-only local dashboard for the configured workflow DB. Raw local DB paths are intentionally hidden in browser output. Approvals must still go through the normal signal path. Use <code>hermes-workflows approve</code>/<code>reject</code> with the workflow ref shown by your run command so the DB keeps one auditable decision shape.</p>
   </header>
   <main class="grid">
     {workflow_cards}
@@ -84,7 +84,7 @@ def _render_html(db_path: Path, workflows: list[dict[str, Any]]) -> str:
 """
 
 
-def _workflow_card(packet: dict[str, Any], db_path: Path | None = None) -> str:
+def _workflow_card(packet: dict[str, Any]) -> str:
     approvals = packet.get("approvals") or []
     pending = packet.get("pending_commands") or []
     diagnostics = packet.get("diagnostics") or []
@@ -98,7 +98,7 @@ def _workflow_card(packet: dict[str, Any], db_path: Path | None = None) -> str:
     <span class="pill">workflow: {_e(packet.get('workflow_name'))}</span>
     <span class="pill">waiting: {_e(packet.get('waiting_on') or 'none')}</span>
   </div>
-  {_approval_table(approvals, workflow_id=str(packet.get('workflow_id') or '<workflow_id>'), db_path=db_path)}
+  {_approval_table(approvals, workflow_id=str(packet.get('workflow_id') or '<workflow_id>'), db_path=None)}
   {_command_table('Pending commands', pending)}
   {_diagnostic_table(diagnostics)}
   {_command_table('Recent commands', commands)}

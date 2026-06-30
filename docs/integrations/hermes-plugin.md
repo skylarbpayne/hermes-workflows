@@ -229,7 +229,7 @@ Otherwise it returns no-op so normal Hermes processing continues.
 
 - Foreground runner first: use `hermes-workflows runner run --config ... --max-commands ... --idle-exit-after ...` or `runner once` to prove the configured DB/catalog before installing a daemon.
 - Daemon second/deferred: launchd/systemd/s6/tmux may supervise the same `runner run` command after foreground proof. Do not mutate a live workflow DB or start a live daemon from documentation snippets; copy them into a deliberate operator runbook with the target registry/DB reviewed.
-- Response continuation invariant: a Review Queue response or approval decision creates an inspectable continuation path. With `resume=false`, `hermes-workflows status --commands recent` / `hermes-workflows runner status` should show queued runnable work. With trusted `resume=true`, the same local workflow source is resumed and the post-resume status is returned.
+- Response continuation invariant: a Review Queue response or approval decision creates an inspectable continuation path. With `resume=false`, `hermes-workflows status --commands recent` / `hermes-workflows runner status` should show queued runnable work. With trusted `resume=true`, the adapter returns post-resume status, but operators should still use command history/runner status as the truth for queued, running, stuck, or completed work.
 - Dogfood rule: human-gated completion requires real human response provenance. `by`, `channel`, and a message/event id (or equivalent adapter proof) must identify where the human response came from. Test fixtures, local smokes, and manual signals are acceptable only when labeled as test/manual provenance; never present them as real human approval.
 
 State labels in the dashboard and CLI mean:

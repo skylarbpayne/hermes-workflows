@@ -1192,6 +1192,7 @@ class WorkflowEngine:
         error: Dict[str, Any],
         *,
         requeue: bool = True,
+        allow_running: bool = False,
     ) -> bool:
         """Record a runner-side command error that happened before command execution.
 
@@ -1208,17 +1209,18 @@ class WorkflowEngine:
         }
         now = _now()
         next_status = "pending" if requeue else "failed"
+        status_clause = "status IN ('pending', 'running')" if allow_running else "status = 'pending'"
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             changed = con.execute(
-                """
+                f"""
                 UPDATE workflow_commands_outbox
                 SET status = ?, claimed_by = NULL, claimed_by_instance_id = NULL,
                     claim_token = NULL, lease_expires_at = NULL,
                     last_error_json = ?, updated_at = ?
                 WHERE id = ?
                   AND workflow_id = ?
-                  AND status IN ('pending', 'running')
+                  AND {status_clause}
                   AND workflow_id IN (
                     SELECT id FROM workflow_instances
                     WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')

@@ -214,7 +214,7 @@ Hermes plugin/tool shape:
 }
 ```
 
-By default, Review Queue responses resume the workflow immediately (`resume=true`), which matches operator expectations for trusted local adapters. If an adapter is remote/untrusted and should only record the decision, pass `resume=false`; the runtime records the operator response and creates a visible `run_workflow` continuation command with reason `operator_response`. A trusted foreground runner must consume that command. Continuation should be observable in `hermes-workflows status --commands recent` / `hermes-workflows runner status`, not hidden inside a chat callback.
+Review Queue responses create an inspectable workflow continuation. With `resume=false`, the runtime only records the operator response and leaves a visible `run_workflow` continuation command with reason `operator_response`; a trusted foreground runner must consume that command. Trusted local adapters may still request `resume=true`, but operators should treat the returned post-resume state and command history as the source of truth. Continuation should be observable in `hermes-workflows status --commands recent` / `hermes-workflows runner status`, not hidden inside a chat callback.
 
 ## 7. Configure the Hermes dashboard/plugin
 
@@ -240,7 +240,7 @@ plugins:
             - /absolute/path/to/hermes-workflows/src
 ```
 
-The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Dashboard approval decisions and typed Review Queue responses from `ask(...)` / `select(...)` do not use dashboard approver ids. The backend strips browser-supplied actor/provenance fields and stamps dashboard event provenance. Review Queue responses/approval decisions default to `resume=true` so a person can click/respond and see the run continue in a trusted local setup. Remote or untrusted adapters may pass `resume=false` for record-only behavior; the foreground Workflow Runner remains the continuation path in that mode.
+The dashboard route is `/workflows`. It should show a Review Queue, active workflow source alias, run state, recent events, command diagnostics, and redacted artifacts. Dashboard approval decisions and typed Review Queue responses from `ask(...)` / `select(...)` do not use dashboard approver ids. The backend strips browser-supplied actor/provenance fields and stamps dashboard event provenance. Review Queue responses/approval decisions create inspectable continuation state. Trusted local adapters may request `resume=true` and return the resulting post-resume state; remote or untrusted adapters may pass `resume=false` for record-only behavior. In both cases, command history and `runner status` remain the operator truth for whether work is queued, running, stuck, or complete.
 
 Environment fallback for local smokes:
 

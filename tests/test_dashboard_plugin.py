@@ -1035,7 +1035,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     approvals = run(api.active_approvals(db="runtime-smoke"))
     approval = next(item for item in approvals["approvals"] if item["workflow_id"] == launched_workflow_id)
     assert approval["headline"] == "Approve the plugin test packet?"
-    assert approval["consequence"] == "Records approve/reject with human provenance, then resumes the trusted local workflow immediately."
+    assert approval["consequence"] == "Records approve/reject with human provenance and creates an inspectable workflow continuation."
     assert approval["risk"]["level"] == "low"
     assert approval["artifact_render"]["render"] == "inline-json"
     assert approval["artifact_preview"]["summary"] == "Plugin approval packet"
@@ -1045,7 +1045,7 @@ def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_
     detail = run(api.approval_detail(db="runtime-smoke", workflow_id=launched_workflow_id, key="approve_plugin_test"))
     assert detail["approval"]["key"] == "approve_plugin_test"
     assert detail["decision_semantics"]["resume"] is True
-    assert "resumes the trusted local workflow" in detail["decision_semantics"]["description"]
+    assert "inspectable continuation" in detail["decision_semantics"]["description"]
     assert detail["what_you_are_approving"]["action"] == "approve_plugin_test"
     assert detail["timeline"][0]["type"] == "WorkflowStarted"
     assert detail["timeline"][-1]["type"] == "ApprovalRequested"
@@ -1252,6 +1252,16 @@ def test_dashboard_runtime_state_hides_worker_paths_and_warns_on_multiple_worker
             "platform": "test-platform",
             "hermes_version": "test-version",
             "agent_runner_enabled": True,
+            "metadata": {
+                "source_db_name": "runtime-smoke",
+                "source_db_path": str(db),
+                "allowed_workflow_refs_count": 2,
+                "package_fingerprint": {
+                    "hermes_workflows": "test-version",
+                    "python": "3.test",
+                    "executable": str(secret_python),
+                },
+            },
         },
     )
     engine.record_worker_heartbeat(
@@ -1276,6 +1286,11 @@ def test_dashboard_runtime_state_hides_worker_paths_and_warns_on_multiple_worker
     assert runtime_state["label"] == "Running — claimed by worker-a"
     assert runtime_state["worker"]["environment"]["python_executable"] == "python"
     assert runtime_state["worker"]["environment"]["workspace_relation"] == "different_from_dashboard"
+    assert runtime_state["worker"]["metadata"] == {
+        "source_db_name": "runtime-smoke",
+        "allowed_workflow_refs_count": 2,
+        "package_fingerprint": {"hermes_workflows": "test-version", "python": "3.test"},
+    }
     packet = json.dumps(status)
     assert str(db) not in packet
     assert str(secret_cwd) not in packet

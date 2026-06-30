@@ -136,6 +136,36 @@ def _dashboard_runtime_label(state: dict[str, Any]) -> str:
     return str(state.get("label") or primary.replace("_", " ").capitalize())
 
 
+def _dashboard_worker_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    if metadata.get("source_db_name") is not None:
+        safe["source_db_name"] = str(metadata.get("source_db_name"))
+    if metadata.get("allowed_workflow_refs_count") is not None:
+        try:
+            safe["allowed_workflow_refs_count"] = int(metadata.get("allowed_workflow_refs_count"))
+        except (TypeError, ValueError):
+            pass
+    package_fingerprint = metadata.get("package_fingerprint")
+    if isinstance(package_fingerprint, dict):
+        safe_package: dict[str, Any] = {}
+        for key in ("hermes_workflows", "python"):
+            if package_fingerprint.get(key) is not None:
+                safe_package[key] = str(package_fingerprint.get(key))
+        if safe_package:
+            safe["package_fingerprint"] = safe_package
+    active_command = metadata.get("active_command")
+    if isinstance(active_command, dict):
+        safe_active: dict[str, Any] = {}
+        for key in ("command_id", "command_type", "command_key", "workflow_id"):
+            if active_command.get(key) is not None:
+                safe_active[key] = active_command.get(key)
+        if safe_active:
+            safe["active_command"] = safe_active
+    return safe
+
+
 def _dashboard_runtime_state(runtime_state: Any, *, db_alias: str | None) -> dict[str, Any] | None:
     """Sanitize runtime_state for browser packets.
 
@@ -171,6 +201,7 @@ def _dashboard_runtime_state(runtime_state: Any, *, db_alias: str | None) -> dic
             "agent_runner_enabled": bool(environment.get("agent_runner_enabled")),
             "workspace_relation": _path_environment_relation(environment.get("cwd")),
         }
+        safe_worker["metadata"] = _dashboard_worker_metadata(safe_worker.get("metadata"))
         state["worker"] = safe_worker
     state["label"] = _dashboard_runtime_label(state)
     return state
@@ -1256,7 +1287,7 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str, runtime_state: di
         "waiting_on": approval.get("waiting_on"),
         "requested_seq": approval.get("requested_seq"),
         "risk": _risk_for_approval(approval),
-        "consequence": "Records approve/reject with human provenance, then resumes the trusted local workflow immediately.",
+        "consequence": "Records approve/reject with human provenance and creates an inspectable workflow continuation.",
         "detail_url": f"/approvals/detail?db={db_alias}&workflow_id={approval.get('workflow_id')}&key={approval.get('key')}",
     }
     if runtime_state is not None:
@@ -1578,7 +1609,7 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         "decision_semantics": {
             "resume": True,
             "label": "Record and resume",
-            "description": "The dashboard records approve/reject with server-derived human provenance, then resumes the trusted local workflow immediately in this Hermes process.",
+            "description": "The dashboard records approve/reject with server-derived human provenance and creates an inspectable continuation; trusted runners consume the queued workflow work.",
         },
         "timeline": timeline,
         "artifacts": _artifacts_from_status(status),

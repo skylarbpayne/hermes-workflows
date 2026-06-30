@@ -234,6 +234,27 @@ def test_worker_claims_one_pending_workflow_run_with_a_lease(tmp_path):
     assert command_row(db, "workflow:run")["claimed_by"] == "worker-a"
 
 
+
+def test_record_command_error_does_not_clear_live_running_claim(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_error_race")
+    claimed = engine.claim_command("wf_error_race", worker_id="worker-live", lease_seconds=60, command_type="run_workflow")
+    assert claimed is not None
+    changed = engine.record_command_error(
+        "wf_error_race",
+        int(claimed["id"]),
+        {"type": "ImportError", "message": "stale pre-claim worker failed after another worker claimed"},
+        requeue=True,
+    )
+    assert changed is False
+    row = command_row(db, "workflow:run")
+    assert row["status"] == "running"
+    assert row["claimed_by"] == "worker-live"
+    assert row["claim_token"] == claimed["claim_token"]
+    assert row["last_error_json"] is None
+
+
 def test_expired_running_command_can_be_reclaimed(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)

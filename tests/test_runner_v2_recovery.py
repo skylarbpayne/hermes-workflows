@@ -145,6 +145,7 @@ def test_runner_records_import_error_in_status_and_dashboard(tmp_path):
     assert "workflow_import_error" in html
     assert "ModuleNotFoundError" in html
     assert "definitely_missing_runner_v2_package" in html
+    assert str(db) not in html
 
 
 def test_duplicate_operator_response_replay_keeps_single_continuation_and_conflict_rejected(tmp_path):
