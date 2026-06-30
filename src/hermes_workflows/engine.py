@@ -1219,7 +1219,7 @@ class WorkflowEngine:
             "platform": identity.get("platform"),
             "hermes_version": identity.get("hermes_version"),
             "agent_runner_enabled": 1 if identity.get("agent_runner_enabled") else 0,
-            "metadata_json": JsonCodec.dumps({}),
+            "metadata_json": JsonCodec.dumps(_safe_worker_metadata(identity.get("metadata"))),
         }
         with self._connect() as con:
             con.execute(
@@ -3548,6 +3548,9 @@ def _worker_payload(row: sqlite3.Row, *, now: int | None = None) -> Dict[str, An
         "hermes_version": row["hermes_version"],
         "agent_runner_enabled": bool(row["agent_runner_enabled"]),
     }
+    metadata = JsonCodec.loads(row["metadata_json"])
+    if not isinstance(metadata, dict):
+        metadata = {}
     return {
         "worker_instance_id": row["worker_instance_id"],
         "worker_id": row["worker_id"],
@@ -3558,8 +3561,47 @@ def _worker_payload(row: sqlite3.Row, *, now: int | None = None) -> Dict[str, An
         "heartbeat_expires_at": heartbeat_expires_at,
         "heartbeat_age_seconds": max(0, now - int(row["last_heartbeat_at"])),
         "environment": environment,
-        "metadata": {},
+        "metadata": metadata,
     }
+
+
+def _safe_worker_metadata(raw_metadata: Any) -> Dict[str, Any]:
+    """Persist only runner-owned, public-safe worker heartbeat metadata.
+
+    Callers may accidentally pass arbitrary/user-supplied metadata. Heartbeats are
+    surfaced in status/dashboard output, so keep this to a small allowlist used by
+    the resident worker service and drop everything else.
+    """
+
+    if not isinstance(raw_metadata, dict):
+        return {}
+    metadata: Dict[str, Any] = {}
+    for key in ("source_db_name", "source_db_path"):
+        value = raw_metadata.get(key)
+        if isinstance(value, str) and value:
+            metadata[key] = value
+    allowed_count = raw_metadata.get("allowed_workflow_refs_count")
+    if isinstance(allowed_count, int) and allowed_count >= 0:
+        metadata["allowed_workflow_refs_count"] = allowed_count
+    package_fingerprint = raw_metadata.get("package_fingerprint")
+    if isinstance(package_fingerprint, dict):
+        safe_fingerprint = {
+            str(key): value
+            for key, value in package_fingerprint.items()
+            if isinstance(key, str) and isinstance(value, (str, int, float, bool, type(None)))
+        }
+        if safe_fingerprint:
+            metadata["package_fingerprint"] = safe_fingerprint
+    active_command = raw_metadata.get("active_command")
+    if isinstance(active_command, dict):
+        safe_command: Dict[str, Any] = {}
+        for key in ("command_id", "command_type", "command_key", "workflow_id"):
+            value = active_command.get(key)
+            if isinstance(value, (str, int)) and value != "":
+                safe_command[key] = value
+        if safe_command:
+            metadata["active_command"] = safe_command
+    return metadata
 
 
 def _lease_seconds_from_row(row: sqlite3.Row) -> int:

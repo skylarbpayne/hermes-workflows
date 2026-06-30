@@ -12,6 +12,7 @@ from hermes_workflows.engine import WorkflowContext, WorkflowWaiting
 
 RUNS = []
 LEASE_OBSERVATIONS = []
+HEARTBEAT_OBSERVATIONS = []
 SHOULD_FAIL_STALE = False
 MIDFLIGHT_RECLAIM_ENGINE = None
 
@@ -51,6 +52,14 @@ async def worker_slow_lease_probe(context):
     assert row is not None
     during = row["lease_expires_at"]
     LEASE_OBSERVATIONS.append((before, during))
+    with sqlite3.connect(context.engine.db_path) as con:
+        con.row_factory = sqlite3.Row
+        worker_rows = con.execute("SELECT * FROM workflow_workers ORDER BY last_heartbeat_at DESC").fetchall()
+    HEARTBEAT_OBSERVATIONS.extend(
+        json.loads(worker["metadata_json"])
+        for worker in worker_rows
+        if worker["metadata_json"]
+    )
     return "slow result"
 
 
@@ -954,6 +963,74 @@ def test_worker_service_records_heartbeat_and_claims_with_worker_instance(tmp_pa
     assert [worker["worker_instance_id"] for worker in workers] == [service.worker_instance_id]
     row = command_row(db, "workflow:run")
     assert row is not None
+    assert row["claimed_by"] == "resident-worker"
+    assert row["claimed_by_instance_id"] == service.worker_instance_id
+
+
+def test_worker_service_records_heartbeat_before_scanning_when_idle(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "service-worker": {"workflow_ref": "tests.test_worker:worker_gather_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+
+    summary = service.tick(max_commands=1)
+
+    assert summary.executed == 0
+    workers = WorkflowEngine(db).list_workers(active_only=True)
+    assert [worker["worker_instance_id"] for worker in workers] == [service.worker_instance_id]
+    assert workers[0]["metadata"]["source_db_name"] == "service"
+    assert workers[0]["metadata"]["source_db_path"] == str(db)
+    assert workers[0]["metadata"]["allowed_workflow_refs_count"] == 1
+    assert "package_fingerprint" in workers[0]["metadata"]
+
+
+def test_worker_service_active_command_heartbeat_matches_claimed_command(tmp_path):
+    HEARTBEAT_OBSERVATIONS.clear()
+    loaded_module = sys.modules.get("tests.test_worker")
+    if loaded_module is not None and hasattr(loaded_module, "HEARTBEAT_OBSERVATIONS"):
+        loaded_module.HEARTBEAT_OBSERVATIONS.clear()
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).start(
+        worker_slow_lease_workflow,
+        {},
+        workflow_id="wf_service_active_command",
+        workflow_ref="tests.test_worker:worker_slow_lease_workflow",
+    )
+    registry = WorkflowRegistry.from_sources(
+        config={
+            "dbs": {"service": str(db)},
+            "workflows": {
+                "service-worker": {"workflow_ref": "tests.test_worker:worker_slow_lease_workflow", "db": "service"}
+            },
+        }
+    )
+    service = WorkflowWorkerService.from_registry(registry, worker_id="resident-worker")
+    service.heartbeat_ttl_seconds = 3
+
+    first = service.tick(max_commands=1)
+    assert first.executed == 1
+    second = service.tick(max_commands=1)
+
+    assert second.executed == 1
+    assert second.executions[0].command_id == command_row(db, "step:worker_slow_lease_probe:0")["id"]
+    assert second.executions[0].heartbeat_status == "running"
+    loaded_observations = getattr(sys.modules.get("tests.test_worker"), "HEARTBEAT_OBSERVATIONS", [])
+    observations = [*HEARTBEAT_OBSERVATIONS, *loaded_observations]
+    active = [metadata.get("active_command") for metadata in observations if metadata.get("active_command")]
+    assert active
+    assert active[-1] == {
+        "command_id": command_row(db, "step:worker_slow_lease_probe:0")["id"],
+        "command_type": "run_step",
+        "command_key": "step:worker_slow_lease_probe:0",
+        "workflow_id": "wf_service_active_command",
+    }
+    row = command_row(db, "step:worker_slow_lease_probe:0")
     assert row["claimed_by"] == "resident-worker"
     assert row["claimed_by_instance_id"] == service.worker_instance_id
 

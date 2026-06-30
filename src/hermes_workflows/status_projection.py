@@ -10,6 +10,8 @@ from .workflow_values import Workflow
 
 
 TERMINAL_WORKFLOW_STATUSES = {"completed", "failed", "cancelled"}
+PENDING_RUNNABLE_STUCK_AFTER_SECONDS = 60
+REPEATED_COMMAND_FAILURE_ATTEMPTS = 3
 
 
 class JsonCodec:
@@ -198,6 +200,7 @@ class StatusProjection:
         review_requests: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         now = int(time.time())
+        worker_health = self._worker_health_snapshot(now=now)
         workflow_status = str(row["status"])
         waiting_on = row["waiting_on"]
         terminal = workflow_status in TERMINAL_WORKFLOW_STATUSES
@@ -222,16 +225,31 @@ class StatusProjection:
         elif runnable_commands:
             command = runnable_commands[0]
             lease_expires_at = command.get("lease_expires_at")
-            if command.get("status") == "running" and isinstance(lease_expires_at, int) and lease_expires_at <= now:
+            if _is_repeated_command_failure(command):
+                primary = "stuck"
+                reason = "repeated_command_failure"
+                label = "Stuck"
+                next_action = "Inspect the command error history before retrying this workflow."
+            elif command.get("status") == "running" and isinstance(lease_expires_at, int) and lease_expires_at <= now:
                 primary = "stuck"
                 reason = "lease_expired"
                 label = "Stuck"
                 next_action = "Restart or repair the runner; this command lease has expired."
+            elif _running_command_worker_is_stale(self, command, now=now):
+                primary = "stuck"
+                reason = "worker_heartbeat_stale"
+                label = "Stuck"
+                next_action = "Restart or repair the runner; the claiming worker heartbeat is stale."
             elif command.get("status") == "running":
                 primary = "running"
                 reason = "runnable_command_claimed"
                 label = "Running"
                 next_action = "Wait for the runner heartbeat/lease to advance or expire."
+            elif _pending_command_is_old(command, now=now) and not worker_health.get("healthy"):
+                primary = "stuck"
+                reason = "no_healthy_worker"
+                label = "Stuck"
+                next_action = "Start or repair the runner for this workflow source; no healthy worker heartbeat is present."
             else:
                 primary = "queued"
                 reason = "runnable_command_unclaimed"
@@ -279,6 +297,7 @@ class StatusProjection:
             "current_wait": _runtime_wait_summary(str(waiting_on)) if waiting_on else None,
             "command": command_payload,
             "worker": worker_payload,
+            "worker_health": worker_health,
             "next_action": next_action,
         }
 
@@ -295,10 +314,45 @@ class StatusProjection:
             raise
         if row is None:
             return None
+        return self._worker_row_payload(row, now=now)
+
+    def _worker_health_snapshot(self, *, now: int) -> Dict[str, Any]:
+        try:
+            with self._connect() as con:
+                rows = con.execute(
+                    """
+                    SELECT *
+                    FROM workflow_workers
+                    ORDER BY last_heartbeat_at DESC, worker_instance_id ASC
+                    """
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table: workflow_workers" in str(exc):
+                rows = []
+            else:
+                raise
+        workers = [self._worker_row_payload(row, now=now) for row in rows]
+        active_workers = [worker for worker in workers if worker.get("active")]
+        stale_workers = [worker for worker in workers if worker.get("status") == "stale"]
+        stopped_workers = [worker for worker in workers if worker.get("status") == "stopped"]
+        return {
+            "schema_version": "worker_health.v1",
+            "healthy": bool(active_workers),
+            "active_worker_count": len(active_workers),
+            "stale_worker_count": len(stale_workers),
+            "stopped_worker_count": len(stopped_workers),
+            "total_worker_count": len(workers),
+            "active_workers": [_worker_health_worker_summary(worker) for worker in active_workers],
+        }
+
+    def _worker_row_payload(self, row: sqlite3.Row, *, now: int) -> Dict[str, Any]:
         raw_status = str(row["status"] or "running")
         heartbeat_expires_at = row["heartbeat_expires_at"]
         active = raw_status != "stopped" and isinstance(heartbeat_expires_at, int) and heartbeat_expires_at > now
         projected_status = "stopped" if raw_status == "stopped" else ("running" if active else "stale")
+        metadata = JsonCodec.loads(row["metadata_json"])
+        if not isinstance(metadata, dict):
+            metadata = {}
         return {
             "worker_instance_id": row["worker_instance_id"],
             "worker_id": row["worker_id"],
@@ -318,7 +372,7 @@ class StatusProjection:
                 "hermes_version": row["hermes_version"],
                 "agent_runner_enabled": bool(row["agent_runner_enabled"]),
             },
-            "metadata": {},
+            "metadata": metadata,
         }
 
     def _terminal_reason(self, workflow_id: str) -> Optional[Dict[str, Any]]:
@@ -827,6 +881,48 @@ def _runtime_command_summary(command: Dict[str, Any], *, diagnostics: list[dict[
         "diagnostic_labels": list(command.get("diagnostic_labels") or []),
         "diagnostics": diagnostics,
     }
+
+
+def _worker_health_worker_summary(worker: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = worker.get("metadata") if isinstance(worker.get("metadata"), dict) else {}
+    return {
+        "worker_instance_id": worker.get("worker_instance_id"),
+        "worker_id": worker.get("worker_id"),
+        "last_heartbeat_at": worker.get("last_heartbeat_at"),
+        "heartbeat_expires_at": worker.get("heartbeat_expires_at"),
+        "source_db_name": metadata.get("source_db_name"),
+        "allowed_workflow_refs_count": metadata.get("allowed_workflow_refs_count"),
+    }
+
+
+def _is_repeated_command_failure(command: Dict[str, Any]) -> bool:
+    attempts = command.get("attempts")
+    try:
+        attempt_count = int(attempts or 0)
+    except (TypeError, ValueError):
+        attempt_count = 0
+    return command.get("last_error") is not None and attempt_count >= REPEATED_COMMAND_FAILURE_ATTEMPTS
+
+
+def _pending_command_is_old(command: Dict[str, Any], *, now: int) -> bool:
+    if command.get("status") != "pending":
+        return False
+    timestamp = command.get("updated_at") or command.get("created_at")
+    if not isinstance(timestamp, int):
+        return False
+    return now - timestamp >= PENDING_RUNNABLE_STUCK_AFTER_SECONDS
+
+
+def _running_command_worker_is_stale(projection: StatusProjection, command: Dict[str, Any], *, now: int) -> bool:
+    if command.get("status") != "running":
+        return False
+    if not command.get("claimed_by"):
+        return False
+    worker_instance_id = command.get("claimed_by_instance_id")
+    if not worker_instance_id:
+        return False
+    worker = projection._worker_snapshot(str(worker_instance_id), now=now)
+    return worker is None or not bool(worker.get("active"))
 
 
 def _has_pending_review_requests(review_requests: list[dict[str, Any]]) -> bool:

@@ -33,6 +33,8 @@ class WorkerServiceExecution:
     db_path: str
     workflow_id: str
     workflow_ref: str | None
+    command_id: int | None = None
+    heartbeat_status: str | None = None
     status: str | None = None
     waiting_on: str | None = None
     result: Any = None
@@ -202,7 +204,11 @@ class WorkflowWorkerService:
             workflow_id=workflow_id,
             workflow_ref=str(workflow_ref) if workflow_ref else None,
         )
-        stop, heartbeat_thread = self._start_source_heartbeat(source)
+        active_command = _active_command_metadata(candidate)
+        active_heartbeat = self._heartbeat_source(source, active_command=active_command)
+        execution.command_id = int(candidate["command_id"])
+        execution.heartbeat_status = str(active_heartbeat.get("status") or "running")
+        stop, heartbeat_thread = self._start_source_heartbeat(source, active_command=active_command)
         try:
             if not workflow_ref:
                 raise ValueError("worker service requires stored workflow_ref on runnable workflow instances")
@@ -239,13 +245,19 @@ class WorkflowWorkerService:
         _copy_result(result, execution)
         return execution
 
-    def _heartbeat_source(self, source: WorkerServiceSource) -> None:
+    def _heartbeat_source(
+        self,
+        source: WorkerServiceSource,
+        *,
+        active_command: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         engine = WorkflowEngine(Path(source.path), agent_runner=self.agent_runner)
-        engine.record_worker_heartbeat(
+        identity = _identity_for_source(self._identity, source, active_command=active_command)
+        return engine.record_worker_heartbeat(
             worker_id=self.worker_id,
             worker_instance_id=self.worker_instance_id,
             heartbeat_ttl_seconds=self.heartbeat_ttl_seconds,
-            identity=self._identity,
+            identity=identity,
         )
 
     def _mark_source_stopped(self, source: WorkerServiceSource) -> None:
@@ -257,14 +269,19 @@ class WorkflowWorkerService:
         except Exception:
             return
 
-    def _start_source_heartbeat(self, source: WorkerServiceSource) -> tuple[threading.Event, threading.Thread]:
+    def _start_source_heartbeat(
+        self,
+        source: WorkerServiceSource,
+        *,
+        active_command: dict[str, Any] | None = None,
+    ) -> tuple[threading.Event, threading.Thread]:
         interval = max(1.0, min(float(self.heartbeat_ttl_seconds) / 3.0, 10.0))
         stop = threading.Event()
 
         def heartbeat() -> None:
             while not stop.wait(interval):
                 try:
-                    self._heartbeat_source(source)
+                    self._heartbeat_source(source, active_command=active_command)
                 except Exception:
                     continue
 
@@ -306,6 +323,8 @@ def _log_tick(tick: WorkerServiceTick) -> None:
                 "db_path": execution.db_path,
                 "workflow_id": execution.workflow_id,
                 "workflow_ref": execution.workflow_ref,
+                "command_id": execution.command_id,
+                "heartbeat_status": execution.heartbeat_status,
                 "status": execution.status,
                 "waiting_on": execution.waiting_on,
                 "error": execution.error,
@@ -336,7 +355,43 @@ def _worker_identity(*, agent_runner_enabled: bool) -> dict[str, Any]:
         "platform": platform.platform(),
         "hermes_version": hermes_version,
         "agent_runner_enabled": agent_runner_enabled,
-        "metadata": {},
+        "metadata": {
+            "package_fingerprint": {
+                "hermes_workflows": hermes_version,
+                "python": platform.python_version(),
+                "executable": sys.executable,
+            }
+        },
+    }
+
+
+def _identity_for_source(
+    identity: dict[str, Any],
+    source: WorkerServiceSource,
+    *,
+    active_command: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    scoped = dict(identity)
+    metadata = dict(identity.get("metadata") or {})
+    metadata.update(
+        {
+            "source_db_name": source.name,
+            "source_db_path": source.path,
+            "allowed_workflow_refs_count": len(source.allowed_workflow_refs),
+        }
+    )
+    if active_command is not None:
+        metadata["active_command"] = active_command
+    scoped["metadata"] = metadata
+    return scoped
+
+
+def _active_command_metadata(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "command_id": int(candidate["command_id"]),
+        "command_type": str(candidate["command_type"]),
+        "command_key": str(candidate["command_key"]),
+        "workflow_id": str(candidate["workflow_id"]),
     }
 
 

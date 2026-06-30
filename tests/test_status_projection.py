@@ -1,3 +1,6 @@
+import json
+import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Literal
 
@@ -116,6 +119,96 @@ def test_status_projection_matches_workflow_engine_facade_read_models(tmp_path):
             "waiting_on": None,
         }
     ]
+
+
+def test_runtime_state_projects_old_pending_runnable_without_healthy_worker_as_stuck(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(status_projection_workflow, {"value": "green"}, workflow_id="wf_no_worker")
+    old = int(time.time()) - 3600
+    with sqlite3.connect(db) as con:
+        con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET created_at = ?, updated_at = ?
+            WHERE workflow_id = ? AND type = 'run_workflow' AND key = 'workflow:run'
+            """,
+            (old, old, "wf_no_worker"),
+        )
+
+    status = engine.workflow_status("wf_no_worker")
+
+    assert status["runtime_state"]["primary"] == "stuck"
+    assert status["runtime_state"]["reason"] == "no_healthy_worker"
+    assert status["runtime_state"]["worker_health"]["healthy"] is False
+    assert status["runtime_state"]["worker_health"]["active_worker_count"] == 0
+
+
+def test_runtime_state_keeps_new_pending_runnable_queued_without_worker(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(status_projection_workflow, {"value": "green"}, workflow_id="wf_new_no_worker")
+
+    status = engine.workflow_status("wf_new_no_worker")
+
+    assert status["runtime_state"]["primary"] == "queued"
+    assert status["runtime_state"]["reason"] == "runnable_command_unclaimed"
+    assert status["runtime_state"]["worker_health"]["healthy"] is False
+
+
+def test_runtime_state_projects_running_command_with_stale_worker_heartbeat_as_stuck(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(status_projection_workflow, {"value": "green"}, workflow_id="wf_stale_worker")
+    engine.record_worker_heartbeat(
+        worker_id="resident-worker",
+        worker_instance_id="resident-worker:stale",
+        heartbeat_ttl_seconds=60,
+        identity={"hostname": "test-host"},
+    )
+    claimed = engine.claim_command(
+        "wf_stale_worker",
+        worker_id="resident-worker",
+        worker_instance_id="resident-worker:stale",
+        lease_seconds=3600,
+        command_type="run_workflow",
+    )
+    assert claimed is not None
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "UPDATE workflow_workers SET heartbeat_expires_at = 1, last_heartbeat_at = 1 WHERE worker_instance_id = ?",
+            ("resident-worker:stale",),
+        )
+
+    status = engine.workflow_status("wf_stale_worker")
+
+    assert status["runtime_state"]["primary"] == "stuck"
+    assert status["runtime_state"]["reason"] == "worker_heartbeat_stale"
+    assert status["runtime_state"]["worker"]["status"] == "stale"
+    assert status["runtime_state"]["worker_health"]["stale_worker_count"] == 1
+
+
+def test_runtime_state_projects_repeated_command_failure_as_stuck(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(status_projection_workflow, {"value": "green"}, workflow_id="wf_repeated_failure")
+    now = int(time.time())
+    with sqlite3.connect(db) as con:
+        con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET attempts = 3, last_error_json = ?, updated_at = ?
+            WHERE workflow_id = ? AND type = 'run_workflow' AND key = 'workflow:run'
+            """,
+            (json.dumps({"type": "RuntimeError", "message": "boom"}), now, "wf_repeated_failure"),
+        )
+
+    status = engine.workflow_status("wf_repeated_failure")
+
+    assert status["runtime_state"]["primary"] == "stuck"
+    assert status["runtime_state"]["reason"] == "repeated_command_failure"
+    assert status["runtime_state"]["command"]["attempts"] == 3
+    assert status["runtime_state"]["command"]["last_error"] == {"type": "RuntimeError", "message": "boom"}
 
 
 def test_runtime_state_projects_expired_claim_as_stuck(tmp_path):
