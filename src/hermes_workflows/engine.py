@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import inspect
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -32,6 +34,16 @@ class WorkflowWaiting(Exception):
 
 class WorkflowCancelled(Exception):
     """Internal control-flow signal: stop decider work after cancellation."""
+
+
+class CommandClaimLost(Exception):
+    """Internal signal: a worker-owned command lost its lease/fence."""
+
+
+@dataclass(frozen=True)
+class ActiveCommandClaim:
+    workflow_id: str
+    command: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -80,6 +92,7 @@ class WorkflowEngine:
         self.agent_runner = agent_runner
         self.read_only = read_only
         self._status_projection = StatusProjection(self)
+        self._active_command_claim = threading.local()
         if read_only:
             if not self.db_path.exists():
                 raise FileNotFoundError(f"workflow DB does not exist: {self.db_path}")
@@ -208,14 +221,6 @@ class WorkflowEngine:
             )
             con.execute(
                 """
-                UPDATE workflow_commands_outbox
-                SET status = 'completed'
-                WHERE workflow_id = ? AND key = ? AND type = 'run_step' AND status != 'cancelled'
-                """,
-                (workflow_id, step_key),
-            )
-            con.execute(
-                """
                 UPDATE workflow_instances
                 SET status = 'running', waiting_on = NULL, updated_at = ?
                 WHERE id = ? AND status != 'cancelled'
@@ -223,6 +228,14 @@ class WorkflowEngine:
                 (_now(), workflow_id),
             )
             self._enqueue_workflow_run_row(con, workflow_id, reason="step_completed", source_key=step_key)
+            con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+                WHERE workflow_id = ? AND key = ? AND type = 'run_step' AND status != 'cancelled'
+                """,
+                (_now(), workflow_id, step_key),
+            )
         return self._result_from_instance(workflow_id)
 
     def _approval_request_kind(self, workflow_id: str, key: str) -> str | None:
@@ -314,11 +327,12 @@ class WorkflowEngine:
                     """,
                     (_now(), workflow_id),
                 )
+                self._enqueue_workflow_run_row(con, workflow_id, reason=f"signal:{signal_type}", source_key=key)
                 if signal_type in {"approval.decision", "operator.response"}:
                     con.execute(
                         """
                         UPDATE workflow_commands_outbox
-                        SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                        SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
                         WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
                         """,
                         (_now(), workflow_id, f"approval:{key}"),
@@ -327,12 +341,11 @@ class WorkflowEngine:
                     con.execute(
                         """
                         UPDATE workflow_commands_outbox
-                        SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                        SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
                         WHERE workflow_id = ? AND type = 'external_agent' AND key = ? AND status != 'cancelled'
                         """,
                         (_now(), workflow_id, f"agent:{key}"),
                     )
-                self._enqueue_workflow_run_row(con, workflow_id, reason=f"signal:{signal_type}", source_key=key)
         if inserted:
             result = self._result_from_instance(workflow_id)
         else:
@@ -523,7 +536,7 @@ class WorkflowEngine:
                 con.execute(
                     """
                     UPDATE workflow_commands_outbox
-                    SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                    SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
                     WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
                     """,
                     (_now(), decision.workflow_id, f"approval:{decision.key}"),
@@ -627,7 +640,7 @@ class WorkflowEngine:
                 con.execute(
                     """
                     UPDATE workflow_commands_outbox
-                    SET status = 'completed', lease_expires_at = NULL, updated_at = ?
+                    SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
                     WHERE workflow_id = ? AND type = 'notify_approval' AND key = ? AND status != 'cancelled'
                     """,
                     (_now(), workflow_id, f"approval:{key}"),
@@ -831,7 +844,7 @@ class WorkflowEngine:
             con.execute(
                 """
                 UPDATE workflow_commands_outbox
-                SET status = 'cancelled', lease_expires_at = NULL, updated_at = ?
+                SET status = 'cancelled', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
                 WHERE workflow_id = ? AND status IN ('pending', 'running')
                 """,
                 (now, workflow_id),
@@ -901,15 +914,16 @@ class WorkflowEngine:
                 return None
 
             attempts = int(row["attempts"] or 0) + 1
+            claim_token = secrets.token_urlsafe(32)
             lease_expires_at = now + lease_seconds
             con.execute(
                 """
                 UPDATE workflow_commands_outbox
                 SET status = 'running', claimed_by = ?, claimed_by_instance_id = ?,
-                    lease_expires_at = ?, attempts = ?, updated_at = ?
+                    claim_token = ?, lease_expires_at = ?, attempts = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (worker_id, worker_instance_id, lease_expires_at, attempts, now, row["id"]),
+                (worker_id, worker_instance_id, claim_token, lease_expires_at, attempts, now, row["id"]),
             )
             self._append_event(
                 con,
@@ -921,6 +935,7 @@ class WorkflowEngine:
                     "command_type": row["type"],
                     "worker_id": worker_id,
                     "worker_instance_id": worker_instance_id,
+                    "claim_token_hash": _claim_token_hash(claim_token),
                     "attempt": attempts,
                     "lease_expires_at": lease_expires_at,
                 },
@@ -929,7 +944,74 @@ class WorkflowEngine:
             )
             claimed = con.execute("SELECT * FROM workflow_commands_outbox WHERE id = ?", (row["id"],)).fetchone()
 
-        return self._command_payload(claimed)
+        return self._command_payload(claimed, include_claim_token=True)
+
+    def _claim_guard_params(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]], *, now: int) -> tuple[Any, ...] | None:
+        claim_token = _command_value(command, "claim_token")
+        if not claim_token:
+            return None
+        worker_instance_id = _command_value(command, "claimed_by_instance_id")
+        return (
+            _command_value(command, "id"),
+            workflow_id,
+            _command_value(command, "type"),
+            _command_value(command, "claimed_by"),
+            worker_instance_id,
+            worker_instance_id,
+            claim_token,
+            _command_value(command, "attempts"),
+            now,
+        )
+
+    def _command_claim_is_live(
+        self,
+        con: sqlite3.Connection,
+        workflow_id: str,
+        command: Union[sqlite3.Row, Dict[str, Any]],
+        *,
+        now: int | None = None,
+    ) -> bool:
+        now = _now() if now is None else now
+        params = self._claim_guard_params(workflow_id, command, now=now)
+        if params is None:
+            return False
+        row = con.execute(
+            """
+            SELECT c.id
+            FROM workflow_commands_outbox c
+            JOIN workflow_instances wi ON wi.id = c.workflow_id
+            WHERE c.id = ?
+              AND c.workflow_id = ?
+              AND c.type = ?
+              AND c.status = 'running'
+              AND c.claimed_by = ?
+              AND ((c.claimed_by_instance_id IS NULL AND ? IS NULL) OR c.claimed_by_instance_id = ?)
+              AND c.claim_token = ?
+              AND c.attempts = ?
+              AND COALESCE(c.lease_expires_at, 0) > ?
+              AND wi.status NOT IN ('completed', 'failed', 'cancelled')
+            """,
+            params,
+        ).fetchone()
+        return row is not None
+
+    @contextmanager
+    def _command_claim_scope(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]):
+        stack = list(getattr(self._active_command_claim, "stack", []))
+        stack.append(ActiveCommandClaim(workflow_id=workflow_id, command=dict(command)))
+        self._active_command_claim.stack = stack
+        try:
+            yield
+        finally:
+            self._active_command_claim.stack = stack[:-1]
+
+    def _active_command_claims(self) -> list[ActiveCommandClaim]:
+        return list(getattr(self._active_command_claim, "stack", []))
+
+    def _require_active_command_claim_live(self, con: sqlite3.Connection) -> None:
+        for claim in self._active_command_claims():
+            if not self._command_claim_is_live(con, claim.workflow_id, claim.command):
+                raise CommandClaimLost()
 
     def renew_command_lease(
         self,
@@ -950,6 +1032,9 @@ class WorkflowEngine:
             return False
         now = _now()
         lease_expires_at = now + lease_seconds
+        params = self._claim_guard_params(workflow_id, command, now=now)
+        if params is None:
+            return False
         with self._connect() as con:
             changed = con.execute(
                 """
@@ -960,17 +1045,12 @@ class WorkflowEngine:
                   AND type = ?
                   AND status = 'running'
                   AND claimed_by = ?
+                  AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                  AND claim_token = ?
                   AND attempts = ?
+                  AND COALESCE(lease_expires_at, 0) > ?
                 """,
-                (
-                    lease_expires_at,
-                    now,
-                    command["id"],
-                    workflow_id,
-                    command["type"],
-                    command["claimed_by"],
-                    command["attempts"],
-                ),
+                (lease_expires_at, now, *params),
             ).rowcount
         return changed > 0
 
@@ -1625,6 +1705,7 @@ class WorkflowEngine:
         except WorkflowWaiting as waiting:
             with self._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
+                self._require_active_command_claim_live(con)
                 row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
                 if row is None:
                     raise KeyError(f"unknown workflow_id: {workflow_id}")
@@ -1642,10 +1723,13 @@ class WorkflowEngine:
                     row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
                     return self._result_from_row(row)
             return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=waiting.waiting_on)
+        except CommandClaimLost:
+            return self._result_from_instance(workflow_id)
         except Exception as exc:  # v0/v1: fail closed and keep the error inspectable.
             error = _error_from_exception(exc)
             with self._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
+                self._require_active_command_claim_live(con)
                 row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
                 if row is None:
                     raise KeyError(f"unknown workflow_id: {workflow_id}")
@@ -1666,11 +1750,21 @@ class WorkflowEngine:
 
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._require_active_command_claim_live(con)
             row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
             if row is None:
                 raise KeyError(f"unknown workflow_id: {workflow_id}")
             if row["status"] == "cancelled":
                 return self._result_from_row(row)
+            self._append_event(
+                con,
+                workflow_id,
+                "WorkflowCompleted",
+                key="workflow:completed",
+                payload={"result": result},
+                idempotency_key="workflow:completed",
+                ignore_duplicate=True,
+            )
             changed = con.execute(
                 """
                 UPDATE workflow_instances
@@ -1682,15 +1776,6 @@ class WorkflowEngine:
             if changed == 0:
                 row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
                 return self._result_from_row(row)
-            self._append_event(
-                con,
-                workflow_id,
-                "WorkflowCompleted",
-                key="workflow:completed",
-                payload={"result": result},
-                idempotency_key="workflow:completed",
-                ignore_duplicate=True,
-            )
         return RunResult(workflow_id=workflow_id, status="completed", result=result)
 
     def _result_from_instance(self, workflow_id: str) -> RunResult:
@@ -1797,39 +1882,32 @@ class WorkflowEngine:
         command_model = decode_command_row(command)
         payload = command_model.payload
         command_type = command_model.command_type
-        if command_type is CommandType.RUN_WORKFLOW:
-            return self._execute_run_workflow_command(workflow_id, command)
-        if command_type is CommandType.RUN_STEP:
-            return self._execute_run_step_command(workflow_id, command)
-        if command_type is CommandType.START_CHILD_WORKFLOW:
-            return self._execute_start_child_workflow_command(workflow_id, command, payload)
-        if command_type is CommandType.EXTERNAL_AGENT:
-            return self._execute_external_agent_command(workflow_id, command, payload)
-        raise ValueError(f"unknown workflow command type: {command_type.value}")
+        with self._command_claim_scope(workflow_id, command):
+            try:
+                if command_type is CommandType.RUN_WORKFLOW:
+                    return self._execute_run_workflow_command(workflow_id, command)
+                if command_type is CommandType.RUN_STEP:
+                    return self._execute_run_step_command(workflow_id, command)
+                if command_type is CommandType.START_CHILD_WORKFLOW:
+                    return self._execute_start_child_workflow_command(workflow_id, command, payload)
+                if command_type is CommandType.EXTERNAL_AGENT:
+                    return self._execute_external_agent_command(workflow_id, command, payload)
+                raise ValueError(f"unknown workflow command type: {command_type.value}")
+            except CommandClaimLost:
+                return self._result_from_instance(workflow_id)
 
     def _execute_run_workflow_command(self, workflow_id: str, command: Union[sqlite3.Row, Dict[str, Any]]) -> RunResult:
         with self._connect() as con:
-            row = con.execute(
-                """
-                SELECT c.id, wi.*
-                FROM workflow_commands_outbox c
-                JOIN workflow_instances wi ON wi.id = c.workflow_id
-                WHERE c.id = ?
-                  AND c.status = 'running'
-                  AND c.claimed_by = ?
-                  AND c.attempts = ?
-                  AND c.type = 'run_workflow'
-                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
-                """,
-                (command["id"], command["claimed_by"], command["attempts"]),
-            ).fetchone()
-        if row is None:
-            return self._result_from_instance(workflow_id)
+            if not self._command_claim_is_live(con, workflow_id, command):
+                return self._result_from_instance(workflow_id)
 
         workflow_fn = self._workflow_fn_for_instance(self._instance(workflow_id))
         with self._command_lease_heartbeat(workflow_id, command):
             result = self._run_decider(workflow_id, workflow_fn)
         now = _now()
+        params = self._claim_guard_params(workflow_id, command, now=now)
+        if params is None:
+            return self._result_from_instance(workflow_id)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             current = con.execute(
@@ -1838,11 +1916,15 @@ class WorkflowEngine:
                 FROM workflow_commands_outbox c
                 JOIN workflow_instances wi ON wi.id = c.workflow_id
                 WHERE c.id = ?
+                  AND c.workflow_id = ?
+                  AND c.type = ?
                   AND c.status = 'running'
                   AND c.claimed_by = ?
+                  AND ((c.claimed_by_instance_id IS NULL AND ? IS NULL) OR c.claimed_by_instance_id = ?)
+                  AND c.claim_token = ?
                   AND c.attempts = ?
                 """,
-                (command["id"], command["claimed_by"], command["attempts"]),
+                params[:-1],
             ).fetchone()
             if current is None:
                 return self._result_from_instance(workflow_id)
@@ -1860,20 +1942,18 @@ class WorkflowEngine:
                     """
                     UPDATE workflow_commands_outbox
                     SET status = 'pending', payload_json = ?, claimed_by = NULL, claimed_by_instance_id = NULL,
-                        lease_expires_at = NULL,
+                        claim_token = NULL, lease_expires_at = NULL,
                         last_error_json = NULL, updated_at = ?
                     WHERE id = ?
+                      AND workflow_id = ?
+                      AND type = ?
                       AND status = 'running'
                       AND claimed_by = ?
+                      AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                      AND claim_token = ?
                       AND attempts = ?
                     """,
-                    (
-                        JsonCodec.dumps(next_payload),
-                        now,
-                        command["id"],
-                        command["claimed_by"],
-                        command["attempts"],
-                    ),
+                    (JsonCodec.dumps(next_payload), now, *params[:-1]),
                 ).rowcount
             else:
                 status = "failed" if result.status == "failed" else "completed"
@@ -1881,19 +1961,21 @@ class WorkflowEngine:
                 changed = con.execute(
                     """
                     UPDATE workflow_commands_outbox
-                    SET status = ?, last_error_json = ?, lease_expires_at = NULL, updated_at = ?
+                    SET status = ?, claim_token = NULL, last_error_json = ?, lease_expires_at = NULL, updated_at = ?
                     WHERE id = ?
+                      AND workflow_id = ?
+                      AND type = ?
                       AND status = 'running'
                       AND claimed_by = ?
+                      AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                      AND claim_token = ?
                       AND attempts = ?
                     """,
                     (
                         status,
                         JsonCodec.dumps(last_error) if last_error is not None else None,
                         now,
-                        command["id"],
-                        command["claimed_by"],
-                        command["attempts"],
+                        *params[:-1],
                     ),
                 ).rowcount
         if changed == 0:
@@ -1914,23 +1996,19 @@ class WorkflowEngine:
 
         child_id = payload["child_workflow_id"]
         child_fn = workflow_ref.load(approved=True)
+        with self._connect() as con:
+            if not self._command_claim_is_live(con, workflow_id, command):
+                return self._result_from_instance(workflow_id)
         with self._command_lease_heartbeat(workflow_id, command):
             child_result = self.run_until_idle(child_fn, payload["inputs"], workflow_id=child_id)
 
+        now = _now()
+        params = self._claim_guard_params(workflow_id, command, now=now)
+        if params is None:
+            return self._result_from_instance(workflow_id)
         with self._connect() as con:
-            changed = con.execute(
-                """
-                UPDATE workflow_commands_outbox
-                SET status = 'completed', lease_expires_at = NULL, updated_at = ?
-                WHERE id = ?
-                  AND status = 'running'
-                  AND claimed_by = ?
-                  AND attempts = ?
-                """,
-                (_now(), command["id"], command["claimed_by"], command["attempts"]),
-            ).rowcount
-            if changed == 0:
-                return self._result_from_instance(workflow_id)
+            con.execute("BEGIN IMMEDIATE")
+            self._require_active_command_claim_live(con)
 
             if child_result.status == "completed":
                 self._append_event(
@@ -1951,6 +2029,24 @@ class WorkflowEngine:
                     (_now(), workflow_id),
                 )
                 self._enqueue_workflow_run_row(con, workflow_id, reason="child_completed", source_key=key)
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND workflow_id = ?
+                      AND type = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                      AND claim_token = ?
+                      AND attempts = ?
+                      AND COALESCE(lease_expires_at, 0) > ?
+                    """,
+                    (now, *params),
+                ).rowcount
+                if changed == 0:
+                    raise CommandClaimLost()
             elif child_result.status == "failed":
                 error = {"type": "ChildWorkflowFailed", "message": child_result.error or f"child failed: {child_id}"}
                 self._append_event(
@@ -1970,6 +2066,24 @@ class WorkflowEngine:
                     """,
                     (JsonCodec.dumps(error), _now(), workflow_id),
                 )
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND workflow_id = ?
+                      AND type = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                      AND claim_token = ?
+                      AND attempts = ?
+                      AND COALESCE(lease_expires_at, 0) > ?
+                    """,
+                    (now, *params),
+                ).rowcount
+                if changed == 0:
+                    raise CommandClaimLost()
                 return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
             else:
                 parent_row = con.execute("SELECT waiting_on FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
@@ -1987,6 +2101,24 @@ class WorkflowEngine:
                     child_waiting_on=child_result.waiting_on,
                     parent_waiting_on=parent_wait_key,
                 )
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND workflow_id = ?
+                      AND type = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                      AND claim_token = ?
+                      AND attempts = ?
+                      AND COALESCE(lease_expires_at, 0) > ?
+                    """,
+                    (now, *params),
+                ).rowcount
+                if changed == 0:
+                    raise CommandClaimLost()
                 return RunResult(workflow_id=workflow_id, status="waiting", waiting_on=parent_wait_key)
 
         parent = self._instance(workflow_id)
@@ -2000,20 +2132,13 @@ class WorkflowEngine:
         key: str,
         error: Dict[str, Any],
     ) -> RunResult:
+        now = _now()
+        params = self._claim_guard_params(workflow_id, command, now=now)
+        if params is None:
+            return self._result_from_instance(workflow_id)
         with self._connect() as con:
-            changed = con.execute(
-                """
-                UPDATE workflow_commands_outbox
-                SET status = 'failed', last_error_json = ?, lease_expires_at = NULL, updated_at = ?
-                WHERE id = ?
-                  AND status = 'running'
-                  AND claimed_by = ?
-                  AND attempts = ?
-                """,
-                (JsonCodec.dumps(error), _now(), command["id"], command["claimed_by"], command["attempts"]),
-            ).rowcount
-            if changed == 0:
-                return self._result_from_instance(workflow_id)
+            con.execute("BEGIN IMMEDIATE")
+            self._require_active_command_claim_live(con)
             self._append_event(
                 con,
                 workflow_id,
@@ -2031,6 +2156,24 @@ class WorkflowEngine:
                 """,
                 (JsonCodec.dumps(error), _now(), workflow_id),
             )
+            changed = con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = 'failed', claim_token = NULL, last_error_json = ?, lease_expires_at = NULL, updated_at = ?
+                WHERE id = ?
+                  AND workflow_id = ?
+                  AND type = ?
+                  AND status = 'running'
+                  AND claimed_by = ?
+                  AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                  AND claim_token = ?
+                  AND attempts = ?
+                  AND COALESCE(lease_expires_at, 0) > ?
+                """,
+                (JsonCodec.dumps(error), now, *params),
+            ).rowcount
+            if changed == 0:
+                raise CommandClaimLost()
         return RunResult(workflow_id=workflow_id, status="failed", error=_format_error(error))
 
     def _execute_external_agent_command(
@@ -2057,21 +2200,8 @@ class WorkflowEngine:
             }
 
         with self._connect() as con:
-            row = con.execute(
-                """
-                SELECT c.id
-                FROM workflow_commands_outbox c
-                JOIN workflow_instances wi ON wi.id = c.workflow_id
-                WHERE c.id = ?
-                  AND c.status = 'running'
-                  AND c.claimed_by = ?
-                  AND c.attempts = ?
-                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
-                """,
-                (command["id"], command["claimed_by"], command["attempts"]),
-            ).fetchone()
-        if row is None:
-            return self._result_from_instance(workflow_id)
+            if not self._command_claim_is_live(con, workflow_id, command):
+                return self._result_from_instance(workflow_id)
 
         try:
             from .prompts import _build_runner_request
@@ -2094,6 +2224,9 @@ class WorkflowEngine:
         source: Dict[str, Any] = {"kind": "agent", "id": str(command["claimed_by"] or "workflow-worker")}
         if provenance is not None:
             source["provenance"] = provenance
+        with self._connect() as con:
+            if not self._command_claim_is_live(con, workflow_id, command):
+                return self._result_from_instance(workflow_id)
         return self.signal(
             workflow_id,
             str(payload.get("signal_type") or "agent.completed"),
@@ -2114,21 +2247,8 @@ class WorkflowEngine:
         body = get_step_body(step_name)
 
         with self._connect() as con:
-            row = con.execute(
-                """
-                SELECT c.id
-                FROM workflow_commands_outbox c
-                JOIN workflow_instances wi ON wi.id = c.workflow_id
-                WHERE c.id = ?
-                  AND c.status = 'running'
-                  AND c.claimed_by = ?
-                  AND c.attempts = ?
-                  AND wi.status NOT IN ('completed', 'failed', 'cancelled')
-                """,
-                (command["id"], command["claimed_by"], command["attempts"]),
-            ).fetchone()
-        if row is None:
-            return self._result_from_instance(workflow_id)
+            if not self._command_claim_is_live(con, workflow_id, command):
+                return self._result_from_instance(workflow_id)
 
         from .authoring import bind_workflow_context, reset_workflow_context
 
@@ -2139,38 +2259,7 @@ class WorkflowEngine:
                 output = _run_maybe_async(_call_step_body(body, step_context, *args, **kwargs))
         except Exception as exc:
             error = _error_from_exception(exc)
-            with self._connect() as con:
-                changed = con.execute(
-                    """
-                    UPDATE workflow_commands_outbox
-                    SET status = 'failed', last_error_json = ?, lease_expires_at = NULL, updated_at = ?
-                    WHERE id = ?
-                      AND status = 'running'
-                      AND claimed_by = ?
-                      AND attempts = ?
-                    """,
-                    (JsonCodec.dumps(error), _now(), command["id"], command["claimed_by"], command["attempts"]),
-                ).rowcount
-                if changed == 0:
-                    return self._result_from_instance(workflow_id)
-                self._append_event(
-                    con,
-                    workflow_id,
-                    "StepFailed",
-                    key=key,
-                    payload={"error": error},
-                    idempotency_key=f"failed:{key}:{command['id']}:{command['attempts']}",
-                    ignore_duplicate=True,
-                )
-                con.execute(
-                    """
-                    UPDATE workflow_instances
-                    SET status = 'failed', error_json = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (JsonCodec.dumps(error), _now(), workflow_id),
-                )
-            return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
+            return self._fail_running_command(workflow_id, command, key=key, error=error)
         finally:
             reset_workflow_context(token)
 
@@ -2185,54 +2274,60 @@ class WorkflowEngine:
             JsonCodec.dumps(completion_payload)
         except Exception as exc:
             error = _error_from_exception(exc)
+            return self._fail_running_command(workflow_id, command, key=key, error=error)
+
+        now = _now()
+        params = self._claim_guard_params(workflow_id, command, now=now)
+        if params is None:
+            return self._result_from_instance(workflow_id)
+        try:
             with self._connect() as con:
-                changed = con.execute(
-                    """
-                    UPDATE workflow_commands_outbox
-                    SET status = 'failed', last_error_json = ?, lease_expires_at = NULL, updated_at = ?
-                    WHERE id = ?
-                      AND status = 'running'
-                      AND claimed_by = ?
-                      AND attempts = ?
-                    """,
-                    (JsonCodec.dumps(error), _now(), command["id"], command["claimed_by"], command["attempts"]),
-                ).rowcount
-                if changed == 0:
-                    return self._result_from_instance(workflow_id)
+                con.execute("BEGIN IMMEDIATE")
+                self._require_active_command_claim_live(con)
+                row = con.execute("SELECT * FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown workflow_id: {workflow_id}")
+                if row["status"] in TERMINAL_WORKFLOW_STATUSES:
+                    return self._result_from_row(row)
                 self._append_event(
                     con,
                     workflow_id,
-                    "StepFailed",
+                    "StepCompleted",
                     key=key,
-                    payload={"error": error},
-                    idempotency_key=f"failed:{key}:{command['id']}:{command['attempts']}",
+                    payload=completion_payload,
+                    idempotency_key=f"completed:{key}",
                     ignore_duplicate=True,
                 )
                 con.execute(
                     """
                     UPDATE workflow_instances
-                    SET status = 'failed', error_json = ?, updated_at = ?
-                    WHERE id = ?
+                    SET status = 'running', waiting_on = NULL, updated_at = ?
+                    WHERE id = ? AND status != 'cancelled'
                     """,
-                    (JsonCodec.dumps(error), _now(), workflow_id),
+                    (now, workflow_id),
                 )
-            return RunResult(workflow_id=workflow_id, status="failed", error=f"{type(exc).__name__}: {exc}")
-
-        with self._connect() as con:
-            changed = con.execute(
-                """
-                UPDATE workflow_commands_outbox
-                SET status = 'completed', lease_expires_at = NULL, updated_at = ?
-                WHERE id = ?
-                  AND status = 'running'
-                  AND claimed_by = ?
-                  AND attempts = ?
-                """,
-                (_now(), command["id"], command["claimed_by"], command["attempts"]),
-            ).rowcount
-        if changed == 0:
+                self._enqueue_workflow_run_row(con, workflow_id, reason="step_completed", source_key=key)
+                changed = con.execute(
+                    """
+                    UPDATE workflow_commands_outbox
+                    SET status = 'completed', claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+                    WHERE id = ?
+                      AND workflow_id = ?
+                      AND type = ?
+                      AND status = 'running'
+                      AND claimed_by = ?
+                      AND ((claimed_by_instance_id IS NULL AND ? IS NULL) OR claimed_by_instance_id = ?)
+                      AND claim_token = ?
+                      AND attempts = ?
+                      AND COALESCE(lease_expires_at, 0) > ?
+                    """,
+                    (now, *params),
+                ).rowcount
+                if changed == 0:
+                    raise CommandClaimLost()
+        except CommandClaimLost:
             return self._result_from_instance(workflow_id)
-        return self.complete_step(workflow_id, key, output, metadata=metadata)
+        return self._result_from_instance(workflow_id)
 
     def _next_pending_command(self, workflow_id: str, *, command_type: str) -> Optional[sqlite3.Row]:
         with self._connect() as con:
@@ -2295,6 +2390,7 @@ class WorkflowEngine:
                   status TEXT NOT NULL DEFAULT 'pending',
                   claimed_by TEXT,
                   claimed_by_instance_id TEXT,
+                  claim_token TEXT,
                   lease_expires_at INTEGER,
                   attempts INTEGER NOT NULL DEFAULT 0,
                   last_error_json TEXT,
@@ -2368,6 +2464,7 @@ class WorkflowEngine:
         idempotency_key: Optional[str],
         ignore_duplicate: bool = False,
     ) -> bool:
+        self._require_active_command_claim_live(con)
         event = make_event(event_type, key=key, payload=payload, idempotency_key=idempotency_key, created_at=_now())
         next_seq = con.execute(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_events WHERE workflow_id = ?",
@@ -2402,6 +2499,7 @@ class WorkflowEngine:
         key: str,
         payload: Any,
     ) -> bool:
+        self._require_active_command_claim_live(con)
         command = make_command(command_type, workflow_id=workflow_id, key=key, payload=payload)
         con.execute(
             """
@@ -2420,6 +2518,7 @@ class WorkflowEngine:
         reason: str,
         source_key: str | None = None,
     ) -> bool:
+        self._require_active_command_claim_live(con)
         row = con.execute("SELECT status FROM workflow_instances WHERE id = ?", (workflow_id,)).fetchone()
         if row is None:
             raise KeyError(f"unknown workflow_id: {workflow_id}")
@@ -2472,7 +2571,7 @@ class WorkflowEngine:
             """
             UPDATE workflow_commands_outbox
             SET status = 'pending', payload_json = ?, claimed_by = NULL, claimed_by_instance_id = NULL,
-                lease_expires_at = NULL,
+                claim_token = NULL, lease_expires_at = NULL,
                 last_error_json = NULL, updated_at = ?
             WHERE id = ? AND status NOT IN ('pending', 'running')
             """,
@@ -2495,6 +2594,7 @@ class WorkflowEngine:
         migrations = {
             "claimed_by": "ALTER TABLE workflow_commands_outbox ADD COLUMN claimed_by TEXT",
             "claimed_by_instance_id": "ALTER TABLE workflow_commands_outbox ADD COLUMN claimed_by_instance_id TEXT",
+            "claim_token": "ALTER TABLE workflow_commands_outbox ADD COLUMN claim_token TEXT",
             "lease_expires_at": "ALTER TABLE workflow_commands_outbox ADD COLUMN lease_expires_at INTEGER",
             "attempts": "ALTER TABLE workflow_commands_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "last_error_json": "ALTER TABLE workflow_commands_outbox ADD COLUMN last_error_json TEXT",
@@ -2503,6 +2603,15 @@ class WorkflowEngine:
         for column, sql in migrations.items():
             if column not in existing:
                 con.execute(sql)
+        con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET status = 'pending', claimed_by = NULL, claimed_by_instance_id = NULL,
+                claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+            WHERE status = 'running' AND claim_token IS NULL
+            """,
+            (_now(),),
+        )
 
     def _ensure_command_indexes(self, con: sqlite3.Connection) -> None:
         con.execute(
@@ -2513,8 +2622,11 @@ class WorkflowEngine:
             """
         )
 
-    def _command_payload(self, row: sqlite3.Row) -> Dict[str, Any]:
-        return decode_command_row(row).to_public_dict()
+    def _command_payload(self, row: sqlite3.Row, *, include_claim_token: bool = False) -> Dict[str, Any]:
+        payload = decode_command_row(row).to_public_dict()
+        if include_claim_token:
+            payload["claim_token"] = row["claim_token"]
+        return payload
 
 
 class WorkflowContext:
@@ -3405,6 +3517,19 @@ def _format_error(error: Any) -> Optional[str]:
 
 def _now() -> int:
     return int(time.time())
+
+
+def _claim_token_hash(claim_token: str | None) -> str | None:
+    if not claim_token:
+        return None
+    return hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+
+
+def _command_value(command: Union[sqlite3.Row, Dict[str, Any]], key: str) -> Any:
+    try:
+        return command[key]
+    except (KeyError, IndexError):
+        return None
 
 
 def _worker_payload(row: sqlite3.Row, *, now: int | None = None) -> Dict[str, Any]:

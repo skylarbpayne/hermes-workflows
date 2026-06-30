@@ -13,6 +13,7 @@ from hermes_workflows.engine import WorkflowContext, WorkflowWaiting
 RUNS = []
 LEASE_OBSERVATIONS = []
 SHOULD_FAIL_STALE = False
+MIDFLIGHT_RECLAIM_ENGINE = None
 
 
 @step
@@ -45,12 +46,24 @@ async def worker_slow_lease_probe(context):
     row = command_row(context.engine.db_path, key)
     assert row is not None
     before = row["lease_expires_at"]
-    time.sleep(1.5)
+    time.sleep(2.2)
     row = command_row(context.engine.db_path, key)
     assert row is not None
     during = row["lease_expires_at"]
     LEASE_OBSERVATIONS.append((before, during))
     return "slow result"
+
+
+@step
+async def worker_reclaims_step_before_return(context):
+    expire_claim_and_reclaim(
+        context.engine,
+        context.workflow_id,
+        "step:worker_reclaims_step_before_return:0",
+        worker_id="worker-b",
+        command_type="run_step",
+    )
+    return "stale step result"
 
 
 @step
@@ -95,6 +108,29 @@ async def worker_stale_workflow(inputs):
 
 
 @workflow
+async def worker_immediate_workflow(inputs):
+    return {"ok": inputs.get("ok", True)}
+
+
+@workflow
+async def worker_reclaims_before_return_workflow(inputs):
+    assert MIDFLIGHT_RECLAIM_ENGINE is not None
+    expire_claim_and_reclaim(
+        MIDFLIGHT_RECLAIM_ENGINE,
+        inputs["workflow_id"],
+        "workflow:run",
+        worker_id="worker-b",
+        command_type="run_workflow",
+    )
+    return {"ok": True}
+
+
+@workflow
+async def worker_reclaims_step_workflow(inputs):
+    return await worker_reclaims_step_before_return()
+
+
+@workflow
 async def worker_signal_wait_workflow(inputs):
     signal = await wait_for("go", key="k")
     return {"signal": signal}
@@ -120,6 +156,27 @@ def command_rows(db):
         ]
     finally:
         con.close()
+
+
+def expire_claim_and_reclaim(engine, workflow_id, key, *, worker_id, command_type):
+    row = command_row(engine.db_path, key)
+    assert row is not None
+    expired_at = int(time.time()) - 1
+    con = sqlite3.connect(engine.db_path)
+    try:
+        con.execute(
+            "UPDATE workflow_commands_outbox SET lease_expires_at = ?, updated_at = ? WHERE id = ?",
+            (expired_at, expired_at, row["id"]),
+        )
+        con.commit()
+    finally:
+        con.close()
+    reclaim_engine = WorkflowEngine(engine.db_path)
+    reclaimed = reclaim_engine.claim_command(workflow_id, worker_id=worker_id, lease_seconds=60, command_type=command_type)
+    assert reclaimed is not None
+    assert reclaimed["key"] == key
+    assert reclaimed["claimed_by"] == worker_id
+    return reclaimed
 
 
 def test_worker_preserves_legacy_step_context_and_new_varargs_steps(tmp_path):
@@ -161,6 +218,8 @@ def test_worker_claims_one_pending_workflow_run_with_a_lease(tmp_path):
     assert claimed["key"] == "workflow:run"
     assert claimed["status"] == "running"
     assert claimed["claimed_by"] == "worker-a"
+    assert isinstance(claimed["claim_token"], str)
+    assert len(claimed["claim_token"]) > 20
     assert claimed["attempts"] == 1
     assert engine.claim_command("wf_worker", worker_id="worker-b", lease_seconds=60, command_type=None) is None
     assert command_row(db, "workflow:run")["claimed_by"] == "worker-a"
@@ -178,6 +237,7 @@ def test_expired_running_command_can_be_reclaimed(tmp_path):
     assert reclaimed["key"] == "workflow:run"
     assert reclaimed["claimed_by"] == "worker-b"
     assert reclaimed["attempts"] == 2
+    assert reclaimed["claim_token"] != first["claim_token"]
 
 
 def test_worker_once_executes_workflow_run_and_steps_until_workflow_completes(tmp_path):
@@ -292,7 +352,7 @@ def test_renewing_command_lease_prevents_premature_reclaim(tmp_path):
     engine.start(worker_stale_workflow, {}, workflow_id="wf_renew")
     engine.worker_once("wf_renew", worker_id="worker-bootstrap", lease_seconds=60)
 
-    claimed = engine.claim_command("wf_renew", worker_id="worker-a", lease_seconds=-1)
+    claimed = engine.claim_command("wf_renew", worker_id="worker-a", lease_seconds=60)
     assert claimed is not None
     assert engine.renew_command_lease("wf_renew", claimed, lease_seconds=60) is True
 
@@ -301,6 +361,291 @@ def test_renewing_command_lease_prevents_premature_reclaim(tmp_path):
     assert row is not None
     assert row["claimed_by"] == "worker-a"
     assert row["attempts"] == 1
+
+
+def test_expired_command_claim_cannot_renew(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_stale_workflow, {}, workflow_id="wf_expired_renew")
+    engine.worker_once("wf_expired_renew", worker_id="worker-bootstrap", lease_seconds=60)
+
+    claimed = engine.claim_command("wf_expired_renew", worker_id="worker-a", lease_seconds=-1)
+    assert claimed is not None
+
+    assert engine.renew_command_lease("wf_expired_renew", claimed, lease_seconds=60) is False
+    reclaimed = engine.claim_command("wf_expired_renew", worker_id="worker-b", lease_seconds=60)
+    assert reclaimed is not None
+    assert reclaimed["claimed_by"] == "worker-b"
+    assert reclaimed["attempts"] == 2
+    assert reclaimed["claim_token"] != claimed["claim_token"]
+
+
+def test_expired_step_claim_cannot_execute_without_reclaim(tmp_path):
+    global SHOULD_FAIL_STALE
+    SHOULD_FAIL_STALE = False
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_stale_workflow, {}, workflow_id="wf_expired_step")
+    queued_step = engine.worker_once("wf_expired_step", worker_id="worker-bootstrap", lease_seconds=60)
+    assert queued_step.status == "waiting"
+
+    stale = engine.claim_command("wf_expired_step", worker_id="worker-a", lease_seconds=-1)
+    assert stale is not None
+
+    SHOULD_FAIL_STALE = True
+    try:
+        stale_result = engine._execute_run_step_command("wf_expired_step", stale)
+    finally:
+        SHOULD_FAIL_STALE = False
+
+    assert stale_result.status == "waiting"
+    assert stale_result.waiting_on == "step:worker_stale_sensitive:0"
+    event_types = [event["type"] for event in engine.events("wf_expired_step")]
+    assert event_types.count("StepCompleted") == 0
+    assert event_types.count("StepFailed") == 0
+
+    fresh = engine.claim_command("wf_expired_step", worker_id="worker-b", lease_seconds=60)
+    assert fresh is not None
+    assert fresh["attempts"] == 2
+    completed = engine._execute_run_step_command("wf_expired_step", fresh)
+    assert completed.status == "running"
+
+
+def test_expired_workflow_run_claim_cannot_enqueue_steps_without_reclaim(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_expired_run")
+
+    stale = engine.claim_command("wf_expired_run", worker_id="worker-a", lease_seconds=-1, command_type="run_workflow")
+    assert stale is not None
+    stale_result = engine._execute_run_workflow_command("wf_expired_run", stale)
+
+    assert stale_result.status == "running"
+    assert [event["type"] for event in engine.events("wf_expired_run")] == ["WorkflowStarted", "CommandClaimed"]
+    assert [row["key"] for row in command_rows(db)] == ["workflow:run"]
+
+    fresh = engine.claim_command("wf_expired_run", worker_id="worker-b", lease_seconds=60, command_type="run_workflow")
+    assert fresh is not None
+    assert fresh["attempts"] == 2
+    fresh_result = engine._execute_run_workflow_command("wf_expired_run", fresh)
+    assert fresh_result.status == "waiting"
+    assert fresh_result.waiting_on == "gather:0"
+    assert [row["key"] for row in command_rows(db)] == [
+        "workflow:run",
+        "step:worker_left:0",
+        "step:worker_right:0",
+    ]
+
+
+def test_midflight_workflow_run_claim_loss_cannot_enqueue_step_requests(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    original_run_step = WorkflowContext.run_step
+    injected = {"done": False}
+
+    async def run_step_after_reclaim(self, step_name, args, kwargs, **options):
+        if not injected["done"]:
+            injected["done"] = True
+            expire_claim_and_reclaim(
+                self.engine,
+                self.workflow_id,
+                "workflow:run",
+                worker_id="worker-b",
+                command_type="run_workflow",
+            )
+        return await original_run_step(self, step_name, args, kwargs, **options)
+
+    monkeypatch.setattr(WorkflowContext, "run_step", run_step_after_reclaim)
+    engine.start(worker_gather_workflow, {"left": 1, "right": 2}, workflow_id="wf_midflight_enqueue")
+    stale = engine.claim_command("wf_midflight_enqueue", worker_id="worker-a", lease_seconds=60, command_type="run_workflow")
+    assert stale is not None
+
+    result = engine._execute_command("wf_midflight_enqueue", stale)
+
+    assert result.status == "running"
+    assert injected["done"] is True
+    assert [event["type"] for event in engine.events("wf_midflight_enqueue")] == [
+        "WorkflowStarted",
+        "CommandClaimed",
+        "CommandClaimed",
+    ]
+    assert [row["key"] for row in command_rows(db)] == ["workflow:run"]
+    assert command_row(db, "workflow:run")["claimed_by"] == "worker-b"
+
+
+def test_midflight_workflow_run_claim_loss_cannot_complete_workflow(tmp_path):
+    global MIDFLIGHT_RECLAIM_ENGINE
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    MIDFLIGHT_RECLAIM_ENGINE = engine
+    workflow_id = "wf_midflight_complete"
+    try:
+        engine.start(worker_reclaims_before_return_workflow, {"workflow_id": workflow_id}, workflow_id=workflow_id)
+        stale = engine.claim_command(workflow_id, worker_id="worker-a", lease_seconds=60, command_type="run_workflow")
+        assert stale is not None
+
+        result = engine._execute_command(workflow_id, stale)
+    finally:
+        MIDFLIGHT_RECLAIM_ENGINE = None
+
+    assert result.status == "running"
+    assert [event["type"] for event in engine.events(workflow_id)] == [
+        "WorkflowStarted",
+        "CommandClaimed",
+        "CommandClaimed",
+    ]
+    assert engine.workflow_status(workflow_id)["status"] == "running"
+    assert command_row(db, "workflow:run")["claimed_by"] == "worker-b"
+
+
+def test_midflight_step_claim_loss_cannot_complete_step(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    workflow_id = "wf_midflight_step"
+    engine.start(worker_reclaims_step_workflow, {}, workflow_id=workflow_id)
+    queued_step = engine.worker_once(workflow_id, worker_id="worker-bootstrap", lease_seconds=60)
+    assert queued_step.status == "waiting"
+    stale = engine.claim_command(workflow_id, worker_id="worker-a", lease_seconds=60, command_type="run_step")
+    assert stale is not None
+
+    result = engine._execute_command(workflow_id, stale)
+
+    assert result.status == "waiting"
+    assert result.waiting_on == "step:worker_reclaims_step_before_return:0"
+    event_types = [event["type"] for event in engine.events(workflow_id)]
+    assert "StepCompleted" not in event_types
+    assert "StepFailed" not in event_types
+    row = command_row(db, "step:worker_reclaims_step_before_return:0")
+    assert row is not None
+    assert row["claimed_by"] == "worker-b"
+
+
+def test_terminal_run_workflow_and_cancelled_commands_clear_claim_token(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_immediate_workflow, {"ok": True}, workflow_id="wf_terminal_token")
+    claimed = engine.claim_command("wf_terminal_token", worker_id="worker-a", lease_seconds=60, command_type="run_workflow")
+    assert claimed is not None
+    assert claimed["claim_token"]
+
+    result = engine._execute_command("wf_terminal_token", claimed)
+
+    assert result.status == "completed"
+    completed = command_row(db, "workflow:run")
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["claim_token"] is None
+
+    engine.start(worker_stale_workflow, {}, workflow_id="wf_cancel_token")
+    engine.worker_once("wf_cancel_token", worker_id="worker-bootstrap", lease_seconds=60)
+    running = engine.claim_command("wf_cancel_token", worker_id="worker-a", lease_seconds=60, command_type="run_step")
+    assert running is not None
+    assert running["claim_token"]
+
+    engine.cancel_workflow("wf_cancel_token", reason="test", source={"kind": "test"})
+
+    cancelled = command_row(db, "step:worker_stale_sensitive:0")
+    assert cancelled is not None
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["claim_token"] is None
+
+
+def test_terminal_run_workflow_cleanup_survives_post_terminal_lease_expiry(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    workflow_id = "wf_terminal_expired_cleanup"
+    engine.start(worker_immediate_workflow, {"ok": True}, workflow_id=workflow_id)
+    claimed = engine.claim_command(workflow_id, worker_id="worker-a", lease_seconds=60, command_type="run_workflow")
+    assert claimed is not None
+    original_run_decider = engine._run_decider
+
+    def run_decider_then_expire_claim(active_workflow_id, workflow_fn):
+        result = original_run_decider(active_workflow_id, workflow_fn)
+        expired_at = int(time.time()) - 1
+        with sqlite3.connect(db) as con:
+            con.execute(
+                "UPDATE workflow_commands_outbox SET lease_expires_at = ?, updated_at = ? WHERE id = ?",
+                (expired_at, expired_at, claimed["id"]),
+            )
+        return result
+
+    monkeypatch.setattr(engine, "_run_decider", run_decider_then_expire_claim)
+
+    result = engine._execute_command(workflow_id, claimed)
+
+    assert result.status == "completed"
+    row = command_row(db, "workflow:run")
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["claim_token"] is None
+
+
+def test_old_db_running_commands_without_claim_tokens_are_requeued_on_migration(tmp_path):
+    db = tmp_path / "old.sqlite"
+    now = int(time.time())
+    with sqlite3.connect(db) as con:
+        con.execute(
+            """
+            CREATE TABLE workflow_commands_outbox(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              workflow_id TEXT NOT NULL,
+              type TEXT NOT NULL,
+              key TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              claimed_by TEXT,
+              lease_expires_at INTEGER,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              last_error_json TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER,
+              UNIQUE(workflow_id, key)
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO workflow_commands_outbox(
+              workflow_id, type, key, payload_json, status, claimed_by, lease_expires_at, attempts, created_at, updated_at
+            ) VALUES (?, 'run_workflow', 'workflow:run', '{}', 'running', 'old-worker', ?, 1, ?, ?)
+            """,
+            ("wf_old", now + 3600, now, now),
+        )
+
+    WorkflowEngine(db)
+
+    row = command_row(db, "workflow:run")
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["claimed_by"] is None
+    assert row["claim_token"] is None
+    assert row["lease_expires_at"] is None
+
+
+def test_existing_schema_tokenless_running_commands_are_requeued_on_open(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.start(worker_immediate_workflow, {}, workflow_id="wf_existing_tokenless")
+    claimed = engine.claim_command("wf_existing_tokenless", worker_id="old-worker", lease_seconds=3600, command_type="run_workflow")
+    assert claimed is not None
+    with sqlite3.connect(db) as con:
+        con.execute(
+            """
+            UPDATE workflow_commands_outbox
+            SET claim_token = NULL, lease_expires_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (int(time.time()) + 3600, int(time.time()), claimed["id"]),
+        )
+
+    WorkflowEngine(db)
+
+    row = command_row(db, "workflow:run")
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["claimed_by"] is None
+    assert row["claim_token"] is None
+    assert row["lease_expires_at"] is None
 
 
 def test_worker_heartbeats_renew_long_running_step_lease(tmp_path):
