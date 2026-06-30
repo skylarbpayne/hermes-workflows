@@ -1629,6 +1629,43 @@ def test_dashboard_run_dag_shows_review_feedback_and_pairs_retries_and_rejoins()
     assert ("draft:intro:retry", "workflow:completed") not in edges
 
 
+def test_dashboard_run_dag_uses_foreground_authoring_inputs_over_background_context():
+    api = load_dashboard_api()
+    research = "R" * 5000
+    selected_angle = {"title": "Skills Are Just Suggestions", "summary": "Instructions are not guarantees."}
+    first_section = {"title": "The mess", "task": "Open with five parallel agents making cleanup work."}
+    second_section = {"title": "The fix", "task": "Move promises into workflow state."}
+    outline = {"title": "Skills Are Just Suggestions", "sections": [first_section, second_section]}
+    status = {
+        "workflow_id": "wf_content_lineage",
+        "events": [
+            {"seq": 1, "type": "WorkflowStarted", "payload": {}},
+            {"seq": 2, "type": "StepRequested", "payload": {"key": "research", "step_name": "research"}},
+            {"seq": 3, "type": "StepCompleted", "payload": {"key": "research", "output": research}},
+            {"seq": 4, "type": "StepRequested", "payload": {"key": "angles", "step_name": "agent", "args": [{"input": research}]}},
+            {"seq": 5, "type": "StepCompleted", "payload": {"key": "angles", "output": [selected_angle]}},
+            {"seq": 6, "type": "StepRequested", "payload": {"key": "select_angle", "step_name": "Select one option.", "completion_mode": "operator", "request": {"artifact": {"options": [{"label": selected_angle["title"], "value": selected_angle}]}}}},
+            {"seq": 7, "type": "StepCompleted", "payload": {"key": "select_angle", "completion_mode": "operator", "output": selected_angle}},
+            {"seq": 8, "type": "StepRequested", "payload": {"key": "draft_outline", "step_name": "agent", "args": [{"input": {"angle": selected_angle, "research": research, "topic": "Skills are just suggestions"}}]}},
+            {"seq": 9, "type": "StepCompleted", "payload": {"key": "draft_outline", "output": outline}},
+            {"seq": 10, "type": "StepRequested", "payload": {"key": "draft_section_a", "step_name": "agent", "args": [{"input": {"section": first_section, "research": research}}]}},
+            {"seq": 11, "type": "StepRequested", "payload": {"key": "draft_section_b", "step_name": "agent", "args": [{"input": {"section": second_section, "research": research}}]}},
+        ],
+    }
+
+    dag = api._run_dag_payload(status, [])
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+
+    assert ("research", "angles") in edges
+    assert ("angles", "select_angle") in edges
+    assert ("select_angle", "draft_outline") in edges
+    assert ("draft_outline", "draft_section_a") in edges
+    assert ("draft_outline", "draft_section_b") in edges
+    assert ("research", "draft_outline") not in edges
+    assert ("research", "draft_section_a") not in edges
+    assert ("research", "draft_section_b") not in edges
+
+
 def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):
     from tests.test_dynamic_workflow_return import dynamic_processor_pipeline
 

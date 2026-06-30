@@ -909,6 +909,64 @@ def _dag_match_values_from_payload(payload: dict[str, Any]) -> list[Any]:
     return values
 
 
+def _dag_request_dependency_values(payload: dict[str, Any]) -> list[Any]:
+    """Extract the concrete inputs that should drive DAG lineage.
+
+    Step payloads often include large background context such as research notes.
+    If we match against the whole request, that background dominates scoring and
+    hides the real foreground lineage: selected angle -> outline -> sections.
+    """
+
+    values: list[Any] = []
+
+    def add(value: Any) -> None:
+        _append_unique_match_value(values, value)
+
+    def add_from_input(value: Any) -> None:
+        if value in (None, "", [], {}):
+            return
+        if isinstance(value, dict):
+            if isinstance(value.get("feedback"), str) and value.get("feedback", "").strip():
+                add(value.get("feedback"))
+                return
+            for key in ("previous", "section", "outline", "sections", "draft", "visual_aids", "angle"):
+                if value.get(key) not in (None, "", [], {}):
+                    add(value.get(key))
+                    return
+            non_background = {
+                key: item
+                for key, item in value.items()
+                if key not in {"research", "topic", "prompt", "instructions"} and item not in (None, "", [], {})
+            }
+            if non_background:
+                add(non_background)
+            return
+        add(value)
+
+    raw_request = payload.get("request")
+    request = raw_request if isinstance(raw_request, dict) else {}
+    if "input" in request:
+        add_from_input(request.get("input"))
+    artifact = request.get("artifact") if isinstance(request.get("artifact"), dict) else None
+    if isinstance(artifact, dict):
+        markdown = artifact.get("markdown")
+        if isinstance(markdown, str):
+            add("\n".join(line for line in markdown.splitlines() if not line.startswith("#")).strip())
+        else:
+            add(artifact.get("value") or artifact.get("title"))
+
+    raw_args = payload.get("args")
+    args = raw_args if isinstance(raw_args, list) else []
+    for arg in args:
+        if isinstance(arg, dict) and "input" in arg:
+            add_from_input(arg.get("input"))
+        elif isinstance(arg, dict):
+            add_from_input(arg)
+        else:
+            add_from_input(arg)
+    return values
+
+
 def _review_output_from_payload(payload: dict[str, Any]) -> dict[str, str] | None:
     output = payload.get("output")
     if not isinstance(output, dict):
@@ -1009,6 +1067,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
     pending_parents: dict[str, set[str]] = {}
     completed_pending_frontier: set[str] = set()
     gather_children: set[str] = set()
+    gather_pending_by_node: dict[str, set[str]] = {}
+    completed_event_nodes: set[str] = set()
     completed_outputs: dict[str, Any] = {}
     match_values_by_node: dict[str, list[Any]] = {}
     events = status.get("events") or status.get("recent_events") or []
@@ -1093,26 +1153,37 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
     def parents_for_request(request_payload: dict[str, Any], request_id: str | None = None) -> set[str]:
         parents = set(frontier or {"workflow:start"})
 
-        def scored_matching_parent_ids(candidates: set[str]) -> list[tuple[int, str]]:
+        dependency_values = _dag_request_dependency_values(request_payload)
+
+        def scored_matching_parent_ids(candidates: set[str], needle: Any | None = None) -> list[tuple[int, str]]:
             candidate_ids = set(candidates)
             if request_id is not None:
                 candidate_ids.discard(request_id)
+            container = request_payload if needle is None else needle
             scored: list[tuple[int, str]] = []
             for parent_id in candidate_ids:
                 best_score = 0
                 for value in match_values_by_node.get(parent_id, []):
-                    if _payload_contains_value(request_payload, value):
+                    matched = _payload_contains_value(container, value) or (needle is not None and _payload_contains_value(value, container))
+                    if matched:
                         try:
                             score = len(json.dumps(value, sort_keys=True, default=str))
                         except Exception:
                             score = len(str(value))
+                        if container == value:
+                            score += 1_000_000
                         best_score = max(best_score, score)
                 if best_score:
                     scored.append((best_score, parent_id))
             return sorted(scored, reverse=True)
 
-        def best_matching_parent_ids(candidates: set[str], *, include_same_stage_fan_in: bool = True) -> set[str]:
-            scored = scored_matching_parent_ids(candidates)
+        def best_matching_parent_ids(
+            candidates: set[str],
+            *,
+            include_same_stage_fan_in: bool = True,
+            needle: Any | None = None,
+        ) -> set[str]:
+            scored = scored_matching_parent_ids(candidates, needle=needle)
             if not scored:
                 return set()
             top_score, top_parent = scored[0]
@@ -1159,16 +1230,35 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             }
             return matches
 
+        def dependency_parent_ids(candidates: set[str], *, include_same_stage_fan_in: bool = True) -> set[str]:
+            matches: set[str] = set()
+            for value in dependency_values:
+                matches.update(best_matching_parent_ids(candidates, include_same_stage_fan_in=include_same_stage_fan_in, needle=value))
+            return matches
+
         feedback_matches = review_feedback_parent_ids()
         if len(feedback_matches) == 1:
             return feedback_matches
+
+        if any(nodes.get(parent_id, {}).get("kind") == "gather" for parent_id in parents):
+            return parents
+
+        # First honor explicit foreground inputs (angle, section, draft, etc.)
+        # across the whole run. This prevents large background context like
+        # research notes from stealing edges away from the actual authoring
+        # chain: angles -> selected angle -> outline -> sections.
+        foreground_matches = dependency_parent_ids(set(match_values_by_node))
+        if foreground_matches:
+            return foreground_matches
 
         if len(parents) > 1:
             is_review_request = str(request_payload.get("completion_mode") or "") in {"operator", "approval"}
             raw_request_for_kind = request_payload.get("request")
             if isinstance(raw_request_for_kind, dict) and str(raw_request_for_kind.get("kind") or "").startswith(("operator.", "human_input.")):
                 is_review_request = True
-            matching_parents = best_matching_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
+            matching_parents = dependency_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
+            if not matching_parents:
+                matching_parents = best_matching_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
             if matching_parents:
                 return matching_parents
         if any(nodes.get(parent_id, {}).get("kind") == "gather" for parent_id in parents):
@@ -1183,7 +1273,9 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             for node_id, node in nodes.items()
             if node.get("completion_mode") not in {"operator", "approval"}
         }
-        data_matches = best_matching_parent_ids(non_review_nodes)
+        data_matches = dependency_parent_ids(non_review_nodes)
+        if not data_matches:
+            data_matches = best_matching_parent_ids(non_review_nodes)
         if data_matches:
             return data_matches
 
@@ -1193,7 +1285,9 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             if node.get("completion_mode") in {"operator", "approval"}
             and ("SignalReceived" in node.get("event_types", []) or "StepCompleted" in node.get("event_types", []))
         }
-        review_matches = best_matching_parent_ids(review_nodes)
+        review_matches = dependency_parent_ids(review_nodes)
+        if not review_matches:
+            review_matches = best_matching_parent_ids(review_nodes)
         if review_matches:
             return review_matches
 
@@ -1216,6 +1310,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
                 pending_parents[node_id] = parents_for_request(payload, node_id)
         elif event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
             pending = [str(item) for item in payload.get("pending") or []]
+            gather_pending_by_node[node_id] = set(pending)
             parents = frontier or {"workflow:start"}
             for child_id in pending:
                 gather_children.add(child_id)
@@ -1227,6 +1322,8 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
                 pending_parents.pop(child_id, None)
             frontier = {node_id}
         elif event_type in {"StepCompleted", "StepFailed", "ChildWorkflowCompleted", "ChildWorkflowFailed"}:
+            if event_type in {"StepCompleted", "ChildWorkflowCompleted"}:
+                completed_event_nodes.add(node_id)
             if event_type in {"StepCompleted", "ChildWorkflowCompleted"} and "output" in payload:
                 completed_outputs[node_id] = payload.get("output")
             if node_id not in gather_children:
@@ -1265,8 +1362,10 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
     outgoing_targets = {edge["from"] for edge in edges}
     for node in nodes.values():
         node["artifact_count"] = len(node["artifacts"])
-        if node.get("kind") == "gather" and node.get("id") in outgoing_targets and node.get("status") == "waiting":
-            node["status"] = "completed"
+        if node.get("kind") == "gather" and node.get("status") == "waiting":
+            pending = gather_pending_by_node.get(str(node.get("id")), set())
+            if node.get("id") in outgoing_targets or (pending and pending.issubset(completed_event_nodes)):
+                node["status"] = "completed"
     return {
         "workflow_id": status.get("workflow_id"),
         "run": status,
