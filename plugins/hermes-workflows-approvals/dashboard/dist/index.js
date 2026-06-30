@@ -189,6 +189,17 @@
     return e("pre", null, pretty(value));
   }
 
+  function HumanResponsePreview(props) {
+    const output = props.output || props.decision;
+    if (output === undefined || output === null) return null;
+    const hasFeedback = output && typeof output === "object" && output.feedback;
+    return e("div", { className: "hwf-response-preview" },
+      e("div", { className: "hwf-section-title" }, "Recorded response"),
+      output && typeof output === "object" && output.action && e(Pill, { label: "action: " + output.action }),
+      hasFeedback && e("blockquote", null, output.feedback),
+      !hasFeedback && e("pre", null, pretty(output)));
+  }
+
   function MarkdownArtifactPreview(props) {
     const lines = String(props.markdown || "").split(/\r?\n/);
     const nodes = [];
@@ -462,6 +473,7 @@
             e(ArtifactRenderSummary, { render: approval.artifact_render }),
             e(ArtifactInlinePreview, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact }),
             e(ArtifactReviewRawDump, { render: approval.artifact_render, value: approval.artifact_preview || approval.artifact }))),
+        e(HumanResponsePreview, { output: approval.output, decision: approval.decision }),
         e(ApprovalActions, { db: props.db, approval: approval, onDecided: props.onRefresh })));
   }
 
@@ -574,6 +586,7 @@
             e(ArtifactRenderSummary, { render: step.artifact_render }),
             e(ArtifactInlinePreview, { render: step.artifact_render, value: step.artifact_preview || step.artifact }),
             e(ArtifactReviewRawDump, { render: step.artifact_render, value: step.artifact_preview || step.artifact }))),
+        e(HumanResponsePreview, { output: step.output }),
         e(HumanInputActions, { db: props.db, step: step, onResponded: props.onRefresh })));
   }
 

@@ -374,6 +374,10 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert "node.review_action" in index_js
     assert '"Review result: "' in index_js
     assert "review_feedback" in index_js
+    assert "HumanResponsePreview" in index_js
+    assert '"Recorded response"' in index_js
+    assert "step.output" in index_js
+    assert "approval.output" in index_js
     assert "Child workflow DAG" not in index_js
     assert "data-child-workflow-id" not in index_js
     assert "e(RunDag, { db: props.db, workflowId: selectedChildWorkflowId" not in index_js
@@ -397,6 +401,68 @@ def test_dashboard_frontend_inspect_run_waits_for_run_status_payload():
     assert "status.data.run.status" not in index_js
     assert "status.data.run.event_count" not in index_js
     assert "status.data.run.workflow_id" not in index_js
+
+
+def test_dashboard_completed_human_input_card_shows_output_not_stale_runtime():
+    api = load_dashboard_api()
+
+    card = api._operator_step_card(
+        {
+            "workflow_id": "wf_demo",
+            "key": "review_outline",
+            "status": "completed",
+            "prompt": "Approved?",
+            "artifact": {"kind": "markdown", "markdown": "old outline"},
+            "output": {"action": "request_changes", "feedback": "make it visceral"},
+        },
+        db_alias="runtime-smoke",
+        runtime_state={"primary": "queued", "command": {"key": "approval:other_wait"}},
+    )
+
+    assert card["output"] == {"action": "request_changes", "feedback": "make it visceral"}
+    assert "runtime_state" not in card
+
+
+def test_dashboard_run_dag_merges_agent_request_and_completion_node():
+    api = load_dashboard_api()
+    status = {
+        "workflow_id": "wf_agent_dag",
+        "events": [
+            {"seq": 1, "type": "WorkflowStarted", "key": "workflow:start", "payload": {}},
+            {
+                "seq": 2,
+                "type": "StepRequested",
+                "key": "agent:research_topic:0",
+                "payload": {
+                    "key": "agent:research_topic:0",
+                    "step_name": "research topic",
+                    "completion_mode": "agent",
+                    "step_type": "agent",
+                    "public_label": "research topic",
+                },
+            },
+            {
+                "seq": 3,
+                "type": "AgentRequested",
+                "key": "agent:agent:research_topic:0",
+                "payload": {"key": "agent:research_topic:0", "public_label": "research topic"},
+            },
+            {
+                "seq": 4,
+                "type": "SignalReceived",
+                "key": "signal:agent.completed:agent:research_topic:0",
+                "payload": {"signal_type": "agent.completed", "key": "agent:research_topic:0", "payload": "notes"},
+            },
+        ],
+    }
+
+    dag = api._run_dag_payload(status, [])
+    node_ids = [node["id"] for node in dag["nodes"]]
+
+    assert "agent:research_topic:0" in node_ids
+    assert "research_topic:0" not in node_ids
+    assert node_ids.count("agent:research_topic:0") == 1
+    assert next(node for node in dag["nodes"] if node["id"] == "agent:research_topic:0")["status"] == "completed"
 
 
 def test_dashboard_frontend_overview_inspect_run_opens_runs_inspector():

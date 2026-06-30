@@ -671,7 +671,12 @@ def _approval_step_id(key: str) -> str | None:
 def _agent_request_step_id(key: str) -> str | None:
     if not key:
         return None
-    return key.split(":", 1)[1] if key.startswith("agent:") else key
+    # AgentRequested event keys use an outbox prefix (`agent:agent:<step>`),
+    # while StepRequested and agent.completed signal payloads already carry the
+    # canonical step key (`agent:<step>`). Strip only the outbox wrapper; stripping
+    # every `agent:` prefix splits one logical agent step into request/completion
+    # twins in the DAG.
+    return key.split(":", 1)[1] if key.startswith("agent:agent:") else key
 
 
 def _signal_step_id(payload: dict[str, Any]) -> str | None:
@@ -1537,6 +1542,15 @@ def _risk_for_operator_step(step: dict[str, Any]) -> dict[str, str]:
     return {"level": "low", "reason": "This human input request records input/provenance for the trusted local workflow."}
 
 
+def _runtime_state_applies_to_card(runtime_state: dict[str, Any] | None, key: str, status: str | None) -> bool:
+    if runtime_state is None:
+        return False
+    if status not in {"completed", "approve", "reject"}:
+        return True
+    current_wait = runtime_state.get("current_wait") if isinstance(runtime_state, dict) else None
+    return isinstance(current_wait, dict) and str(current_wait.get("key") or "") == str(key or "")
+
+
 def _operator_step_card(step: dict[str, Any], *, db_alias: str, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_request = step.get("request")
     request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
@@ -1568,7 +1582,7 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str, runtime_state: d
         "risk": _risk_for_operator_step(step),
         "consequence": "Records typed human input with provenance, then the workflow worker or trusted runtime can continue.",
     }
-    if runtime_state is not None:
+    if _runtime_state_applies_to_card(runtime_state, str(card.get("key") or ""), card.get("status")):
         card["runtime_state"] = runtime_state
     return card
 
@@ -1609,7 +1623,7 @@ def _approval_card(approval: dict[str, Any], *, db_alias: str, runtime_state: di
         "consequence": "Records approve/reject with human provenance and creates an inspectable workflow continuation.",
         "detail_url": f"/approvals/detail?db={db_alias}&workflow_id={approval.get('workflow_id')}&key={approval.get('key')}",
     }
-    if runtime_state is not None:
+    if _runtime_state_applies_to_card(runtime_state, str(card.get("key") or ""), card.get("status")):
         card["runtime_state"] = runtime_state
     return card
 
