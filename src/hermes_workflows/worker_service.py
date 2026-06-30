@@ -234,6 +234,15 @@ class WorkflowWorkerService:
             )
         except Exception as exc:
             execution.error = f"{type(exc).__name__}: {exc}"
+            try:
+                WorkflowEngine(Path(source.path), agent_runner=self.agent_runner).record_command_error(
+                    workflow_id,
+                    int(candidate["command_id"]),
+                    {"type": type(exc).__name__, "message": str(exc)},
+                    requeue=True,
+                )
+            except Exception:
+                pass
             return execution
         finally:
             stop.set()

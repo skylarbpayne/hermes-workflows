@@ -225,7 +225,12 @@ class StatusProjection:
         elif runnable_commands:
             command = runnable_commands[0]
             lease_expires_at = command.get("lease_expires_at")
-            if _is_repeated_command_failure(command):
+            if _is_workflow_import_error(command):
+                primary = "stuck"
+                reason = "workflow_import_error"
+                label = "Stuck"
+                next_action = "Fix the workflow_ref/package import environment, then restart the runner."
+            elif _is_repeated_command_failure(command):
                 primary = "stuck"
                 reason = "repeated_command_failure"
                 label = "Stuck"
@@ -733,6 +738,8 @@ class StatusProjection:
 
         labels: list[str] = []
         expected_wait = _expected_wait_for_command(command)
+        if _is_workflow_import_error(command):
+            labels.append("workflow_import_error")
         if command.get("type") == "notify_approval" and expected_wait in signal_keys:
             labels.append("matching_signal_exists")
         if summary.get("status") in {"completed", "failed", "cancelled"}:
@@ -904,6 +911,14 @@ def _is_repeated_command_failure(command: Dict[str, Any]) -> bool:
     return command.get("last_error") is not None and attempt_count >= REPEATED_COMMAND_FAILURE_ATTEMPTS
 
 
+def _is_workflow_import_error(command: Dict[str, Any]) -> bool:
+    last_error = command.get("last_error")
+    if not isinstance(last_error, dict):
+        return False
+    error_type = str(last_error.get("type") or "")
+    return error_type in {"ModuleNotFoundError", "ImportError", "AttributeError"}
+
+
 def _pending_command_is_old(command: Dict[str, Any], *, now: int) -> bool:
     if command.get("status") != "pending":
         return False
@@ -1032,6 +1047,7 @@ def _diagnostic_message(label: str) -> str:
     messages = {
         "active_wait": "Workflow is actively waiting on this approval signal.",
         "runnable_work": "Workflow has runnable work queued; a worker must claim this command for autonomous continuation.",
+        "workflow_import_error": "The runner could not import the stored workflow_ref; fix the package/environment before retrying.",
         "matching_signal_exists": "A matching approval signal already exists; this notification is historical/stale.",
         "terminal_workflow_has_pending_command": "Workflow is terminal but this command is still pending or running.",
         "orphaned_or_inconsistent": "Command is pending or running but does not match the workflow's current wait state.",

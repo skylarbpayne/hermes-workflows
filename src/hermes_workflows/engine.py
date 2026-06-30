@@ -1185,6 +1185,49 @@ class WorkflowEngine:
             rows = con.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
+    def record_command_error(
+        self,
+        workflow_id: str,
+        command_id: int,
+        error: Dict[str, Any],
+        *,
+        requeue: bool = True,
+    ) -> bool:
+        """Record a runner-side command error that happened before command execution.
+
+        Resident runners can fail while loading the stored workflow ref, before
+        `worker_once()` has a chance to claim and execute the command. Persist a
+        small safe error summary on the command so status/dashboard surfaces show
+        an actionable failure instead of leaving the problem only in process logs.
+        """
+
+        self._ensure_writable("record workflow command error")
+        safe_error = {
+            "type": str(error.get("type") or "Error")[:120],
+            "message": str(error.get("message") or "")[:500],
+        }
+        now = _now()
+        next_status = "pending" if requeue else "failed"
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            changed = con.execute(
+                """
+                UPDATE workflow_commands_outbox
+                SET status = ?, claimed_by = NULL, claimed_by_instance_id = NULL,
+                    claim_token = NULL, lease_expires_at = NULL,
+                    last_error_json = ?, updated_at = ?
+                WHERE id = ?
+                  AND workflow_id = ?
+                  AND status IN ('pending', 'running')
+                  AND workflow_id IN (
+                    SELECT id FROM workflow_instances
+                    WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+                  )
+                """,
+                (next_status, JsonCodec.dumps(safe_error), now, command_id, workflow_id, workflow_id),
+            ).rowcount
+        return changed > 0
+
     def record_worker_heartbeat(
         self,
         *,

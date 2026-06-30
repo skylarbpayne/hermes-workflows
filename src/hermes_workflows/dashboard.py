@@ -161,9 +161,10 @@ def _command_table(title: str, commands: list[dict[str, Any]]) -> str:
             f"<td>{_e(item.get('type'))}</td>"
             f"<td class=\"{_e(item.get('status'))}\">{_e(item.get('status'))}</td>"
             f"<td>{_e(item.get('diagnostic_label') or ', '.join(item.get('diagnostic_labels') or []))}</td>"
+            f"<td><pre>{_e(item.get('last_error'))}</pre></td>"
             "</tr>"
         )
-    return f"<h3>{_e(title)}</h3><table><thead><tr><th>Key</th><th>Type</th><th>Status</th><th>Diagnostic</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    return f"<h3>{_e(title)}</h3><table><thead><tr><th>Key</th><th>Type</th><th>Status</th><th>Diagnostic</th><th>Last error</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
 
 
 def _diagnostic_table(diagnostics: list[dict[str, Any]]) -> str:
