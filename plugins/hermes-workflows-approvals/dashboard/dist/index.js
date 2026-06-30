@@ -1050,7 +1050,8 @@
             const label = truncateDagLabel(dagNodeLabel(node), 22);
             const subLabel = dagNodeSubLabel(node);
             const status = node.status || "recorded";
-            const artifactText = node.artifact_count ? node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s") : "";
+            const reviewText = node.review_action ? String(node.review_action).replace(/_/g, " ") : "";
+            const artifactText = reviewText || (node.artifact_count ? node.artifact_count + " artifact" + (node.artifact_count === 1 ? "" : "s") : "");
             return e("g", {
               key: node.id,
               className: "hwf-dag-svg-node " + (nodeSelected ? "hwf-dag-node-selected" : "") + " hwf-dag-node-kind-" + (node.kind || "event") + (node.inline_child_workflow_id ? " hwf-dag-node-child-inline" : ""),
@@ -1079,6 +1080,7 @@
         e("p", { className: "hwf-muted" },
           (incomingByTarget[selected.id] || []).length ? "After: " + incomingByTarget[selected.id].map(shortId).join(", ") + ". " : "No incoming edges. ",
           (outgoingBySource[selected.id] || []).length ? "Next: " + outgoingBySource[selected.id].map(shortId).join(", ") + "." : "No outgoing edges."),
+        selected.review_action && e("p", { className: "hwf-muted" }, "Review result: ", String(selected.review_action).replace(/_/g, " "), selected.review_feedback ? " — " + selected.review_feedback : ""),
         selectedChildWorkflowId && e("div", { className: "hwf-child-workflow-summary" },
           e("div", { className: "hwf-meta" },
             e(Pill, { label: "child: " + shortId(selectedChildWorkflowId) }),

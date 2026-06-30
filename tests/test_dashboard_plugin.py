@@ -371,6 +371,9 @@ def test_dashboard_frontend_exposes_visual_run_dag_graph():
     assert '"Expand inline DAG"' in index_js
     assert '"Collapse inline DAG"' in index_js
     assert "hwf-dag-node-child-inline" in index_js
+    assert "node.review_action" in index_js
+    assert '"Review result: "' in index_js
+    assert "review_feedback" in index_js
     assert "Child workflow DAG" not in index_js
     assert "data-child-workflow-id" not in index_js
     assert "e(RunDag, { db: props.db, workflowId: selectedChildWorkflowId" not in index_js
@@ -1547,6 +1550,64 @@ def test_dashboard_run_dag_pairs_parallel_draft_sections_with_their_review_gates
     assert ("draft:workflow", "review:workflow") in edges
     assert ("draft:intro", "review:workflow") not in edges
     assert ("draft:workflow", "review:intro") not in edges
+
+
+def test_dashboard_run_dag_shows_review_feedback_and_pairs_retries_and_rejoins():
+    api = load_dashboard_api()
+    status = {
+        "workflow_id": "wf_section_feedback_retry",
+        "events": [
+            {"seq": 1, "type": "WorkflowStarted", "payload": {}},
+            {"seq": 2, "type": "StepRequested", "payload": {"key": "draft:intro", "step_name": "draft section"}},
+            {"seq": 3, "type": "StepRequested", "payload": {"key": "draft:workflow", "step_name": "draft section"}},
+            {"seq": 4, "type": "ParallelWaiting", "payload": {"kind": "parallel", "pending": ["draft:intro", "draft:workflow"]}},
+            {"seq": 5, "type": "StepCompleted", "payload": {"key": "draft:intro", "output": {"title": "Intro", "text": "Five agents made one mess."}}},
+            {"seq": 6, "type": "StepCompleted", "payload": {"key": "draft:workflow", "output": {"title": "Workflow", "text": "Promote repeated failures into gates."}}},
+            {
+                "seq": 7,
+                "type": "StepRequested",
+                "payload": {"key": "review:intro", "step_name": "Approved?", "completion_mode": "operator", "request": {"artifact": {"kind": "markdown", "title": "Intro", "markdown": "## Intro\nFive agents made one mess."}}},
+            },
+            {
+                "seq": 8,
+                "type": "StepRequested",
+                "payload": {"key": "review:workflow", "step_name": "Approved?", "completion_mode": "operator", "request": {"artifact": {"kind": "markdown", "title": "Workflow", "markdown": "## Workflow\nPromote repeated failures into gates."}}},
+            },
+            {"seq": 9, "type": "ParallelWaiting", "payload": {"kind": "parallel", "pending": ["review:intro", "review:workflow"]}},
+            {"seq": 10, "type": "SignalReceived", "payload": {"signal_type": "operator.response", "key": "review:intro", "payload": {"action": "request_changes", "feedback": "less AI please"}}},
+            {"seq": 11, "type": "StepCompleted", "payload": {"key": "review:intro", "completion_mode": "operator", "output": {"action": "request_changes", "feedback": "less AI please"}}},
+            {"seq": 12, "type": "SignalReceived", "payload": {"signal_type": "operator.response", "key": "review:workflow", "payload": {"action": "approve"}}},
+            {"seq": 13, "type": "StepCompleted", "payload": {"key": "review:workflow", "completion_mode": "operator", "output": {"action": "approve"}}},
+            {
+                "seq": 14,
+                "type": "StepRequested",
+                "payload": {"key": "draft:intro:retry", "step_name": "draft section", "args": [{"input": {"previous": {"title": "Intro", "text": "Five agents made one mess."}, "feedback": "less AI please"}}]},
+            },
+            {"seq": 15, "type": "ParallelWaiting", "payload": {"kind": "parallel", "pending": ["draft:intro:retry"]}},
+            {"seq": 16, "type": "StepCompleted", "payload": {"key": "draft:intro:retry", "output": {"title": "Intro", "text": "Five agents made one smaller mess."}}},
+            {
+                "seq": 17,
+                "type": "StepRequested",
+                "payload": {"key": "review:intro:retry", "step_name": "Approved?", "completion_mode": "operator", "request": {"artifact": {"kind": "markdown", "title": "Intro", "markdown": "## Intro\nFive agents made one smaller mess."}}},
+            },
+            {"seq": 18, "type": "SignalReceived", "payload": {"signal_type": "operator.response", "key": "review:intro:retry", "payload": {"action": "approve"}}},
+            {"seq": 19, "type": "StepCompleted", "payload": {"key": "review:intro:retry", "completion_mode": "operator", "output": {"action": "approve"}}},
+            {"seq": 20, "type": "StepRequested", "payload": {"key": "humanize:intro", "step_name": "humanize section", "args": [{"input": {"title": "Intro", "text": "Five agents made one smaller mess."}}]}},
+            {"seq": 21, "type": "StepRequested", "payload": {"key": "humanize:workflow", "step_name": "humanize section", "args": [{"input": {"title": "Workflow", "text": "Promote repeated failures into gates."}}]}},
+        ],
+    }
+
+    dag = api._run_dag_payload(status, [])
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+    nodes = {node["id"]: node for node in dag["nodes"]}
+
+    assert nodes["review:intro"]["review_action"] == "request_changes"
+    assert nodes["review:intro"]["review_feedback"] == "less AI please"
+    assert ("review:intro", "draft:intro:retry") in edges
+    assert ("review:workflow", "draft:intro:retry") not in edges
+    assert ("review:intro:retry", "humanize:intro") in edges
+    assert ("review:workflow", "humanize:workflow") in edges
+    assert ("review:intro:retry", "humanize:workflow") not in edges
 
 
 def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):

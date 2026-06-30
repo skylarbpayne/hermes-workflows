@@ -842,28 +842,26 @@ def _artifact_node_id(artifact: dict[str, Any]) -> str | None:
 
 
 def _payload_contains_value(container: Any, value: Any) -> bool:
-    """Return true when a request payload concretely carries a prior output.
-
-    Pipeline stages and per-item review gates often feed each item output into
-    the next request. The next request is not always the exact raw value: review
-    gates commonly wrap a draft into a Markdown artifact. Match transformed
-    payloads by requiring the later payload to contain the meaningful pieces of
-    the prior output, then only narrow the graph edge when exactly one parent
-    matches.
-    """
+    """Return true when a request payload concretely carries a prior value."""
 
     if container == value:
         return True
     if isinstance(value, str):
+        needle = value.strip()
         if isinstance(container, str):
-            return value in container
+            haystack = container.strip()
+            return haystack == needle if len(needle) < 4 else needle in haystack
         if isinstance(container, dict):
             return any(_payload_contains_value(item, value) for item in container.values())
         if isinstance(container, (list, tuple)):
             return any(_payload_contains_value(item, value) for item in container)
         return False
     if isinstance(value, dict):
-        meaningful_values = [item for item in value.values() if item not in (None, "", [], {})]
+        meaningful_values = [
+            item
+            for key, item in value.items()
+            if key not in {"kind", "schema", "schema_descriptor", "timeout", "key"} and item not in (None, "", [], {})
+        ]
         return bool(meaningful_values) and all(_payload_contains_value(container, item) for item in meaningful_values)
     if isinstance(value, (list, tuple)):
         meaningful_items = [item for item in value if item not in (None, "", [], {})]
@@ -873,6 +871,59 @@ def _payload_contains_value(container: Any, value: Any) -> bool:
     if isinstance(container, (list, tuple)):
         return any(_payload_contains_value(item, value) for item in container)
     return False
+
+
+def _append_unique_match_value(values: list[Any], value: Any) -> None:
+    if value in (None, "", [], {}):
+        return
+    if value not in values:
+        values.append(value)
+
+
+def _dag_match_values_from_payload(payload: dict[str, Any]) -> list[Any]:
+    values: list[Any] = []
+    if "output" in payload:
+        output = payload.get("output")
+        if isinstance(output, dict) and "action" in output:
+            _append_unique_match_value(values, output.get("feedback"))
+        else:
+            _append_unique_match_value(values, output)
+    raw_request = payload.get("request")
+    request = raw_request if isinstance(raw_request, dict) else {}
+    raw_artifact = request.get("artifact")
+    artifact = raw_artifact if isinstance(raw_artifact, dict) else {}
+    if artifact:
+        _append_unique_match_value(values, artifact.get("title"))
+        markdown = artifact.get("markdown")
+        if isinstance(markdown, str):
+            body = "\n".join(line for line in markdown.splitlines() if not line.startswith("#")).strip()
+            _append_unique_match_value(values, body)
+    _append_unique_match_value(values, request.get("input") if isinstance(request, dict) else None)
+    args = payload.get("args") if isinstance(payload.get("args"), list) else []
+    for arg in args:
+        if isinstance(arg, dict):
+            _append_unique_match_value(values, arg.get("input"))
+            _append_unique_match_value(values, arg.get("title"))
+            _append_unique_match_value(values, arg.get("text"))
+        _append_unique_match_value(values, arg)
+    return values
+
+
+def _review_output_from_payload(payload: dict[str, Any]) -> dict[str, str] | None:
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        nested = payload.get("payload")
+        output = nested if isinstance(nested, dict) else None
+    if not isinstance(output, dict):
+        return None
+    action = output.get("action")
+    if not action:
+        return None
+    result = {"review_action": str(action)}
+    feedback = output.get("feedback")
+    if isinstance(feedback, str) and feedback.strip():
+        result["review_feedback"] = feedback.strip()
+    return result
 
 
 def _child_workflow_nodes_from_events(events: list[dict[str, Any]], child_runs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -959,6 +1010,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
     completed_pending_frontier: set[str] = set()
     gather_children: set[str] = set()
     completed_outputs: dict[str, Any] = {}
+    match_values_by_node: dict[str, list[Any]] = {}
     events = status.get("events") or status.get("recent_events") or []
     child_node_summaries = _child_workflow_nodes_from_events(events, child_runs or {})
 
@@ -992,6 +1044,9 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             completion_mode = _dag_completion_mode(event_type, payload)
             if completion_mode:
                 node["completion_mode"] = completion_mode
+            review_output = _review_output_from_payload(payload)
+            if review_output:
+                node.update(review_output)
             if node.get("kind") == "child_workflow" and node_id in child_node_summaries:
                 node.update(child_node_summaries[node_id])
             nodes[node_id] = node
@@ -1003,10 +1058,15 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             completion_mode = _dag_completion_mode(event_type, payload)
             if completion_mode:
                 node["completion_mode"] = completion_mode
+            review_output = _review_output_from_payload(payload)
+            if review_output:
+                node.update(review_output)
             if payload.get("step_name") or event_type in {"ApprovalRequested", "AgentRequested"}:
                 node["label"] = _dag_node_label(event_type, payload, event)
             if node.get("kind") == "child_workflow" and node_id in child_node_summaries:
                 node.update(child_node_summaries[node_id])
+        for value in _dag_match_values_from_payload(payload):
+            _append_unique_match_value(match_values_by_node.setdefault(node_id, []), value)
         return node_id
 
     def flush_sequential_until(node_id: str | None = None) -> None:
@@ -1030,16 +1090,56 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
             frontier = set(completed_pending_frontier)
             completed_pending_frontier = set()
 
-    def parents_for_request(request_payload: dict[str, Any]) -> set[str]:
+    def parents_for_request(request_payload: dict[str, Any], request_id: str | None = None) -> set[str]:
         parents = set(frontier or {"workflow:start"})
-        if len(parents) <= 1:
+
+        def best_matching_parent_ids(candidates: set[str]) -> set[str]:
+            candidate_ids = set(candidates)
+            if request_id is not None:
+                candidate_ids.discard(request_id)
+            scored: list[tuple[int, str]] = []
+            for parent_id in candidate_ids:
+                best_score = 0
+                for value in match_values_by_node.get(parent_id, []):
+                    if _payload_contains_value(request_payload, value):
+                        try:
+                            score = len(json.dumps(value, sort_keys=True, default=str))
+                        except Exception:
+                            score = len(str(value))
+                        best_score = max(best_score, score)
+                if best_score:
+                    scored.append((best_score, parent_id))
+            if not scored:
+                return set()
+            max_score = max(score for score, _ in scored)
+            return {parent_id for score, parent_id in scored if score == max_score}
+
+        if len(parents) > 1:
+            matching_parents = best_matching_parent_ids(parents)
+            if len(matching_parents) == 1:
+                return matching_parents
+        if any(nodes.get(parent_id, {}).get("kind") == "gather" for parent_id in parents):
             return parents
-        matching_parents = {
-            parent_id
-            for parent_id in parents
-            if parent_id in completed_outputs and _payload_contains_value(request_payload, completed_outputs[parent_id])
+
+        # Retry/rejoin patterns can leave only the most recent branch in the
+        # frontier even though a later per-item request belongs to an older
+        # approved branch. If exactly one prior review node's artifact/output
+        # matches the new request, use that edge instead of drawing the
+        # misleading "latest node -> every next item" fan-out.
+        review_nodes = {
+            node_id
+            for node_id, node in nodes.items()
+            if node.get("completion_mode") in {"operator", "approval"}
+            and ("SignalReceived" in node.get("event_types", []) or "StepCompleted" in node.get("event_types", []))
         }
-        return matching_parents if len(matching_parents) == 1 else parents
+        review_matches = best_matching_parent_ids(review_nodes)
+        if len(review_matches) == 1:
+            return review_matches
+
+        global_matches = best_matching_parent_ids(set(match_values_by_node))
+        if len(global_matches) == 1:
+            return global_matches
+        return parents
 
     for event in events:
         event_type = str(event.get("type") or "")
@@ -1055,7 +1155,7 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
         elif event_type in {"StepRequested", "ChildWorkflowRequested"}:
             if node_id not in pending_requests and node_id not in gather_children:
                 pending_requests.append(node_id)
-                pending_parents[node_id] = parents_for_request(payload)
+                pending_parents[node_id] = parents_for_request(payload, node_id)
         elif event_type in {"GatherWaiting", "ChildWorkflowGatherWaiting"}:
             pending = [str(item) for item in payload.get("pending") or []]
             parents = frontier or {"workflow:start"}
