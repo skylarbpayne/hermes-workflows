@@ -1617,10 +1617,10 @@ def test_dashboard_run_dag_shows_review_feedback_and_pairs_retries_and_rejoins()
     assert nodes["review:intro"]["review_feedback"] == "less AI please"
     assert ("review:intro", "draft:intro:retry") in edges
     assert ("review:workflow", "draft:intro:retry") not in edges
-    assert ("draft:intro:retry", "humanize:intro") in edges
-    assert ("draft:workflow", "humanize:workflow") in edges
-    assert ("review:intro:retry", "humanize:intro") not in edges
-    assert ("review:workflow", "humanize:workflow") not in edges
+    assert ("review:intro:retry", "humanize:intro") in edges
+    assert ("review:workflow", "humanize:workflow") in edges
+    assert ("draft:intro:retry", "humanize:intro") not in edges
+    assert ("draft:workflow", "humanize:workflow") not in edges
     assert ("draft:intro:retry", "humanize:workflow") not in edges
     assert ("humanize:intro", "humanize:draft") in edges
     assert ("humanize:workflow", "humanize:draft") in edges
@@ -1648,8 +1648,10 @@ def test_dashboard_run_dag_uses_foreground_authoring_inputs_over_background_cont
             {"seq": 7, "type": "StepCompleted", "payload": {"key": "select_angle", "completion_mode": "operator", "output": selected_angle}},
             {"seq": 8, "type": "StepRequested", "payload": {"key": "draft_outline", "step_name": "agent", "args": [{"input": {"angle": selected_angle, "research": research, "topic": "Skills are just suggestions"}}]}},
             {"seq": 9, "type": "StepCompleted", "payload": {"key": "draft_outline", "output": outline}},
-            {"seq": 10, "type": "StepRequested", "payload": {"key": "draft_section_a", "step_name": "agent", "args": [{"input": {"section": first_section, "research": research}}]}},
-            {"seq": 11, "type": "StepRequested", "payload": {"key": "draft_section_b", "step_name": "agent", "args": [{"input": {"section": second_section, "research": research}}]}},
+            {"seq": 10, "type": "StepRequested", "payload": {"key": "outline_review", "step_name": "Approved?", "completion_mode": "operator", "request": {"artifact": {"kind": "markdown", "title": outline["title"], "markdown": "# Skills Are Just Suggestions\n\n- **The mess** — Open with five parallel agents making cleanup work.\n- **The fix** — Move promises into workflow state."}}}},
+            {"seq": 11, "type": "StepCompleted", "payload": {"key": "outline_review", "completion_mode": "operator", "output": {"action": "approve"}}},
+            {"seq": 12, "type": "StepRequested", "payload": {"key": "draft_section_a", "step_name": "agent", "args": [{"input": {"section": first_section, "research": research}}]}},
+            {"seq": 13, "type": "StepRequested", "payload": {"key": "draft_section_b", "step_name": "agent", "args": [{"input": {"section": second_section, "research": research}}]}},
         ],
     }
 
@@ -1659,8 +1661,11 @@ def test_dashboard_run_dag_uses_foreground_authoring_inputs_over_background_cont
     assert ("research", "angles") in edges
     assert ("angles", "select_angle") in edges
     assert ("select_angle", "draft_outline") in edges
-    assert ("draft_outline", "draft_section_a") in edges
-    assert ("draft_outline", "draft_section_b") in edges
+    assert ("draft_outline", "outline_review") in edges
+    assert ("outline_review", "draft_section_a") in edges
+    assert ("outline_review", "draft_section_b") in edges
+    assert ("draft_outline", "draft_section_a") not in edges
+    assert ("draft_outline", "draft_section_b") not in edges
     assert ("research", "draft_outline") not in edges
     assert ("research", "draft_section_a") not in edges
     assert ("research", "draft_section_b") not in edges

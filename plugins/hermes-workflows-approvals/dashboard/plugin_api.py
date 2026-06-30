@@ -846,6 +846,26 @@ def _payload_contains_value(container: Any, value: Any) -> bool:
 
     if container == value:
         return True
+    if isinstance(container, str) and isinstance(value, dict):
+        haystack = container.strip()
+        required_strings = [
+            str(value[key]).strip()
+            for key in ("title", "heading", "text", "task", "summary")
+            if isinstance(value.get(key), str) and len(str(value.get(key)).strip()) >= 4
+        ]
+        if required_strings:
+            return all(item in haystack for item in required_strings)
+        meaningful_strings = [
+            str(item).strip()
+            for key, item in value.items()
+            if key not in {"kind", "schema", "schema_descriptor", "timeout", "key"}
+            and isinstance(item, str)
+            and len(item.strip()) >= 4
+        ]
+        return bool(meaningful_strings) and all(item in haystack for item in meaningful_strings)
+    if isinstance(container, str) and isinstance(value, (list, tuple)):
+        meaningful_items = [item for item in value if item not in (None, "", [], {})]
+        return bool(meaningful_items) and all(_payload_contains_value(container, item) for item in meaningful_items)
     if isinstance(value, str):
         needle = value.strip()
         if isinstance(container, str):
@@ -882,6 +902,29 @@ def _append_unique_match_value(values: list[Any], value: Any) -> None:
 
 def _dag_match_values_from_payload(payload: dict[str, Any]) -> list[Any]:
     values: list[Any] = []
+
+    def add_artifact(artifact: Any) -> None:
+        if not isinstance(artifact, dict):
+            return
+        added_content = False
+        value = artifact.get("value")
+        if value not in (None, "", [], {}):
+            _append_unique_match_value(values, value)
+            added_content = True
+        markdown = artifact.get("markdown")
+        if isinstance(markdown, str):
+            body = "\n".join(line for line in markdown.splitlines() if not line.startswith("#")).strip()
+            _append_unique_match_value(values, body)
+            added_content = True
+        options = artifact.get("options")
+        if isinstance(options, list):
+            for option in options:
+                if isinstance(option, dict) and option.get("value") not in (None, "", [], {}):
+                    _append_unique_match_value(values, option.get("value"))
+                    added_content = True
+        if not added_content:
+            _append_unique_match_value(values, artifact.get("title"))
+
     if "output" in payload:
         output = payload.get("output")
         if isinstance(output, dict) and "action" in output:
@@ -890,14 +933,8 @@ def _dag_match_values_from_payload(payload: dict[str, Any]) -> list[Any]:
             _append_unique_match_value(values, output)
     raw_request = payload.get("request")
     request = raw_request if isinstance(raw_request, dict) else {}
-    raw_artifact = request.get("artifact")
-    artifact = raw_artifact if isinstance(raw_artifact, dict) else {}
-    if artifact:
-        _append_unique_match_value(values, artifact.get("title"))
-        markdown = artifact.get("markdown")
-        if isinstance(markdown, str):
-            body = "\n".join(line for line in markdown.splitlines() if not line.startswith("#")).strip()
-            _append_unique_match_value(values, body)
+    add_artifact(request.get("artifact"))
+    add_artifact(payload.get("artifact"))
     _append_unique_match_value(values, request.get("input") if isinstance(request, dict) else None)
     args = payload.get("args") if isinstance(payload.get("args"), list) else []
     for arg in args:
@@ -1172,6 +1209,14 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
                             score = len(str(value))
                         if container == value:
                             score += 1_000_000
+                        parent_node = nodes.get(parent_id) or {}
+                        if parent_node.get("completion_mode") in {"operator", "approval"}:
+                            if parent_node.get("review_action") == "approve":
+                                score += 2_000_000
+                            elif parent_node.get("review_action") == "request_changes":
+                                score += 500_000
+                            else:
+                                score += 250_000
                         best_score = max(best_score, score)
                 if best_score:
                     scored.append((best_score, parent_id))
@@ -1243,26 +1288,23 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
         if any(nodes.get(parent_id, {}).get("kind") == "gather" for parent_id in parents):
             return parents
 
-        # First honor explicit foreground inputs (angle, section, draft, etc.)
-        # across the whole run. This prevents large background context like
-        # research notes from stealing edges away from the actual authoring
-        # chain: angles -> selected angle -> outline -> sections.
+        is_review_request = str(request_payload.get("completion_mode") or "") in {"operator", "approval"}
+        raw_request_for_kind = request_payload.get("request")
+        if isinstance(raw_request_for_kind, dict) and str(raw_request_for_kind.get("kind") or "").startswith(("operator.", "human_input.")):
+            is_review_request = True
+        matching_parents = dependency_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
+        if not matching_parents and len(parents) > 1:
+            matching_parents = best_matching_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
+        if matching_parents:
+            return matching_parents
+
+        # If the local frontier cannot explain a request, fall back to explicit
+        # foreground inputs across the run. This prevents large background
+        # context like research notes from stealing edges, while still letting
+        # completed approval gates feed the steps they unlocked.
         foreground_matches = dependency_parent_ids(set(match_values_by_node))
         if foreground_matches:
             return foreground_matches
-
-        if len(parents) > 1:
-            is_review_request = str(request_payload.get("completion_mode") or "") in {"operator", "approval"}
-            raw_request_for_kind = request_payload.get("request")
-            if isinstance(raw_request_for_kind, dict) and str(raw_request_for_kind.get("kind") or "").startswith(("operator.", "human_input.")):
-                is_review_request = True
-            matching_parents = dependency_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
-            if not matching_parents:
-                matching_parents = best_matching_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
-            if matching_parents:
-                return matching_parents
-        if any(nodes.get(parent_id, {}).get("kind") == "gather" for parent_id in parents):
-            return parents
 
         # Prefer data lineage over the current control frontier. This keeps
         # final/output steps attached to the draft they consume, not to an old
