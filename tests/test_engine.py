@@ -1,3 +1,5 @@
+import sqlite3
+
 from hermes_workflows import WorkflowEngine, agent, approve, workflow
 
 
@@ -142,3 +144,17 @@ def test_conflicting_public_step_keys_fail_before_topology_merge(tmp_path):
     assert set(steps) == {"shared_step"}
     assert steps["shared_step"]["completion_mode"] == "approval"
     assert not any(step_id.startswith(("approval:", "signal:", "agent:", "wait:")) for step_id in steps)
+
+
+def test_workflow_engine_connect_context_closes_sqlite_fd(tmp_path):
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite")
+
+    with engine._connect() as con:
+        con.execute("SELECT 1").fetchone()
+
+    try:
+        con.execute("SELECT 1")
+    except sqlite3.ProgrammingError as exc:
+        assert "closed" in str(exc)
+    else:
+        raise AssertionError("WorkflowEngine._connect() context manager left SQLite connection usable/open")

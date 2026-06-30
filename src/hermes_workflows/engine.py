@@ -26,6 +26,24 @@ from .workflow_values import Workflow
 TERMINAL_WORKFLOW_STATUSES = WorkflowStatus.terminal_values()
 
 
+class _ClosingSqliteConnection(sqlite3.Connection):
+    """sqlite3 connection that actually closes when used as a context manager.
+
+    Python's built-in sqlite3.Connection context manager commits/rolls back on
+    exit, but it does not close the underlying file descriptor. The workflow
+    engine consistently uses `with self._connect() as con:`, and resident
+    workers call that path on every poll/heartbeat. If connection objects are
+    retained longer than expected, the process leaks SQLite file handles until
+    it hits macOS's low default fd limit.
+    """
+
+    def __exit__(self, exc_type, exc, traceback):  # type: ignore[override]
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+
+
 class WorkflowWaiting(Exception):
     def __init__(self, waiting_on: str):
         super().__init__(waiting_on)
@@ -2477,9 +2495,9 @@ class WorkflowEngine:
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
             uri_path = quote(str(self.db_path.resolve()), safe="/")
-            con = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
+            con = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, factory=_ClosingSqliteConnection)
         else:
-            con = sqlite3.connect(self.db_path)
+            con = sqlite3.connect(self.db_path, factory=_ClosingSqliteConnection)
         con.row_factory = sqlite3.Row
         return con
 
