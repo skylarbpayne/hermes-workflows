@@ -1285,9 +1285,7 @@ def test_dashboard_runtime_state_packets_are_sanitized_and_labeled(tmp_path, mon
     assert queued_state["label"] == "Queued — no worker has claimed this yet"
 
     review_queue = run(api.active_review_requests(db="runtime-smoke"))
-    review_card = next(item for item in review_queue["review_requests"] if item["workflow_id"] == "wf_dashboard_runtime_state")
-    assert review_card["status"] == "completed"
-    assert review_card["runtime_state"]["label"] == "Queued — no worker has claimed this yet"
+    assert not [item for item in review_queue["review_requests"] if item["workflow_id"] == "wf_dashboard_runtime_state"]
     assert str(db) not in json.dumps(review_queue)
 
 

@@ -577,15 +577,7 @@ def _include_review_card_for_status(card: dict[str, Any], requested_status: str 
     if requested_status is None:
         return True
     card_status = str(card.get("status") or "")
-    if card_status == requested_status:
-        return True
-    if requested_status != "waiting":
-        return False
-    runtime_state = card.get("runtime_state") if isinstance(card.get("runtime_state"), dict) else {}
-    # After a review response is recorded, the review item should not vanish while
-    # the trusted continuation is queued/running/stuck. Keep it visible with the
-    # continuation state until the workflow reaches a terminal/non-active state.
-    return card_status in {"completed", "approve", "reject", "response_recorded", "decision_recorded"} and runtime_state.get("primary") in {"queued", "running", "stuck"}
+    return card_status == requested_status
 
 
 def _review_cards(engine: WorkflowEngine, *, db_alias: str, status: str | None, limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
