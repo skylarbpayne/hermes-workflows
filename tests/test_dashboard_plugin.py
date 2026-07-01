@@ -1748,7 +1748,7 @@ def test_dashboard_run_dag_uses_foreground_authoring_inputs_over_background_cont
     assert ("research", "draft_section_b") not in edges
 
 
-def test_dashboard_run_dag_connects_visual_aids_after_approved_final_draft():
+def test_dashboard_run_dag_connects_visual_aids_to_all_consumed_content_inputs():
     api = load_dashboard_api()
     outline = {"title": "Skills are just suggestions", "sections": [{"title": "Failure story", "task": "Open with pain."}]}
     final_draft = "## Failure story\n\nThe skill said run tests. The agent skipped them."
@@ -1802,7 +1802,7 @@ def test_dashboard_run_dag_connects_visual_aids_after_approved_final_draft():
     edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
 
     assert ("final_draft_0", "visual_aids") in edges
-    assert ("draft_outline", "visual_aids") not in edges
+    assert ("draft_outline", "visual_aids") in edges
     assert ("visual_aids", "content_artifacts") in edges
     assert ("content_artifacts", "workflow:completed") in edges
 

@@ -964,22 +964,21 @@ def _dag_request_dependency_values(payload: dict[str, Any]) -> list[Any]:
             if isinstance(value.get("feedback"), str) and value.get("feedback", "").strip():
                 add(value.get("feedback"))
                 return
-            # Prefer the immediate foreground artifact over planning/context fields.
-            # Composite content-generation requests often carry both outline/angle
-            # context and the final draft they actually consume. If outline wins,
-            # late steps like visual aids appear to branch from planning instead of
-            # from the approved draft that unlocked them.
-            primary_added = False
-            for key in ("previous", "draft", "visual_aids"):
+            # Preserve all explicit foreground data dependencies, in priority
+            # order. Composite content-generation requests can genuinely consume
+            # both planning context (`outline`) and a final artifact (`draft`); the
+            # graph should show both edges rather than letting the earlier outline
+            # match hide the approved draft lineage.
+            explicit_added = False
+            for key in ("previous", "draft", "visual_aids", "section", "sections", "outline"):
                 if value.get(key) not in (None, "", [], {}):
                     add(value.get(key))
-                    primary_added = True
-            if primary_added:
+                    explicit_added = True
+            if not explicit_added and value.get("angle") not in (None, "", [], {}):
+                add(value.get("angle"))
+                explicit_added = True
+            if explicit_added:
                 return
-            for key in ("section", "sections", "outline", "angle"):
-                if value.get(key) not in (None, "", [], {}):
-                    add(value.get(key))
-                    return
             non_background = {
                 key: item
                 for key, item in value.items()
@@ -1292,6 +1291,22 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
                 matches.update(best_matching_parent_ids(candidates, include_same_stage_fan_in=include_same_stage_fan_in, needle=value))
             return matches
 
+        def has_composite_foreground_input() -> bool:
+            raw_request_value = request_payload.get("request")
+            raw_request = raw_request_value if isinstance(raw_request_value, dict) else {}
+            candidates: list[Any] = [raw_request.get("input")]
+            raw_args_value = request_payload.get("args")
+            raw_args = raw_args_value if isinstance(raw_args_value, list) else []
+            candidates.extend(arg.get("input") for arg in raw_args if isinstance(arg, dict) and "input" in arg)
+            foreground_keys = {"previous", "draft", "visual_aids", "section", "sections", "outline"}
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                present = {key for key in foreground_keys if candidate.get(key) not in (None, "", [], {})}
+                if len(present) > 1:
+                    return True
+            return False
+
         feedback_matches = review_feedback_parent_ids()
         if len(feedback_matches) == 1:
             return feedback_matches
@@ -1307,6 +1322,10 @@ def _run_dag_payload(status: dict[str, Any], artifacts: list[dict[str, Any]], ch
         if not matching_parents and len(parents) > 1:
             matching_parents = best_matching_parent_ids(parents, include_same_stage_fan_in=not is_review_request)
         if matching_parents:
+            if not is_review_request and has_composite_foreground_input():
+                supplemental_matches = dependency_parent_ids(set(match_values_by_node), include_same_stage_fan_in=False)
+                if supplemental_matches:
+                    return matching_parents | supplemental_matches
             return matching_parents
 
         # If the local frontier cannot explain a request, fall back to explicit
