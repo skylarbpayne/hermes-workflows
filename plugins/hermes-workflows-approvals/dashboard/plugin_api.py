@@ -910,6 +910,7 @@ def _dag_match_values_from_payload(payload: dict[str, Any]) -> list[Any]:
             added_content = True
         markdown = artifact.get("markdown")
         if isinstance(markdown, str):
+            _append_unique_match_value(values, markdown.strip())
             body = "\n".join(line for line in markdown.splitlines() if not line.startswith("#")).strip()
             _append_unique_match_value(values, body)
             added_content = True
@@ -963,7 +964,19 @@ def _dag_request_dependency_values(payload: dict[str, Any]) -> list[Any]:
             if isinstance(value.get("feedback"), str) and value.get("feedback", "").strip():
                 add(value.get("feedback"))
                 return
-            for key in ("previous", "section", "outline", "sections", "draft", "visual_aids", "angle"):
+            # Prefer the immediate foreground artifact over planning/context fields.
+            # Composite content-generation requests often carry both outline/angle
+            # context and the final draft they actually consume. If outline wins,
+            # late steps like visual aids appear to branch from planning instead of
+            # from the approved draft that unlocked them.
+            primary_added = False
+            for key in ("previous", "draft", "visual_aids"):
+                if value.get(key) not in (None, "", [], {}):
+                    add(value.get(key))
+                    primary_added = True
+            if primary_added:
+                return
+            for key in ("section", "sections", "outline", "angle"):
                 if value.get(key) not in (None, "", [], {}):
                     add(value.get(key))
                     return
@@ -985,6 +998,7 @@ def _dag_request_dependency_values(payload: dict[str, Any]) -> list[Any]:
     if isinstance(artifact, dict):
         markdown = artifact.get("markdown")
         if isinstance(markdown, str):
+            add(markdown.strip())
             add("\n".join(line for line in markdown.splitlines() if not line.startswith("#")).strip())
         else:
             add(artifact.get("value") or artifact.get("title"))

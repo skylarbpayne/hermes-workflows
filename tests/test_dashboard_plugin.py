@@ -1748,6 +1748,65 @@ def test_dashboard_run_dag_uses_foreground_authoring_inputs_over_background_cont
     assert ("research", "draft_section_b") not in edges
 
 
+def test_dashboard_run_dag_connects_visual_aids_after_approved_final_draft():
+    api = load_dashboard_api()
+    outline = {"title": "Skills are just suggestions", "sections": [{"title": "Failure story", "task": "Open with pain."}]}
+    final_draft = "## Failure story\n\nThe skill said run tests. The agent skipped them."
+    visual_aids = [{"title": "Workflow graph", "placement": "After failure story", "purpose": "Show enforced path", "prompt": "Draw graph."}]
+    status = {
+        "workflow_id": "wf_visual_after_draft",
+        "events": [
+            {"seq": 1, "type": "WorkflowStarted", "payload": {}},
+            {"seq": 2, "type": "StepRequested", "payload": {"key": "draft_outline", "step_name": "agent"}},
+            {"seq": 3, "type": "StepCompleted", "payload": {"key": "draft_outline", "output": outline}},
+            {"seq": 4, "type": "StepRequested", "payload": {"key": "humanize_draft", "step_name": "agent", "args": [{"input": [outline["sections"][0]]}]}},
+            {"seq": 5, "type": "StepCompleted", "payload": {"key": "humanize_draft", "output": final_draft}},
+            {
+                "seq": 6,
+                "type": "StepRequested",
+                "payload": {
+                    "key": "final_draft_0",
+                    "step_name": "Approved?",
+                    "completion_mode": "operator",
+                    "request": {"artifact": {"kind": "markdown", "title": "Final draft", "markdown": final_draft}},
+                },
+            },
+            {"seq": 7, "type": "ApprovalRequested", "payload": {"key": "approval:final_draft_0", "kind": "operator.request.v1", "prompt": "Approved?"}},
+            {"seq": 8, "type": "SignalReceived", "payload": {"signal_type": "operator.response", "key": "final_draft_0", "payload": {"action": "approve"}}},
+            {"seq": 9, "type": "StepCompleted", "payload": {"key": "final_draft_0", "completion_mode": "operator", "output": {"action": "approve"}}},
+            {
+                "seq": 10,
+                "type": "StepRequested",
+                "payload": {
+                    "key": "visual_aids",
+                    "step_name": "agent",
+                    "args": [{"input": {"topic": "Skills are just suggestions", "outline": outline, "draft": final_draft}}],
+                },
+            },
+            {"seq": 11, "type": "StepCompleted", "payload": {"key": "visual_aids", "output": visual_aids}},
+            {
+                "seq": 12,
+                "type": "StepRequested",
+                "payload": {
+                    "key": "content_artifacts",
+                    "step_name": "content_artifacts",
+                    "args": [{"input": {"outline": outline, "draft": final_draft, "visual_aids": visual_aids}}],
+                },
+            },
+            {"seq": 13, "type": "StepCompleted", "payload": {"key": "content_artifacts", "output": ["artifact"]}},
+            {"seq": 14, "type": "WorkflowCompleted", "payload": {"artifact_count": 1}},
+        ],
+    }
+
+    dag = api._run_dag_payload(status, [])
+    edges = {(edge["from"], edge["to"]) for edge in dag["edges"]}
+
+    assert ("final_draft_0", "visual_aids") in edges
+    assert ("draft_outline", "visual_aids") not in edges
+    assert ("visual_aids", "content_artifacts") in edges
+    assert ("content_artifacts", "workflow:completed") in edges
+
+
 def test_dashboard_run_dag_groups_returned_workflow_children_as_collapsible_nodes(tmp_path, monkeypatch):
     from tests.test_dynamic_workflow_return import dynamic_processor_pipeline
 
