@@ -50,6 +50,7 @@ class AgentCall(Generic[T]):
     isolation: str = "workspace"
     timeout: int | None = None
     budget: float | None = None
+    max_attempts: int = 2
     mock_output: Any = None
     public_name: str | None = None
     public_label: str | None = None
@@ -129,6 +130,7 @@ class AgentCall(Generic[T]):
             isolation=self.isolation,
             timeout=self.timeout,
             budget=self.budget,
+            max_attempts=self.max_attempts,
             mock_output=self.mock_output,
             public_name=self.public_name,
             public_label=self.public_label,
@@ -166,9 +168,11 @@ class AgentCall(Generic[T]):
             "isolation": self.isolation,
             "timeout": self.timeout,
             "budget": self.budget,
+            "max_attempts": self.max_attempts,
             "mock_output": self.mock_output,
             "step_key": key,
         }
+        request["returns_schema"] = _return_schema_descriptor(self.returns)
         fingerprint_parts = {
             "prompt": request["prompt"],
             "input": request["input"],
@@ -315,6 +319,7 @@ def agent(
     isolation: str = "workspace",
     timeout: int | None = None,
     budget: float | None = None,
+    max_attempts: int = 2,
     mock_output: Any = None,
 ) -> AgentCall[Any]:
     if name is None:
@@ -340,6 +345,7 @@ def agent(
         isolation=isolation,
         timeout=timeout,
         budget=budget,
+        max_attempts=max_attempts,
         mock_output=mock_output,
         public_name=public_name,
         public_label=_public_label(public_name),

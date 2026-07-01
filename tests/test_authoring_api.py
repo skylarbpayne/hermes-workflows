@@ -669,6 +669,8 @@ def test_agent_prompt_input_are_sent_to_runner_and_typed_output_replays(tmp_path
     assert "context_sha256" not in calls[0]
     assert calls[0]["fingerprint"]
     assert calls[0]["returns"].endswith(":ResearchPacket")
+    assert calls[0]["returns_schema"]["kind"] == "structured_object"
+    assert [field["name"] for field in calls[0]["returns_schema"]["fields"]] == ["summary", "sources"]
 
     replay_calls = []
     replay = WorkflowEngine(db, agent_runner=lambda request: replay_calls.append(request) or {"output": "wrong"})
@@ -677,6 +679,79 @@ def test_agent_prompt_input_are_sent_to_runner_and_typed_output_replays(tmp_path
     assert replayed.status == "completed"
     assert replayed.result == result.result
     assert replay_calls == []
+
+
+def test_agent_schema_retry_feeds_error_back_to_runner(tmp_path):
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return {"output": {"content": "wrong field name", "sources": ["docs"]}}
+        assert request["retry"]["attempt"] == 2
+        assert request["retry"]["error"]["type"] == "AgentOutputSchemaError"
+        assert "missing required field" in request["retry"]["error"]["message"]
+        assert '"content": "wrong field name"' in request["retry"]["previous_output"]
+        assert "RETRY ATTEMPT 2 OF 2" in request["rendered_prompt"]
+        assert "returns_schema" in request
+        return {"output": {"summary": "fixed", "sources": ["docs"]}, "provenance": {"runner": "fixture"}}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+
+    result = engine.run_until_idle(prompted_agent_workflow, {"topic": "typed workflows"}, workflow_id="wf_agent_retry")
+
+    assert result.status == "completed"
+    assert result.result == {"summary": "fixed", "sources": ["docs"]}
+    assert len(calls) == 2
+    completed = [event for event in engine.events("wf_agent_retry") if event["type"] == "StepCompleted"]
+    assert len(completed) == 1
+    metadata = completed[0]["payload"]["metadata"]
+    assert metadata["attempt"] == 2
+    assert metadata["max_attempts"] == 2
+    assert metadata["retry_history"][0]["attempt"] == 1
+    assert metadata["retry_history"][0]["error"]["path"] == "output"
+
+
+def test_agent_schema_retry_fails_after_max_attempts(tmp_path):
+    calls = []
+
+    def runner(request):
+        calls.append(request)
+        return {"output": {"content": "still wrong"}}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db, agent_runner=runner)
+
+    result = engine.run_until_idle(prompted_agent_workflow, {"topic": "typed workflows"}, workflow_id="wf_agent_retry_exhausted")
+
+    assert result.status == "failed"
+    assert len(calls) == 2
+    assert "AgentOutputSchemaError" in (result.error or "")
+    assert "missing required field" in (result.error or "")
+    events = engine.events("wf_agent_retry_exhausted")
+    failures = [event for event in events if event["type"] == "StepFailed"]
+    assert len(failures) == 1
+    assert failures[0]["payload"]["error"]["type"] == "AgentOutputSchemaError"
+
+
+def test_agent_schema_retry_respects_max_attempts_one(tmp_path):
+    calls = []
+
+    @workflow
+    async def no_retry_agent_workflow(inputs):
+        return await agent("research", prompt="Research once", input=inputs, returns=ResearchPacket, max_attempts=1)
+
+    def runner(request):
+        calls.append(request)
+        return {"output": {"content": "wrong"}}
+
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite", agent_runner=runner)
+
+    result = engine.run_until_idle(no_retry_agent_workflow, {"topic": "typed workflows"}, workflow_id="wf_agent_no_retry")
+
+    assert result.status == "failed"
+    assert len(calls) == 1
 
 
 def test_agent_accepts_rendered_prompt_file_metadata(tmp_path):
