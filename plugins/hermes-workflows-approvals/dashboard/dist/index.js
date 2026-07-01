@@ -186,7 +186,9 @@
         e("summary", null, "Raw JSON"),
         e("pre", null, pretty(value)));
     }
-    return e("pre", null, pretty(value));
+    return e("details", { className: "hwf-raw-json" },
+      e("summary", null, "Raw JSON"),
+      e("pre", null, pretty(value)));
   }
 
   function HumanResponsePreview(props) {
@@ -336,6 +338,18 @@
     return text.slice(0, 12) + "…" + text.slice(-10);
   }
 
+  function sourceStepId(value) {
+    return value && (value.step_id || value.source_step_id || value.key || (value.source && value.source.key));
+  }
+
+  function StepIdBadge(props) {
+    const stepId = sourceStepId(props.value);
+    if (!stepId) return null;
+    return e("div", { className: "hwf-step-id-callout" },
+      e("span", null, "Step"),
+      e("code", { title: String(stepId) }, String(stepId)));
+  }
+
   function primitiveValue(value) {
     return value === null || value === undefined || ["string", "number", "boolean"].includes(typeof value);
   }
@@ -383,6 +397,7 @@
             artifact.workflow_id && e("code", { className: "hwf-run-id", title: artifact.workflow_id }, shortId(artifact.workflow_id)),
             artifact.source && artifact.source.key && e(Pill, { label: "step: " + artifact.source.key })))),
       e(CardContent, null,
+        e(StepIdBadge, { value: artifact }),
         e(ArtifactRenderSummary, { render: artifact.artifact_render }),
         e(ArtifactInlinePreview, { render: artifact.artifact_render, value: raw }),
         e(ArtifactSummary, { artifact: artifact }),
@@ -462,6 +477,7 @@
         e("div", { className: "hwf-row-actions" },
           e(Button, { variant: "outline", onClick: function () { props.onView(approval); } }, "View approval"))),
       e(CardContent, null,
+        e(StepIdBadge, { value: approval }),
         e("p", { className: "hwf-consequence" }, approval.consequence || "Records decision and creates inspectable workflow continuation"),
         e("div", { className: "hwf-two-col" },
           e("div", null,
@@ -480,7 +496,7 @@
   function HumanInputActions(props) {
     const step = props.step;
     const useState = hooks.useState;
-    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "" });
+    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "" });
     const ui = state[0];
     const setUi = state[1];
     if (!step || step.status !== "waiting") return e("span", { className: "hwf-muted" }, step && step.status === "completed" ? "answered" : "no actions");
@@ -519,6 +535,23 @@
       try { payload = JSON.parse(ui.payloadText || "{}"); } catch (err) { setUi(Object.assign({}, ui, { error: "Invalid JSON payload" })); return; }
       submitPayload(payload);
     }
+    function selectionPayload(surface, option) {
+      if (!option) return null;
+      if (surface.submit === "value" || !surface.field) {
+        const value = Object.prototype.hasOwnProperty.call(option, "value") ? option.value : option.id;
+        if (value && typeof value === "object" && !Array.isArray(value)) return value;
+        return { value: value };
+      }
+      const payload = {};
+      payload[surface.field] = Object.prototype.hasOwnProperty.call(option, "value") ? option.value : option.id;
+      return payload;
+    }
+    function submitSelection(surface) {
+      const options = surface.options || [];
+      const option = options.find(function (item) { return String(item.id) === String(ui.selectedOptionId); });
+      if (!option) { setUi(Object.assign({}, ui, { error: "Choose an option first" })); return; }
+      submitPayload(selectionPayload(surface, option));
+    }
     function submitReviewDecision(action, actions) {
       const feedbackText = String(ui.feedback || "").trim();
       let selectedAction = action;
@@ -552,6 +585,28 @@
         e("p", { className: "hwf-muted" }, "Upload support is not wired yet. Attach the document through a workflow extension and submit the returned artifact reference."),
         ui.error && e("span", { className: "hwf-bad" }, ui.error));
     }
+    if (surface.kind === "selection") {
+      const options = surface.options || [];
+      return e("div", { className: "hwf-approval-actions hwf-selection-actions" },
+        e("div", { className: "hwf-section-title" }, "Choose one"),
+        e("div", { className: "hwf-selection-options" }, options.map(function (option) {
+          const selected = String(ui.selectedOptionId) === String(option.id);
+          return e("label", { key: option.id, className: "hwf-selection-option " + (selected ? "is-selected" : "") },
+            e("input", {
+              type: "radio",
+              name: "selection-" + step.key,
+              value: option.id,
+              checked: selected,
+              onInput: function () { setUi(Object.assign({}, ui, { selectedOptionId: String(option.id), error: null })); }
+            }),
+            e("span", { className: "hwf-selection-option-body" },
+              e("strong", null, option.label || option.id),
+              option.details && e("span", { className: "hwf-muted" }, option.details)));
+        })),
+        e(Button, { disabled: ui.busy || !ui.selectedOptionId, onClick: function () { submitSelection(surface); } }, "Submit selection"),
+        ui.done && e("span", { className: "hwf-ok" }, ui.done),
+        ui.error && e("span", { className: "hwf-bad" }, ui.error));
+    }
     return e("div", { className: "hwf-approval-actions" },
       step.schema && e("p", { className: "hwf-muted" }, "Expected response: " + (step.request_schema && step.request_schema.name || step.schema)),
       e(Input, { value: ui.payloadText, placeholder: surface.kind === "textarea" ? "Enter feedback" : "Enter structured response", onInput: function (event) { setUi(Object.assign({}, ui, { payloadText: event.target.value })); } }),
@@ -575,6 +630,7 @@
             step.workflow_name && e(Pill, { label: step.workflow_name }),
             step.schema && e(Pill, { label: "Schema: " + step.schema })))),
       e(CardContent, null,
+        e(StepIdBadge, { value: step }),
         e("p", { className: "hwf-consequence" }, step.consequence || "Records typed human input with provenance and creates inspectable continuation."),
         e("div", { className: "hwf-two-col" },
           e("div", null,
@@ -644,6 +700,7 @@
         e("h2", null, approval.headline || what.prompt || approval.key)),
       e(Button, { className: "hwf-close-button", variant: "outline", onClick: closeDialog }, "Close"));
     const body = e("div", { className: "hwf-approval-detail-body" },
+      e(StepIdBadge, { value: approval }),
       e("div", { className: "hwf-approval-hero" },
         e("div", null,
           e("div", { className: "hwf-section-title" }, "What you are approving"),

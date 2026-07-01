@@ -1036,6 +1036,15 @@ def test_dashboard_select_response_does_not_require_dashboard_actor_identity(tmp
     configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
     api = load_dashboard_api()
 
+    review_requests = run(api.active_review_requests(db="runtime-smoke", status="waiting"))["review_requests"]
+    select_card = next(card for card in review_requests if card["key"] == "select_dashboard_payload")
+    assert select_card["step_id"] == "select_dashboard_payload"
+    assert select_card["source_step_id"] == "select_dashboard_payload"
+    assert select_card["input_surface"]["kind"] == "selection"
+    assert select_card["input_surface"]["submit"] == "value"
+    assert [option["label"] for option in select_card["input_surface"]["options"]] == ["Guidance", "Commitments"]
+    assert select_card["input_surface"]["options"][1]["details"] == "Workflows preserve obligations."
+
     receipt = run(
         api.respond_review_request(
             {
@@ -2321,6 +2330,34 @@ def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_inpu
     assert 'operatorStepsData' not in index_js
     assert 'Paste JSON matching the requested schema' not in index_js
 
+
+
+def test_dashboard_frontend_renders_select_requests_as_choice_controls():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert 'surface.kind === "selection"' in index_js
+    assert "function submitSelection(surface)" in index_js
+    assert "function selectionPayload(surface, option)" in index_js
+    assert 'e("div", { className: "hwf-selection-options" }' in index_js
+    assert 'type: "radio"' in index_js
+    assert 'Submit selection' in index_js
+    assert 'return e("details", { className: "hwf-raw-json" }' in index_js
+    assert ".hwf-selection-option" in style_css
+    assert ".hwf-selection-option.is-selected" in style_css
+
+
+def test_dashboard_frontend_surfaces_step_id_prominently():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "function StepIdBadge" in index_js
+    assert "source_step_id" in index_js
+    assert 'e(StepIdBadge, { value: step })' in index_js
+    assert 'e(StepIdBadge, { value: approval })' in index_js
+    assert 'e(StepIdBadge, { value: artifact })' in index_js
+    assert ".hwf-step-id-callout" in style_css
+    assert "font-weight: 900" in style_css
 
 def test_dashboard_frontend_hides_successful_initial_loading_state():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()

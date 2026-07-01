@@ -294,6 +294,13 @@ def _workflow_source_preview(value: Any) -> dict[str, Any] | None:
     return dict(preview) if preview is not None else None
 
 
+def _source_step_id_from_key(key: Any) -> str | None:
+    text = str(key or "").strip()
+    if not text:
+        return None
+    return _agent_request_step_id(_approval_step_id(text) or text)
+
+
 def _workflow_source_artifact(
     value: Any,
     *,
@@ -312,6 +319,7 @@ def _workflow_source_artifact(
         "kind": "workflow_source",
         "title": title,
         "source": source,
+        "source_step_id": _source_step_id_from_key(source.get("key")),
         "preview": _redact_artifact_local_refs(preview),
         "artifact_render": _artifact_descriptor(value),
     }
@@ -1504,6 +1512,80 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
     return {"kind": "json_object", "schema": descriptor}
 
 
+def _selection_option_label(option: dict[str, Any]) -> str:
+    label = option.get("label")
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    value = option.get("value")
+    if isinstance(value, dict):
+        title = value.get("title") or value.get("name") or value.get("label")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return str(option.get("id") or "Option")
+
+
+def _selection_option_details(option: dict[str, Any]) -> str | None:
+    details = option.get("details") or option.get("description") or option.get("summary")
+    if isinstance(details, str) and details.strip():
+        return details.strip()
+    value = option.get("value")
+    if isinstance(value, dict):
+        summary = value.get("summary") or value.get("description") or value.get("details")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+    if isinstance(value, str) and value.strip() and value.strip() != _selection_option_label(option):
+        return value.strip()
+    return None
+
+
+def _selection_options_from_artifact(artifact: Any) -> list[dict[str, Any]]:
+    if not isinstance(artifact, dict):
+        return []
+    raw_options_value = artifact.get("options")
+    raw_options = raw_options_value if isinstance(raw_options_value, list) else []
+    if not raw_options:
+        return []
+    options: list[dict[str, Any]] = []
+    for index, raw_option in enumerate(raw_options):
+        if isinstance(raw_option, dict):
+            item = dict(raw_option)
+        else:
+            item = {"value": raw_option}
+        item.setdefault("id", str(index))
+        item["id"] = str(item.get("id"))
+        item["label"] = _selection_option_label(item)
+        details = _selection_option_details(item)
+        if details:
+            item["details"] = details
+        options.append(item)
+    return options
+
+
+def _selection_field_from_descriptor(descriptor: dict[str, Any]) -> str | None:
+    fields = descriptor.get("fields") if isinstance(descriptor.get("fields"), list) else []
+    for field in fields:
+        if isinstance(field, dict) and field.get("kind") == "choice" and field.get("name") != "action":
+            name = field.get("name")
+            return str(name) if name else None
+    return None
+
+
+def _selection_input_surface(descriptor: dict[str, Any], artifact: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    options = _selection_options_from_artifact(artifact)
+    if not options:
+        return fallback
+    field = _selection_field_from_descriptor(descriptor)
+    submit = "choice_field" if field else "value"
+    surface: dict[str, Any] = {
+        "kind": "selection",
+        "options": options,
+        "submit": submit,
+    }
+    if field:
+        surface["field"] = field
+    return surface
+
+
 def _review_action_descriptor(action: Any) -> dict[str, Any]:
     value = str(action)
     label = value.replace("_", " ").strip().capitalize() or value
@@ -1580,16 +1662,21 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str, runtime_state: d
     raw_request = step.get("request")
     request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
     artifact = _operator_approval_artifact(step.get("artifact") if step.get("artifact") is not None else request.get("artifact"))
+    redacted_artifact = _redact_artifact_local_refs(artifact)
     prompt = step.get("prompt") or step.get("label") or step.get("key") or "Operator input needed"
     schema_id = str(step.get("schema") or request.get("schema") or "json")
     raw_descriptor = step.get("schema_descriptor") if isinstance(step.get("schema_descriptor"), dict) else request.get("schema_descriptor")
     descriptor = raw_descriptor if isinstance(raw_descriptor, dict) else _review_request_schema_descriptor(schema_id)
+    step_id = _source_step_id_from_key(step.get("key"))
+    input_surface = _selection_input_surface(descriptor, redacted_artifact, _review_input_surface(descriptor))
     card = {
         "db_alias": db_alias,
         "workflow_id": step.get("workflow_id"),
         "workflow_name": step.get("workflow_name"),
         "workflow_ref": step.get("workflow_ref"),
         "key": step.get("key"),
+        "step_id": step_id,
+        "source_step_id": step_id,
         "status": step.get("status"),
         "kind": "human_input",
         "request_type": "human_input",
@@ -1597,8 +1684,8 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str, runtime_state: d
         "prompt": prompt,
         "schema": schema_id,
         "request_schema": descriptor,
-        "input_surface": _review_input_surface(descriptor),
-        "artifact_preview": _redact_artifact_local_refs(artifact),
+        "input_surface": input_surface,
+        "artifact_preview": redacted_artifact,
         "artifact_render": _artifact_descriptor(artifact),
         "output": step.get("output"),
         "source": step.get("source"),
@@ -1615,12 +1702,15 @@ def _operator_step_card(step: dict[str, Any], *, db_alias: str, runtime_state: d
 def _approval_card(approval: dict[str, Any], *, db_alias: str, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
     prompt = approval.get("prompt") or approval.get("key") or "Approval needed"
     artifact = _operator_approval_artifact(approval.get("artifact"))
+    step_id = _source_step_id_from_key(approval.get("key"))
     card = {
         "db_alias": db_alias,
         "workflow_id": approval.get("workflow_id"),
         "workflow_name": approval.get("workflow_name"),
         "workflow_ref": approval.get("workflow_ref"),
         "key": approval.get("key"),
+        "step_id": step_id,
+        "source_step_id": step_id,
         "status": approval.get("status"),
         "kind": "approval_policy",
         "request_type": "approval_policy",
@@ -1666,6 +1756,7 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "approval_artifact",
                     "title": approval.get("prompt") or approval.get("key") or "Approval artifact",
                     "source": {"event": "ApprovalRequested", "key": approval.get("key"), "seq": approval.get("requested_seq")},
+                    "source_step_id": _source_step_id_from_key(approval.get("key")),
                     "preview": _redact_artifact_local_refs(artifact),
                     "artifact_render": _artifact_descriptor(artifact),
                 }
@@ -1683,6 +1774,7 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "operator_step_artifact",
                     "title": operator_step.get("prompt") or operator_step.get("label") or operator_step.get("key") or "Operator step artifact",
                     "source": {"event": "StepRequested", "key": operator_step.get("key"), "seq": operator_step.get("requested_seq")},
+                    "source_step_id": _source_step_id_from_key(operator_step.get("key")),
                     "preview": _redact_artifact_local_refs(artifact),
                     "artifact_render": _artifact_descriptor(artifact),
                 }
@@ -1696,6 +1788,7 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                 "kind": "run_result",
                 "title": "Run result",
                 "source": {"event": "WorkflowCompleted"},
+                "source_step_id": "workflow:completed",
                 "preview": _redact_artifact_local_refs(result),
                 "artifact_render": _artifact_descriptor(result),
             }
@@ -1735,6 +1828,7 @@ def _artifacts_from_status(status: dict[str, Any]) -> list[dict[str, Any]]:
                     "kind": "step_output",
                     "title": f"Step output: {event.get('key')}",
                     "source": {"event": "StepCompleted", "key": event.get("key"), "seq": event.get("seq")},
+                    "source_step_id": _source_step_id_from_key(event.get("key")),
                     "preview": _redact_artifact_local_refs(payload.get("output")),
                     "artifact_render": _artifact_descriptor(payload.get("output")),
                     "metadata": payload.get("metadata"),
@@ -1957,6 +2051,8 @@ async def approval_detail(db: str | None = None, workflow_id: str = "", key: str
         "approval_card": card,
         "what_you_are_approving": {
             "action": approval.get("key"),
+            "step_id": card.get("step_id"),
+            "source_step_id": card.get("source_step_id"),
             "prompt": approval.get("prompt"),
             "allowed_decisions": approval.get("allowed") or ["approve", "reject"],
             "artifact": _redact_artifact_local_refs(approval.get("artifact")),
