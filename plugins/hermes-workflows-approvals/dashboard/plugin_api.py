@@ -1492,17 +1492,46 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
     descriptor = schema if isinstance(schema, dict) else _review_request_schema_descriptor(schema)
     fields = descriptor.get("fields") if isinstance(descriptor.get("fields"), list) else []
     action_field = next((field for field in fields if isinstance(field, dict) and field.get("name") == "action" and field.get("kind") == "choice"), None)
+    feedback_field = next(
+        (
+            field
+            for field in fields
+            if isinstance(field, dict)
+            and field.get("name") in {"feedback", "comment", "comments", "reason", "note", "notes"}
+            and field.get("kind") in {"text", "object"}
+        ),
+        None,
+    )
+    edited_output_field = next(
+        (
+            field
+            for field in fields
+            if isinstance(field, dict)
+            and field.get("name") in {"edited_output", "edited_markdown", "edited_text", "replacement"}
+            and field.get("kind") in {"text", "object"}
+        ),
+        None,
+    )
     action_options = (action_field.get("options") or []) if isinstance(action_field, dict) else []
     if action_field:
-        return {
+        surface: dict[str, Any] = {
             "kind": "review_decision",
-            "actions": [_review_action_descriptor(option) for option in action_options],
-            "feedback": {"kind": "text", "optional": True, "placeholder": "What should change?"},
+            "actions": [_review_action_descriptor(option, has_feedback=feedback_field is not None) for option in action_options],
         }
+        if feedback_field is not None:
+            surface["feedback"] = {"kind": "text", "optional": True, "placeholder": "What should change?"}
+        if edited_output_field is not None:
+            surface["editable_output"] = {
+                "kind": "textarea",
+                "field": edited_output_field.get("name") or "edited_output",
+                "optional": True,
+                "placeholder": "Paste or edit the output to branch the next retry from this version.",
+            }
+        return surface
     if descriptor["kind"] == "review_decision":
         return {
             "kind": "review_decision",
-            "actions": [_review_action_descriptor(action) for action in ["approve", "request_changes"]],
+            "actions": [_review_action_descriptor(action, has_feedback=True) for action in ["approve", "request_changes"]],
             "feedback": {"kind": "text", "optional": True},
         }
     if descriptor["kind"] == "text":
@@ -1586,11 +1615,11 @@ def _selection_input_surface(descriptor: dict[str, Any], artifact: Any, fallback
     return surface
 
 
-def _review_action_descriptor(action: Any) -> dict[str, Any]:
+def _review_action_descriptor(action: Any, *, has_feedback: bool = False) -> dict[str, Any]:
     value = str(action)
     label = value.replace("_", " ").strip().capitalize() or value
     item: dict[str, Any] = {"value": value, "label": label}
-    if value != "approve":
+    if has_feedback and value not in {"approve", "accept", "ship", "proceed", "continue", "yes"}:
         item["requires_feedback"] = True
     return item
 
@@ -1616,10 +1645,16 @@ def _feedback_action_for_surface(surface: dict[str, Any]) -> str | None:
 
 
 def _normalize_review_payload_for_dashboard_request(engine: WorkflowEngine, workflow_id: str, key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    # Review-decision cards expose a feedback box whose placeholder is “What should change?”.
-    # If the browser sends approve+feedback, never silently approve and discard the user's correction.
+    # Review-decision cards expose feedback/edit boxes. If the browser sends
+    # approve+feedback or approve+edited_output, never silently approve and discard
+    # the user's correction.
     feedback = payload.get("feedback")
-    if not isinstance(feedback, str) or not feedback.strip() or not _is_positive_review_action(payload.get("action")):
+    edited_output = next(
+        (payload.get(key) for key in ("edited_output", "edited_markdown", "edited_text", "replacement") if isinstance(payload.get(key), str) and payload.get(key, "").strip()),
+        None,
+    )
+    has_revision_input = (isinstance(feedback, str) and feedback.strip()) or isinstance(edited_output, str)
+    if not has_revision_input or not _is_positive_review_action(payload.get("action")):
         return payload
     matching_step = next(
         (step for step in engine.list_operator_steps(status="waiting") if step.get("workflow_id") == workflow_id and step.get("key") == key),
@@ -1952,6 +1987,44 @@ async def runs(
     engine = WorkflowEngine(db_path, read_only=True)
     rows = _runs_with_runtime_state(engine, _all_runs(engine, status=status, limit=_int(limit, default=100, maximum=500)), db_alias=db_alias)
     return {"db_alias": db_alias, "count": len(rows), "runs": rows, "counts": _run_counts(rows), "runtime_semantics": _runtime_semantics(), "worker_warning": _active_worker_warning(engine)}
+
+
+@router.post("/runs/{workflow_id}/cancel")
+async def cancel_run(workflow_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    db_alias, db_path = _resolve_dashboard_db(body.get("db"))
+    reason = str(body.get("reason") or "Cancelled from Hermes dashboard").strip() or "Cancelled from Hermes dashboard"
+    superseded_by = str(body.get("superseded_by") or "").strip() or None
+
+    def cancel_and_read() -> tuple[Any, dict[str, Any]]:
+        engine = WorkflowEngine(db_path)
+        result = engine.cancel_workflow(
+            workflow_id,
+            reason=reason,
+            superseded_by=superseded_by,
+            source={"channel": "hermes-dashboard", "message_id": f"dashboard:{uuid.uuid4()}"},
+        )
+        status = _status_packet(
+            WorkflowEngine(db_path, read_only=True),
+            workflow_id,
+            recent_events=20,
+            commands="recent",
+            command_limit=20,
+            command_payload_chars=2000,
+            db_alias=db_alias,
+        )
+        return result, status
+
+    try:
+        result, status = await asyncio.to_thread(cancel_and_read)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"workflow cancel failed: {type(exc).__name__}: {exc}") from exc
+    return {
+        "success": True,
+        "db_alias": db_alias,
+        "result": {"workflow_id": result.workflow_id, "status": result.status, "waiting_on": result.waiting_on, "error": result.error},
+        "run": status,
+        "runtime_semantics": _runtime_semantics(),
+    }
 
 
 @router.get("/runs/{workflow_id}")

@@ -496,7 +496,7 @@
   function HumanInputActions(props) {
     const step = props.step;
     const useState = hooks.useState;
-    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "" });
+    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "", editedOutput: "", editLoaded: false });
     const ui = state[0];
     const setUi = state[1];
     if (!step || step.status !== "waiting") return e("span", { className: "hwf-muted" }, step && step.status === "completed" ? "answered" : "no actions");
@@ -552,21 +552,50 @@
       if (!option) { setUi(Object.assign({}, ui, { error: "Choose an option first" })); return; }
       submitPayload(selectionPayload(surface, option));
     }
+    function editableOutputSeed() {
+      const artifact = step.artifact || {};
+      if (typeof artifact.markdown === "string") return artifact.markdown;
+      if (typeof artifact.text === "string") return artifact.text;
+      if (typeof artifact.value === "string") return artifact.value;
+      if (typeof step.prompt === "string") return step.prompt;
+      return "";
+    }
+    function loadEditableOutput() {
+      setUi(Object.assign({}, ui, { editedOutput: editableOutputSeed(), editLoaded: true, error: null }));
+    }
     function submitReviewDecision(action, actions) {
       const feedbackText = String(ui.feedback || "").trim();
+      const editedOutputText = String(ui.editedOutput || "").trim();
       let selectedAction = action;
-      if (feedbackText && String(action || "").toLowerCase().replace(/-/g, "_") === "approve") {
+      if ((feedbackText || editedOutputText) && String(action || "").toLowerCase().replace(/-/g, "_") === "approve") {
         const feedbackAction = (actions || []).find(function (item) { return item.requires_feedback && item.value !== "approve"; });
         if (feedbackAction) selectedAction = feedbackAction.value;
       }
-      submitPayload({ action: selectedAction, feedback: feedbackText || undefined });
+      const payload = { action: selectedAction, feedback: feedbackText || undefined };
+      const editable = (step.input_surface || {}).editable_output || {};
+      const editField = editable.field || "edited_output";
+      if (editedOutputText) payload[editField] = editedOutputText;
+      submitPayload(payload);
     }
     if (isReviewDecisionStep(step)) {
       const surface = step.input_surface || {};
       const actions = (surface.actions && surface.actions.length ? surface.actions : [{ value: "approve", label: "Approve" }, { value: "request_changes", label: "Request changes", requires_feedback: true }]).map(normalizeAction);
       const feedback = surface.feedback || {};
+      const editable = surface.editable_output;
       return e("div", { className: "hwf-approval-actions hwf-review-actions" },
         e(Input, { value: ui.feedback, placeholder: feedback.placeholder || "What should change?", onInput: function (event) { setUi(Object.assign({}, ui, { feedback: event.target.value })); } }),
+        editable && e("div", { className: "hwf-edit-output-box" },
+          e("div", { className: "hwf-review-action-row" },
+            e(Button, { variant: "outline", disabled: ui.busy, onClick: loadEditableOutput }, ui.editLoaded ? "Reset editable output" : "Edit output / branch retry"),
+            e("span", { className: "hwf-muted" }, "Optional. If filled, the workflow receives this as ", e("code", null, editable.field || "edited_output"), ".")),
+          ui.editLoaded && e("textarea", {
+            className: "hwf-edit-output-textarea",
+            value: ui.editedOutput,
+            rows: 12,
+            placeholder: editable.placeholder || "Paste or edit the output to branch from this version.",
+            spellCheck: true,
+            onInput: function (event) { setUi(Object.assign({}, ui, { editedOutput: event.target.value })); }
+          })),
         e("div", { className: "hwf-review-action-row" },
           actions.map(function (action) {
             return e(Button, {
@@ -1185,6 +1214,9 @@
     const selectedState = hooks.useState(null);
     const selected = selectedState[0];
     const setSelected = selectedState[1];
+    const cancelState = hooks.useState({ busy: false, error: null, done: null });
+    const cancelUi = cancelState[0];
+    const setCancelUi = cancelState[1];
     useEffect(function () {
       if (props.inspectRun) setSelected(props.inspectRun);
     }, [props.inspectRun && props.inspectRun.workflow_id]);
@@ -1193,6 +1225,24 @@
     const runStatus = status.data && status.data.run;
     const runArtifacts = status.data && Array.isArray(status.data.artifacts) ? status.data.artifacts : [];
     const runs = Array.isArray(props.runs) ? props.runs : [];
+    function cancelSelectedRun() {
+      if (!selected || !selected.workflow_id || !runStatus) return;
+      if (["completed", "failed", "cancelled"].indexOf(String(runStatus.status)) >= 0) return;
+      const reason = globalThis.prompt ? globalThis.prompt("Cancel this workflow run? Reason:", "Cancelled from dashboard") : "Cancelled from dashboard";
+      if (!reason) return;
+      setCancelUi({ busy: true, error: null, done: null });
+      SDK.fetchJSON(API + "/runs/" + encodeURIComponent(selected.workflow_id) + "/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db: props.db, reason: reason })
+      }).then(function (data) {
+        setCancelUi({ busy: false, error: null, done: data.result && data.result.status || "cancelled" });
+        if (props.onRefresh) props.onRefresh();
+      }).catch(function (err) {
+        setCancelUi({ busy: false, error: err.message || String(err), done: null });
+      });
+    }
+    const canCancel = runStatus && ["completed", "failed", "cancelled"].indexOf(String(runStatus.status)) < 0;
     const children = [
       e("div", { className: "hwf-panel-header" }, e("h2", null, "Runs"), e("p", { className: "hwf-muted" }, "Workflow → Run → Step → Artifact/Approval. Inspect a run for outputs and decisions.")),
       selected && e(Card, { className: "hwf-inspector" },
@@ -1200,10 +1250,14 @@
           e("div", null,
             e(CardTitle, null, "Run status"),
             e("p", { className: "hwf-muted" }, selected.workflow_name || selected.workflow_ref || selected.workflow_id)),
-          e(Button, { variant: "outline", onClick: function () { setSelected(null); } }, "Close")),
+          e("div", { className: "hwf-review-action-row" },
+            canCancel && e(Button, { variant: "outline", disabled: cancelUi.busy, onClick: cancelSelectedRun }, cancelUi.busy ? "Cancelling…" : "Cancel run"),
+            e(Button, { variant: "outline", onClick: function () { setSelected(null); } }, "Close"))),
         e(CardContent, null,
           status && status.loading && e("p", null, "Loading status…"),
           status && status.error && e("p", { className: "hwf-bad" }, status.error),
+          cancelUi.error && e("p", { className: "hwf-bad" }, cancelUi.error),
+          cancelUi.done && e("p", { className: "hwf-ok" }, "Run status: " + cancelUi.done),
           status && status.data && !runStatus && e("p", { className: "hwf-muted" }, "Loading run status…"),
           runStatus && e("div", null,
             e("div", { className: "hwf-meta" },
@@ -1355,7 +1409,7 @@ return e(RunApprovalSummary, { key: approval.key, approval: approval });
       activeTab === "Workflows" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Workflows you can run"), e("p", { className: "hwf-muted" }, "See workflows I can run, then run one with JSON inputs.")),
         definitions.length ? definitions.map(function (definition) { return e(DefinitionCard, { key: definition.id, db: activeDb, definition: definition, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No runnable workflows configured yet."))),
-      activeTab === "Runs" && e(RunsPanel, { db: activeDb, refreshKey: refreshKey, runs: runs, loading: runsData.loading, error: runsData.error, inspectRun: inspectedRun }),
+      activeTab === "Runs" && e(RunsPanel, { db: activeDb, refreshKey: refreshKey, runs: runs, loading: runsData.loading, error: runsData.error, inspectRun: inspectedRun, onRefresh: refresh }),
       activeTab === "Review Queue" && e("div", { className: "hwf-panel" },
         e("div", { className: "hwf-panel-header" }, e("h2", null, "Review Queue"), e("p", { className: "hwf-muted" }, "One queue for human work: answer typed input requests or approve/reject policy gates.")),
         reviewRequests.length ? reviewRequests.map(function (request) { return request.request_type === "approval_policy" || request.allowed ? e(ApprovalCard, { key: "approval:" + request.workflow_id + request.key, db: activeDb, approval: request, onView: setSelectedApproval, onRefresh: refresh }) : e(HumanInputCard, { key: "input:" + request.workflow_id + request.key, db: activeDb, step: request, onRefresh: refresh }); }) : e(Card, null, e(CardContent, { className: "hwf-empty" }, "No active review requests."))),

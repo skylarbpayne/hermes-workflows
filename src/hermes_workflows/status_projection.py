@@ -1093,6 +1093,16 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
         ),
         None,
     )
+    edited_output_field = next(
+        (
+            field
+            for field in fields
+            if isinstance(field, dict)
+            and field.get("name") in {"edited_output", "edited_markdown", "edited_text", "replacement"}
+            and field.get("kind") in {"text", "object"}
+        ),
+        None,
+    )
     action_options = action_field.get("options") or [] if isinstance(action_field, dict) else []
     if action_field:
         actions = [_review_action_descriptor(option, has_feedback=feedback_field is not None) for option in action_options]
@@ -1101,6 +1111,13 @@ def _review_input_surface(schema: str | dict[str, Any]) -> dict[str, Any]:
             surface["field"] = action_field.get("name")
         if feedback_field is not None:
             surface["feedback"] = {"kind": "text", "optional": True, "placeholder": "What should change?"}
+        if edited_output_field is not None:
+            surface["editable_output"] = {
+                "kind": "textarea",
+                "field": edited_output_field.get("name") or "edited_output",
+                "optional": True,
+                "placeholder": "Paste or edit the output to branch the next retry from this version.",
+            }
         return surface
     if descriptor["kind"] == "text":
         return {"kind": "textarea", "placeholder": "Enter feedback"}

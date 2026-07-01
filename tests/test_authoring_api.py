@@ -1200,6 +1200,50 @@ def test_dataclass_action_literal_automatically_drives_review_actions(tmp_path):
     assert result.result == {"action": "revise", "feedback": "needs a sharper opener"}
 
 
+@dataclass
+class EditableReviewDecision:
+    action: Literal["approve", "request_changes"]
+    feedback: str | None = None
+    edited_output: str | None = None
+
+
+def test_dataclass_action_literal_with_edited_output_exposes_branch_edit_surface(tmp_path):
+    @workflow
+    async def editable_review_workflow(inputs):
+        decision = await ask(
+            prompt="Review editable draft",
+            key="review_editable_draft",
+            input={"draft": inputs["draft"]},
+            returns=EditableReviewDecision,
+        )
+        return {"action": decision.action, "feedback": decision.feedback, "edited_output": decision.edited_output}
+
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(editable_review_workflow, {"draft": "hello"}, workflow_id="wf_editable_review")
+
+    assert first.status == "waiting"
+    request = engine.workflow_status("wf_editable_review")["review_requests"][0]
+    assert request["input_surface"]["kind"] == "review_decision"
+    assert request["input_surface"]["editable_output"] == {
+        "kind": "textarea",
+        "field": "edited_output",
+        "optional": True,
+        "placeholder": "Paste or edit the output to branch the next retry from this version.",
+    }
+
+    engine.submit_operator_response(
+        workflow_id="wf_editable_review",
+        key="review_editable_draft",
+        payload={"action": "request_changes", "feedback": "use this", "edited_output": "edited draft"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-editable"},
+    )
+    result = engine.drain("wf_editable_review")
+
+    assert result.status == "completed"
+    assert result.result == {"action": "request_changes", "feedback": "use this", "edited_output": "edited draft"}
+
+
 def test_dataclass_schema_includes_annotated_and_metadata_descriptions(tmp_path):
     @workflow
     async def described_publish_choice_workflow(inputs):

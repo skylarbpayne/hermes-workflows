@@ -67,6 +67,7 @@ async def dashboard_ask_workflow(inputs):
 class DashboardReviewDecision:
     action: Literal["approve", "request_changes"]
     feedback: str | None = None
+    edited_output: str | None = None
 
 
 @workflow
@@ -1025,6 +1026,42 @@ def test_dashboard_review_response_with_feedback_is_not_silent_approval(tmp_path
     assert "by" not in signal["payload"]["payload"]
 
 
+def test_dashboard_review_response_can_include_edited_output_for_branch_retry(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_review_decision_workflow,
+        {},
+        workflow_id="wf_dashboard_ask_edit_output",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_review_decision_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    review_requests = run(api.active_review_requests(db="runtime-smoke", status="waiting"))["review_requests"]
+    card = next(item for item in review_requests if item["key"] == "review_dashboard_decision")
+    assert card["input_surface"]["editable_output"] == {
+        "kind": "textarea",
+        "field": "edited_output",
+        "optional": True,
+        "placeholder": "Paste or edit the output to branch the next retry from this version.",
+    }
+
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_ask_edit_output",
+                "key": "review_dashboard_decision",
+                "payload": {"action": "approve", "edited_output": "human edited draft"},
+            }
+        )
+    )
+
+    assert receipt["success"] is True
+    signal = [event for event in WorkflowEngine(db).events("wf_dashboard_ask_edit_output") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["payload"] == {"action": "request_changes", "edited_output": "human edited draft"}
+
+
 def test_dashboard_select_response_does_not_require_dashboard_actor_identity(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db).run_until_idle(
@@ -1060,6 +1097,27 @@ def test_dashboard_select_response_does_not_require_dashboard_actor_identity(tmp
     completed = WorkflowEngine(db).drain("wf_dashboard_select_response")
     assert completed.status == "completed"
     assert completed.result["selected"] == {"title": "Commitments", "summary": "Workflows preserve obligations."}
+
+
+def test_dashboard_can_cancel_waiting_run(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_select_workflow,
+        {},
+        workflow_id="wf_dashboard_cancel",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_select_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    cancelled = run(api.cancel_run("wf_dashboard_cancel", {"db": "runtime-smoke", "reason": "wrong branch"}))
+
+    assert cancelled["success"] is True
+    assert cancelled["result"]["status"] == "cancelled"
+    status = WorkflowEngine(db, read_only=True).workflow_status("wf_dashboard_cancel", command_history="all")
+    assert status["status"] == "cancelled"
+    assert status["terminal_reason"]["reason"] == "wrong branch"
+    assert all(command["status"] == "cancelled" for command in status["command_history"] if command["status"] in {"pending", "running", "cancelled"})
 
 
 def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_approval_detail(tmp_path, monkeypatch):
@@ -2318,7 +2376,7 @@ def test_dashboard_frontend_unifies_human_work_into_review_queue_and_guides_inpu
     assert 'input_surface' in index_js
     assert 'surface.kind === "review_decision"' in index_js
     assert 'normalizeAction' in index_js
-    assert 'feedbackText && String(action || "").toLowerCase().replace(/-/g, "_") === "approve"' in index_js
+    assert '(feedbackText || editedOutputText) && String(action || "").toLowerCase().replace(/-/g, "_") === "approve"' in index_js
     assert 'submitReviewDecision(action.value, actions)' in index_js
     assert 'formatActionLabel(action)' in index_js
     assert 'Request edits' not in index_js
@@ -2358,6 +2416,19 @@ def test_dashboard_frontend_surfaces_step_id_prominently():
     assert 'e(StepIdBadge, { value: artifact })' in index_js
     assert ".hwf-step-id-callout" in style_css
     assert "font-weight: 900" in style_css
+
+def test_dashboard_frontend_supports_edit_output_and_cancel_run_controls():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "editable_output" in index_js
+    assert "Edit output / branch retry" in index_js
+    assert "editedOutputText" in index_js
+    assert "hwf-edit-output-textarea" in index_js
+    assert 'API + "/runs/" + encodeURIComponent(selected.workflow_id) + "/cancel"' in index_js
+    assert "Cancel run" in index_js
+    assert ".hwf-edit-output-textarea" in style_css
+
 
 def test_dashboard_frontend_hides_successful_initial_loading_state():
     index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()

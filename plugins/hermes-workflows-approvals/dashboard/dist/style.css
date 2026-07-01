@@ -423,6 +423,24 @@
   min-width: 14rem;
 }
 
+.hwf-edit-output-box {
+  width: 100%;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.hwf-edit-output-textarea {
+  width: 100%;
+  min-height: 13rem;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.62);
+  color: #e5edf7;
+  padding: 0.75rem 0.85rem;
+  font: 0.88rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .hwf-step-id-callout {
   display: inline-flex;
   align-items: center;
