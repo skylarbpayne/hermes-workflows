@@ -461,7 +461,36 @@
 
 .hwf-markdown-preview h2,
 .hwf-markdown-preview h3,
-.hwf-markdown-preview h4,
+.hwf-markdown-preview h4 {
+  margin: 1.15rem 0 0.45rem;
+  line-height: 1.18;
+  font-weight: 850;
+  letter-spacing: -0.035em;
+  color: var(--color-foreground);
+}
+
+.hwf-markdown-preview h2:first-child,
+.hwf-markdown-preview h3:first-child,
+.hwf-markdown-preview h4:first-child {
+  margin-top: 0;
+}
+
+.hwf-markdown-preview h2 {
+  font-size: 1.55em;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--hwf-border), var(--color-foreground) 18%);
+}
+
+.hwf-markdown-preview h3 {
+  font-size: 1.34em;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--hwf-border), transparent 28%);
+}
+
+.hwf-markdown-preview h4 {
+  font-size: 1.15em;
+}
+
 .hwf-markdown-preview p {
   margin: 0.35rem 0;
 }

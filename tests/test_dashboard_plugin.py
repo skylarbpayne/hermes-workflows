@@ -318,6 +318,19 @@ def test_dashboard_frontend_exposes_workflow_code_and_run_dag_affordances():
     assert ".hwf-dag-node-selected" in style_css
 
 
+def test_dashboard_markdown_preview_makes_headings_visually_distinct():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert "function MarkdownArtifactPreview" in index_js
+    assert 'e("h3", { key: i }, line.replace(/^##\\s+/, ""))' in index_js
+    h3_rule = style_css.split(".hwf-markdown-preview h3 {", 1)[1].split("}\n\n.hwf-markdown-preview h4", 1)[0]
+    assert "font-size: 1.34em" in h3_rule
+    assert "font-weight: 850" in style_css
+    assert "border-bottom" in h3_rule
+    assert "margin: 1.15rem 0 0.45rem" in style_css
+
+
 def test_dashboard_code_highlighting_uses_subtle_token_colors_instead_of_loud_highlights():
     style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
     keyword_rule = style_css[style_css.index(".hwf-code-keyword {") : style_css.index(".hwf-code-string {")]
