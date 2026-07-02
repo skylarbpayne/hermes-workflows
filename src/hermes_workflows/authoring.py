@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 import ast
 from pathlib import Path
-from typing import Annotated, Any, Callable, Generic, Literal, TypeVar, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Generic, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
 from .approvals import ApprovalDecision
 from .engine import PendingStep
@@ -978,17 +978,34 @@ def _safe_dataclass_type_hints(dataclass_type: type[Any]) -> dict[str, Any]:
 
 def _field_schema_descriptor(field: Any, *, annotation: Any) -> dict[str, Any]:
     description = _field_description(field, annotation=annotation)
+    raw_annotation = annotation
     annotation = _strip_annotated(annotation)
     origin = get_origin(annotation)
     args = get_args(annotation)
     required = field.default is MISSING and field.default_factory is MISSING
-    descriptor: dict[str, Any] = {"name": field.name, "kind": "scalar", "required": required}
+    descriptor: dict[str, Any] = {
+        "name": field.name,
+        "kind": "scalar",
+        "required": required,
+        "type": _annotation_type_label(annotation),
+    }
     if description:
         descriptor["description"] = description
+        descriptor["help"] = description
+    if field.default is not MISSING:
+        descriptor["default"] = _jsonable(field.default)
+    elif field.default_factory is not MISSING:  # type: ignore[attr-defined]
+        descriptor["has_default"] = True
     literal_options = _literal_options(annotation)
     if origin is Literal or literal_options:
         descriptor["kind"] = "choice"
         descriptor["options"] = list(args) if args else literal_options
+        descriptor["type"] = _annotation_type_label(raw_annotation)
+        return descriptor
+    list_item = _list_item_annotation(annotation, origin=origin, args=args)
+    if list_item is not None:
+        descriptor["kind"] = "list"
+        descriptor["items"] = _simple_schema_descriptor(list_item)
         return descriptor
     if _is_text_annotation(annotation):
         descriptor["kind"] = "text"
@@ -999,6 +1016,60 @@ def _field_schema_descriptor(field: Any, *, annotation: Any) -> dict[str, Any]:
     else:
         descriptor["kind"] = "object"
     return descriptor
+
+
+def _annotation_type_label(annotation: Any) -> str:
+    annotation = _strip_annotated(annotation)
+    literal_options = _literal_options(annotation)
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal or literal_options:
+        options = list(args) if args else literal_options
+        return "Literal[" + ", ".join(repr(option) for option in options) + "]"
+    if isinstance(annotation, str):
+        return annotation.replace("typing.", "")
+    if annotation is Any:
+        return "Any"
+    if annotation is type(None):
+        return "None"
+    if origin is not None:
+        name = getattr(origin, "__name__", str(origin).replace("typing.", ""))
+        if origin is Union or name in {"Union", "UnionType"}:
+            return " | ".join(_annotation_type_label(arg) for arg in args)
+        if args:
+            return f"{name}[{', '.join(_annotation_type_label(arg) for arg in args)}]"
+        return name
+    return getattr(annotation, "__name__", str(annotation).replace("typing.", ""))
+
+
+def _list_item_annotation(annotation: Any, *, origin: Any, args: tuple[Any, ...]) -> Any | None:
+    if origin is list:
+        return args[0] if args else Any
+    if not isinstance(annotation, str):
+        return None
+    normalized = annotation.replace("typing.", "").replace(" ", "")
+    if normalized.startswith("list[") and normalized.endswith("]"):
+        return normalized[5:-1] or Any
+    if normalized.startswith("List[") and normalized.endswith("]"):
+        return normalized[5:-1] or Any
+    return None
+
+
+def _simple_schema_descriptor(annotation: Any) -> dict[str, Any]:
+    annotation = _strip_annotated(annotation)
+    literal_options = _literal_options(annotation)
+    if get_origin(annotation) is Literal or literal_options:
+        options = list(get_args(annotation)) if get_args(annotation) else literal_options
+        return {"kind": "choice", "options": options}
+    if _is_text_annotation(annotation):
+        return {"kind": "text"}
+    if annotation is bool or annotation == "bool":
+        return {"kind": "boolean"}
+    if annotation in (int, float) or annotation in ("int", "float"):
+        return {"kind": "number"}
+    if annotation is Any or annotation == "Any" or annotation == "typing.Any":
+        return {"kind": "object"}
+    return {"kind": "object"}
 
 
 def _strip_annotated(annotation: Any) -> Any:
@@ -1013,7 +1084,10 @@ def _strip_annotated(annotation: Any) -> Any:
 
 
 def _field_description(field: Any, *, annotation: Any) -> str | None:
-    metadata_description = field.metadata.get("description") if getattr(field, "metadata", None) else None
+    field_metadata = getattr(field, "metadata", None)
+    metadata_description = None
+    if field_metadata:
+        metadata_description = field_metadata.get("help") or field_metadata.get("description")
     if isinstance(metadata_description, str) and metadata_description.strip():
         return metadata_description.strip()
     if get_origin(annotation) is Annotated:

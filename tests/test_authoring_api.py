@@ -52,6 +52,13 @@ class DescribedPublishChoice:
 
 
 @dataclass
+class TripPreferenceResponse:
+    destination_area: Annotated[str, "Neighborhood or hotel area to search first"]
+    max_nightly_budget: int = field(default=350, metadata={"help": "Maximum nightly lodging budget in USD"})
+    needs_parking: bool = False
+
+
+@dataclass
 class AngleChoice:
     angle_id: str
     rationale: str
@@ -367,6 +374,22 @@ async def ask_angle_workflow(inputs):
     )
     assert isinstance(choice, AngleChoice)
     return {"angle_id": choice.angle_id, "rationale": choice.rationale}
+
+
+@workflow
+async def trip_preference_workflow(inputs):
+    response = await ask(
+        prompt="Which trip preferences should we use?",
+        key="trip_preferences",
+        input={"trip": inputs["trip"]},
+        returns=TripPreferenceResponse,
+    )
+    assert isinstance(response, TripPreferenceResponse)
+    return {
+        "destination_area": response.destination_area,
+        "max_nightly_budget": response.max_nightly_budget,
+        "needs_parking": response.needs_parking,
+    }
 
 
 @workflow
@@ -1033,6 +1056,109 @@ def _operator_response_invariant_counts(engine: WorkflowEngine, workflow_id: str
     }
 
 
+def _operator_signal_payload(engine: WorkflowEngine, workflow_id: str, key: str) -> dict[str, Any]:
+    with engine._connect() as con:
+        row = con.execute(
+            """
+            SELECT payload_json FROM workflow_events
+            WHERE workflow_id = ? AND type = 'SignalReceived' AND key = ?
+            ORDER BY seq DESC LIMIT 1
+            """,
+            (workflow_id, f"signal:operator.response:{key}"),
+        ).fetchone()
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    assert isinstance(payload, dict)
+    return payload["payload"]
+
+
+def test_trip_preference_ask_exposes_structured_schema_metadata(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    first = engine.run_until_idle(trip_preference_workflow, {"trip": "Tahoe birthday"}, workflow_id="wf_trip_schema")
+
+    assert first.status == "waiting"
+    review_request = engine.workflow_status("wf_trip_schema")["review_requests"][0]
+    assert review_request["input_surface"]["kind"] == "structured_form"
+    assert review_request["request_schema"]["name"] == "TripPreferenceResponse"
+    fields = {field["name"]: field for field in review_request["request_schema"]["fields"]}
+    assert fields["destination_area"] == {
+        "name": "destination_area",
+        "kind": "text",
+        "required": True,
+        "type": "str",
+        "description": "Neighborhood or hotel area to search first",
+        "help": "Neighborhood or hotel area to search first",
+    }
+    assert fields["max_nightly_budget"] == {
+        "name": "max_nightly_budget",
+        "kind": "number",
+        "required": False,
+        "type": "int",
+        "description": "Maximum nightly lodging budget in USD",
+        "help": "Maximum nightly lodging budget in USD",
+        "default": 350,
+    }
+    assert fields["needs_parking"] == {
+        "name": "needs_parking",
+        "kind": "boolean",
+        "required": False,
+        "type": "bool",
+        "default": False,
+    }
+
+
+def test_trip_preference_response_is_validated_and_coerced_before_recording(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(trip_preference_workflow, {"trip": "Tahoe birthday"}, workflow_id="wf_trip_response")
+
+    with pytest.raises(ValueError, match="destination_area is required"):
+        engine.submit_operator_response(
+            workflow_id="wf_trip_response",
+            key="trip_preferences",
+            payload={"max_nightly_budget": "425", "needs_parking": "true"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-trip-invalid"},
+            idempotency_key="trip-response-invalid",
+            resume=False,
+        )
+
+    receipt = engine.submit_operator_response(
+        workflow_id="wf_trip_response",
+        key="trip_preferences",
+        payload={"destination_area": "South Lake", "max_nightly_budget": "425", "needs_parking": "true"},
+        source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-trip-valid"},
+        idempotency_key="trip-response-valid",
+        resume=False,
+    )
+
+    assert receipt.status == "response_recorded"
+    assert _operator_signal_payload(engine, "wf_trip_response", "trip_preferences") == {
+        "destination_area": "South Lake",
+        "max_nightly_budget": 425,
+        "needs_parking": True,
+    }
+    result = engine.drain("wf_trip_response")
+    assert result.status == "completed"
+    assert result.result == {"destination_area": "South Lake", "max_nightly_budget": 425, "needs_parking": True}
+
+
+def test_operator_response_schema_errors_are_actionable(tmp_path):
+    db = tmp_path / "workflow.sqlite"
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(trip_preference_workflow, {"trip": "Tahoe birthday"}, workflow_id="wf_trip_bad_type")
+
+    with pytest.raises(ValueError, match="max_nightly_budget must be a number"):
+        engine.submit_operator_response(
+            workflow_id="wf_trip_bad_type",
+            key="trip_preferences",
+            payload={"destination_area": "South Lake", "max_nightly_budget": "cheap"},
+            source={"kind": "human", "id": "skylar", "channel": "test", "message_id": "m-trip-bad-type"},
+            idempotency_key="trip-response-bad-type",
+            resume=False,
+        )
+
+
 def test_operator_response_records_signal_and_continuation_atomically(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)
@@ -1200,6 +1326,7 @@ def test_parallel_ask_emits_all_human_prompts_before_waiting(tmp_path):
         "kind": "choice",
         "options": ["approve", "request_changes"],
         "required": True,
+        "type": "Literal['approve', 'request_changes']",
     }
     assert review_requests[0]["input_surface"]["actions"] == [
         {"value": "approve", "label": "Approve"},
@@ -1253,6 +1380,7 @@ def test_dataclass_action_literal_automatically_drives_review_actions(tmp_path):
         "kind": "choice",
         "options": ["ship", "revise"],
         "required": True,
+        "type": "Literal['ship', 'revise']",
     }
     assert request["input_surface"] == {
         "kind": "review_decision",
@@ -1345,20 +1473,27 @@ def test_dataclass_schema_includes_annotated_and_metadata_descriptions(tmp_path)
             "name": "action",
             "kind": "choice",
             "required": True,
+            "type": "Literal['ship', 'revise']",
             "description": "Publish decision to record",
+            "help": "Publish decision to record",
             "options": ["ship", "revise"],
         },
         {
             "name": "expected_attendees",
             "kind": "number",
             "required": True,
+            "type": "int",
             "description": "Expected attendee count used for venue planning",
+            "help": "Expected attendee count used for venue planning",
         },
         {
             "name": "feedback",
             "kind": "text",
             "required": False,
+            "type": "str | None",
             "description": "Optional reviewer feedback",
+            "help": "Optional reviewer feedback",
+            "default": None,
         },
     ]
 

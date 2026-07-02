@@ -496,7 +496,7 @@
   function HumanInputActions(props) {
     const step = props.step;
     const useState = hooks.useState;
-    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "", editedOutput: "", editLoaded: false });
+    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "", editedOutput: "", editLoaded: false, formValues: {} });
     const ui = state[0];
     const setUi = state[1];
     if (!step || step.status !== "waiting") return e("span", { className: "hwf-muted" }, step && step.status === "completed" ? "answered" : "no actions");
@@ -514,6 +514,96 @@
       if (label) return label;
       const value = action && typeof action === "object" ? action.value : String(action || "");
       return value.replace(/_/g, " ").replace(/^./, function (ch) { return ch.toUpperCase(); });
+    }
+    function schemaFields(surface) {
+      const schema = surface && surface.schema || step.request_schema || {};
+      return Array.isArray(schema.fields) ? schema.fields.filter(function (field) { return field && field.name; }) : [];
+    }
+    function fieldTypeLabel(field) {
+      if (!field) return "value";
+      if (field.kind === "choice") return "choice: " + (field.options || []).join(" / ");
+      if (field.kind === "list") {
+        const itemKind = field.items && field.items.kind ? field.items.kind : "value";
+        return "list of " + itemKind;
+      }
+      if (field.kind === "boolean") return "true / false";
+      return field.kind || "value";
+    }
+    function structuredValue(name) {
+      return Object.prototype.hasOwnProperty.call(ui.formValues || {}, name) ? ui.formValues[name] : "";
+    }
+    function setStructuredValue(name, value) {
+      const formValues = Object.assign({}, ui.formValues || {});
+      formValues[name] = value;
+      setUi(Object.assign({}, ui, { formValues: formValues, error: null }));
+    }
+    function parseListValue(value, field) {
+      const text = String(value || "").trim();
+      if (!text) return [];
+      let rawItems;
+      if (text[0] === "[") {
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed)) throw new Error(field.name + " must be a JSON array or newline-separated list");
+        rawItems = parsed;
+      } else {
+        rawItems = text.split(/\n|,/).map(function (item) { return item.trim(); }).filter(Boolean);
+      }
+      const itemKind = field.items && field.items.kind || "text";
+      return rawItems.map(function (item, index) {
+        if (itemKind === "number") {
+          const number = Number(item);
+          if (!Number.isFinite(number)) throw new Error(field.name + " item " + (index + 1) + " must be a number");
+          return number;
+        }
+        if (itemKind === "boolean") {
+          if (item === true || item === false) return item;
+          const lowered = String(item).toLowerCase();
+          if (lowered === "true") return true;
+          if (lowered === "false") return false;
+          throw new Error(field.name + " item " + (index + 1) + " must be true or false");
+        }
+        return String(item);
+      });
+    }
+    function valueForField(field) {
+      const value = structuredValue(field.name);
+      if (field.kind === "boolean") return Boolean(value);
+      if (field.kind === "number") {
+        if (String(value).trim() === "") return undefined;
+        const number = Number(value);
+        if (!Number.isFinite(number)) throw new Error(field.name + " must be a number");
+        return number;
+      }
+      if (field.kind === "list") return parseListValue(value, field);
+      if (field.kind === "choice") {
+        if (String(value).trim() === "") return undefined;
+        const options = field.options || [];
+        const matched = options.find(function (option) { return String(option) === String(value); });
+        return matched === undefined ? value : matched;
+      }
+      if (field.kind === "object") {
+        const text = String(value || "").trim();
+        if (!text) return undefined;
+        try { return JSON.parse(text); } catch (_err) { throw new Error(field.name + " must be valid JSON"); }
+      }
+      return value;
+    }
+    function buildStructuredPayload(surface) {
+      const fields = schemaFields(surface);
+      const payload = {};
+      for (let index = 0; index < fields.length; index += 1) {
+        const field = fields[index];
+        const hasValue = Object.prototype.hasOwnProperty.call(ui.formValues || {}, field.name);
+        const raw = structuredValue(field.name);
+        const empty = field.kind === "boolean" ? (!field.required && !hasValue) : String(raw || "").trim() === "";
+        if (field.required && empty) throw new Error(field.name + " is required");
+        if (!field.required && empty) continue;
+        const value = valueForField(field);
+        if (field.required && field.kind === "list" && Array.isArray(value) && value.length === 0) throw new Error(field.name + " needs at least one item");
+        if (field.kind === "choice" && field.options && field.options.length && !field.options.includes(value)) throw new Error(field.name + " must be one of: " + field.options.join(", "));
+        payload[field.name] = value;
+      }
+      return payload;
     }
     function submitPayload(payload) {
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) { setUi(Object.assign({}, ui, { error: "Payload must be a JSON object" })); return; }
@@ -534,6 +624,9 @@
       let payload;
       try { payload = JSON.parse(ui.payloadText || "{}"); } catch (err) { setUi(Object.assign({}, ui, { error: "Invalid JSON payload" })); return; }
       submitPayload(payload);
+    }
+    function submitStructuredForm(surface) {
+      try { submitPayload(buildStructuredPayload(surface)); } catch (err) { setUi(Object.assign({}, ui, { error: err.message || String(err) })); }
     }
     function selectionPayload(surface, option) {
       if (!option) return null;
@@ -633,6 +726,41 @@
               option.details && e("span", { className: "hwf-muted" }, option.details)));
         })),
         e(Button, { disabled: ui.busy || !ui.selectedOptionId, onClick: function () { submitSelection(surface); } }, "Submit selection"),
+        ui.done && e("span", { className: "hwf-ok" }, ui.done),
+        ui.error && e("span", { className: "hwf-bad" }, ui.error));
+    }
+    if (surface.kind === "structured_form") {
+      const fields = schemaFields(surface);
+      return e("div", { className: "hwf-approval-actions hwf-structured-form" },
+        e("div", { className: "hwf-section-title" }, "Structured response"),
+        step.request_schema && e("p", { className: "hwf-muted" }, "Expected response: " + (step.request_schema.name || step.schema) + " — fill the fields below."),
+        fields.map(function (field) {
+          const value = structuredValue(field.name);
+          const help = field.help || field.description;
+          const defaultText = Object.prototype.hasOwnProperty.call(field, "default") && field.default !== null && field.default !== undefined ? "Default: " + pretty(field.default) : null;
+          const common = { value: value, placeholder: field.kind === "list" ? "One item per line" : (field.kind === "object" ? "JSON object" : defaultText || ""), onInput: function (event) { setStructuredValue(field.name, event.target.type === "checkbox" ? event.target.checked : event.target.value); } };
+          return e("label", { key: field.name, className: "hwf-structured-field" },
+            e("span", { className: "hwf-structured-field-label" },
+              e("strong", null, field.name),
+              e("span", { className: "hwf-structured-field-type" }, field.type || fieldTypeLabel(field)),
+              e("span", { className: field.required ? "hwf-required" : "hwf-muted" }, field.required ? "Required" : "Optional")),
+            help && e("span", { className: "hwf-muted" }, help),
+            defaultText && e("span", { className: "hwf-muted" }, defaultText),
+            field.kind === "choice" ? e("select", Object.assign({}, common),
+              e("option", { value: "" }, "Choose…"),
+              (field.options || []).map(function (option) { return e("option", { key: option, value: option }, option); })) :
+            field.kind === "boolean" ? e("input", { type: "checkbox", checked: Boolean(value), onInput: common.onInput }) :
+            field.kind === "list" || field.kind === "object" ? e("textarea", Object.assign({ rows: field.kind === "list" ? 4 : 6 }, common)) :
+            e("input", Object.assign({ type: field.kind === "number" ? "number" : "text" }, common)));
+        }),
+        e(Button, { disabled: ui.busy || fields.length === 0, onClick: function () { submitStructuredForm(surface); } }, "Submit structured input"),
+        e("details", { className: "hwf-raw-json" },
+          e("summary", null, "Raw JSON fallback"),
+          e("textarea", { value: ui.payloadText, rows: 6, placeholder: "Advanced: JSON object matching the requested schema", onInput: function (event) { setUi(Object.assign({}, ui, { payloadText: event.target.value, error: null })); } }),
+          e("div", { className: "hwf-review-action-row" },
+            e(Button, { disabled: ui.busy, variant: "outline", onClick: submit }, "Submit raw JSON"),
+            e("span", { className: "hwf-muted" }, "For complex schemas or manual corrections.")),
+          e("pre", null, pretty(surface.schema || step.request_schema || {}))),
         ui.done && e("span", { className: "hwf-ok" }, ui.done),
         ui.error && e("span", { className: "hwf-bad" }, ui.error));
     }
