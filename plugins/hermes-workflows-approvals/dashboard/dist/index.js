@@ -645,6 +645,9 @@
       if (!option) { setUi(Object.assign({}, ui, { error: "Choose an option first" })); return; }
       submitPayload(selectionPayload(surface, option));
     }
+    function chooseSelection(option) {
+      setUi(Object.assign({}, ui, { selectedOptionId: String(option.id), error: null }));
+    }
     function editableOutputSeed() {
       const artifact = step.artifact || {};
       if (typeof artifact.markdown === "string") return artifact.markdown;
@@ -713,13 +716,13 @@
         e("div", { className: "hwf-section-title" }, "Choose one"),
         e("div", { className: "hwf-selection-options" }, options.map(function (option) {
           const selected = String(ui.selectedOptionId) === String(option.id);
-          return e("label", { key: option.id, className: "hwf-selection-option " + (selected ? "is-selected" : "") },
+          return e("label", { key: option.id, className: "hwf-selection-option " + (selected ? "is-selected" : ""), onClick: function () { chooseSelection(option); } },
             e("input", {
               type: "radio",
               name: "selection-" + step.key,
               value: option.id,
               checked: selected,
-              onInput: function () { setUi(Object.assign({}, ui, { selectedOptionId: String(option.id), error: null })); }
+              onInput: function () { chooseSelection(option); }
             }),
             e("span", { className: "hwf-selection-option-body" },
               e("strong", null, option.label || option.id),
