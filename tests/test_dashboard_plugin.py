@@ -70,6 +70,15 @@ class DashboardReviewDecision:
     edited_output: str | None = None
 
 
+@dataclass
+class DashboardTripPreferenceResponse:
+    transportation_preferences: list[str]
+    lodging_preferences: list[str]
+    food_preferences: list[str]
+    selected_activities: list[str]
+    rest_or_leisure_preferences: list[str]
+    budget_or_pace_notes: list[str]
+
 @workflow
 async def dashboard_review_decision_workflow(inputs):
     response = await ask(
@@ -80,6 +89,17 @@ async def dashboard_review_decision_workflow(inputs):
         returns=DashboardReviewDecision,
     )
     return {"response": {"action": response.action, "feedback": response.feedback}}
+
+
+@workflow
+async def dashboard_trip_preferences_workflow(inputs):
+    response = await ask(
+        "Pick real trip preferences",
+        key="trip_preferences",
+        input={"decision_packet": "research by transportation, lodging, food, activities, and rest"},
+        returns=DashboardTripPreferenceResponse,
+    )
+    return {"transportation_preferences": response.transportation_preferences}
 
 
 @workflow
@@ -1097,6 +1117,86 @@ def test_dashboard_select_response_does_not_require_dashboard_actor_identity(tmp
     completed = WorkflowEngine(db).drain("wf_dashboard_select_response")
     assert completed.status == "completed"
     assert completed.result["selected"] == {"title": "Commitments", "summary": "Workflows preserve obligations."}
+
+
+def test_dashboard_structured_form_shows_trip_preference_fields_and_rejects_invalid_payload(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_trip_preferences_workflow,
+        {},
+        workflow_id="wf_dashboard_trip_preferences",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_trip_preferences_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    review_requests = run(api.active_review_requests(db="runtime-smoke", status="waiting"))["review_requests"]
+    card = next(item for item in review_requests if item["key"] == "trip_preferences")
+    assert card["request_schema"]["name"] == "DashboardTripPreferenceResponse"
+    assert card["input_surface"]["kind"] == "structured_form"
+    assert [field["name"] for field in card["request_schema"]["fields"]] == [
+        "transportation_preferences",
+        "lodging_preferences",
+        "food_preferences",
+        "selected_activities",
+        "rest_or_leisure_preferences",
+        "budget_or_pace_notes",
+    ]
+    assert all(field["kind"] == "list" and field["items"] == {"kind": "text"} for field in card["request_schema"]["fields"])
+
+    with pytest.raises(Exception, match="transportation_preferences is required"):
+        run(
+            api.respond_review_request(
+                {
+                    "db": "runtime-smoke",
+                    "workflow_id": "wf_dashboard_trip_preferences",
+                    "key": "trip_preferences",
+                    "payload": {"transportation_preferences": []},
+                }
+            )
+        )
+
+    valid_payload = {
+        "transportation_preferences": ["drive"],
+        "lodging_preferences": ["hotel near venue"],
+        "food_preferences": ["tacos"],
+        "selected_activities": ["concert"],
+        "rest_or_leisure_preferences": ["slow morning"],
+        "budget_or_pace_notes": ["keep breathing room"],
+    }
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_trip_preferences",
+                "key": "trip_preferences",
+                "payload": valid_payload,
+            }
+        )
+    )
+    assert receipt["success"] is True
+    completed = WorkflowEngine(db).drain("wf_dashboard_trip_preferences")
+    assert completed.status == "completed"
+    assert completed.result == {"transportation_preferences": ["drive"]}
+
+
+def test_dashboard_frontend_renders_structured_forms_instead_of_raw_trip_json_box():
+    index_js = (PLUGIN_DASHBOARD / "dist" / "index.js").read_text()
+    style_css = (PLUGIN_DASHBOARD / "dist" / "style.css").read_text()
+
+    assert 'surface.kind === "structured_form"' in index_js
+    assert "Structured response" in index_js
+    assert "Submit structured input" in index_js
+    assert "fieldTypeLabel" in index_js
+    assert "hasOwnProperty.call(ui.formValues" in index_js
+    assert "options.find(function (option)" in index_js
+    assert "One item per line" in index_js
+    assert "Raw JSON fallback" in index_js
+    assert "Submit raw JSON" in index_js
+    assert "hwf-structured-field" in index_js
+    assert "hwf-structured-form" in style_css
+    assert "hwf-structured-field-type" in style_css
+
 
 
 def test_dashboard_can_cancel_waiting_run(tmp_path, monkeypatch):

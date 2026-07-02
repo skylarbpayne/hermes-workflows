@@ -500,6 +500,59 @@
   gap: 0.25rem;
 }
 
+.hwf-structured-form {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 56rem;
+}
+
+.hwf-structured-field {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  border: 1px solid var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: var(--hwf-surface);
+}
+
+.hwf-structured-field-label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.hwf-structured-field-type,
+.hwf-required {
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted-foreground);
+}
+
+.hwf-required {
+  color: var(--color-primary);
+}
+
+.hwf-structured-field input,
+.hwf-structured-field select,
+.hwf-structured-field textarea,
+.hwf-raw-json textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.62);
+  color: #e5edf7;
+  padding: 0.62rem 0.72rem;
+}
+
+.hwf-structured-field input[type="checkbox"] {
+  width: auto;
+  justify-self: start;
+}
+
 .hwf-approval-card pre,
 .hwf-approval-detail pre,
 .hwf-artifact-card pre,

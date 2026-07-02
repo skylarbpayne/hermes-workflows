@@ -274,6 +274,37 @@ class WorkflowEngine:
             return None
         return str(payload.get("kind")) if payload.get("kind") is not None else None
 
+    def _operator_request_payload(self, workflow_id: str, key: str, *, con: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+        def fetch(read_con: sqlite3.Connection) -> dict[str, Any] | None:
+            row = read_con.execute(
+                """
+                SELECT payload_json
+                FROM workflow_events
+                WHERE workflow_id = ? AND type = 'ApprovalRequested' AND key = ?
+                ORDER BY seq DESC LIMIT 1
+                """,
+                (workflow_id, f"approval:{key}"),
+            ).fetchone()
+            if row is None:
+                return None
+            request_payload = JsonCodec.loads(row["payload_json"])
+            return request_payload if isinstance(request_payload, dict) else None
+
+        if con is not None:
+            return fetch(con)
+        with self._connect() as read_con:
+            return fetch(read_con)
+
+    def _normalize_operator_response_payload(self, workflow_id: str, key: str, payload: Any, *, con: sqlite3.Connection | None = None) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        request_payload = self._operator_request_payload(workflow_id, key, con=con)
+        if not isinstance(request_payload, dict):
+            return payload
+        if request_payload.get("kind") not in {"human_input.request.v1", "operator.request.v1"}:
+            return payload
+        return _coerce_human_input_payload(key, payload, request_payload.get("schema_descriptor"))
+
     def signal(
         self,
         workflow_id: str,
@@ -292,6 +323,7 @@ class WorkflowEngine:
                 source = _normalize_operator_source(source)
             else:
                 source = _normalize_operator_source(source)
+                payload = self._normalize_operator_response_payload(workflow_id, key, payload)
         dedupe = idempotency_key or f"signal:{signal_type}:{key}:{JsonCodec.dumps(payload)}"
         if instance["status"] in TERMINAL_WORKFLOW_STATUSES and signal_type not in {"approval.decision", "operator.response"}:
             return self._result_from_instance(workflow_id)
@@ -605,6 +637,7 @@ class WorkflowEngine:
         """
 
         normalized_source = _normalize_operator_source(source)
+        payload = self._normalize_operator_response_payload(workflow_id, key, payload)
         if resume:
             result = self.signal(
                 workflow_id,
@@ -800,6 +833,8 @@ class WorkflowEngine:
         allowed = request_payload.get("allowed") or ["approve", "reject"]
         if not is_human_input and payload.get("action") not in allowed:
             raise ValueError(f"operator step {key} action is not allowed: {payload.get('action')}")
+        if is_human_input:
+            _validate_human_input_payload(key, payload, request_payload.get("schema_descriptor"))
 
         _validate_operator_source(key, payload, source)
 
@@ -3420,6 +3455,115 @@ def _validate_operator_source(
     if not source.get("channel") or not any(source.get(field) for field in ("message_url", "message_id", "event_id")):
         raise ValueError(f"operator step {key} requires external decision provenance")
     return source
+
+
+def _validate_human_input_payload(key: str, payload: Dict[str, Any], schema_descriptor: Any) -> None:
+    _coerce_human_input_payload(key, payload, schema_descriptor)
+
+
+def _coerce_human_input_payload(key: str, payload: Dict[str, Any], schema_descriptor: Any) -> Dict[str, Any]:
+    if not isinstance(schema_descriptor, dict):
+        return payload
+    fields = schema_descriptor.get("fields")
+    if not isinstance(fields, list) or not fields:
+        return payload
+
+    known_fields = {str(field.get("name")) for field in fields if isinstance(field, dict) and field.get("name")}
+    unknown_fields = sorted(str(name) for name in payload if str(name) not in known_fields)
+    if unknown_fields:
+        raise ValueError(f"operator step {key} response has unknown field(s): {', '.join(unknown_fields)}")
+
+    errors: list[str] = []
+    normalized: Dict[str, Any] = {}
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        name = field.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        required = bool(field.get("required"))
+        present = name in payload
+        value = payload.get(name)
+        if required and (not present or value is None or value == "" or value == []):
+            errors.append(f"{name} is required")
+            continue
+        if not present or value is None or value == "":
+            if "default" in field and field.get("default") is not None:
+                normalized[name] = field.get("default")
+            continue
+        try:
+            normalized[name] = _coerce_human_input_field(name, value, field)
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise ValueError(f"operator step {key} response does not match schema: {'; '.join(errors)}")
+    return normalized
+
+
+def _coerce_human_input_field(name: str, value: Any, field: Dict[str, Any]) -> Any:
+    kind = str(field.get("kind") or "object")
+    if kind == "choice":
+        options = list(field.get("options") or [])
+        if options and value not in options:
+            string_options = [str(option) for option in options]
+            if isinstance(value, str) and value in string_options:
+                value = options[string_options.index(value)]
+            else:
+                raise ValueError(f"{name} must be one of: {', '.join(str(option) for option in options)}")
+        return value
+    if kind == "text":
+        return value if isinstance(value, str) else str(value)
+    if kind == "number":
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be a number")
+        number_type = str(field.get("type") or "")
+        try:
+            if number_type in {"int", "builtins:int"}:
+                if isinstance(value, float) and not value.is_integer():
+                    raise ValueError
+                text = str(value).strip()
+                if "." in text and not float(text).is_integer():
+                    raise ValueError
+                return int(float(text))
+            return float(value) if number_type in {"float", "builtins:float"} else value if isinstance(value, (int, float)) else float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a number") from None
+    if kind == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "yes", "y", "1", "on"}:
+                return True
+            if normalized in {"false", "no", "n", "0", "off"}:
+                return False
+        raise ValueError(f"{name} must be true or false")
+    if kind == "list":
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                try:
+                    value = json.loads(text)
+                except Exception:
+                    raise ValueError(f"{name} must be a list") from None
+            else:
+                value = [item.strip() for item in text.replace("\r\n", "\n").split("\n") if item.strip()]
+        if not isinstance(value, list):
+            raise ValueError(f"{name} must be a list")
+        raw_item_schema = field.get("items")
+        item_schema = raw_item_schema if isinstance(raw_item_schema, dict) else {"kind": "object"}
+        return [_coerce_human_input_field(f"{name}[{index}]", item, item_schema) for index, item in enumerate(value)]
+    if kind == "object":
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                raise ValueError(f"{name} must be valid JSON") from None
+        if not isinstance(value, (dict, list)):
+            raise ValueError(f"{name} must be an object or list")
+    return value
 
 
 def _validate_approval_source(key: str, decision: Dict[str, Any], source: Any) -> Optional[Dict[str, Any]]:
