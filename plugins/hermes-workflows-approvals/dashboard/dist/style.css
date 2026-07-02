@@ -480,13 +480,22 @@
 
 .hwf-selection-option {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: 1.25rem minmax(0, 1fr);
   gap: 0.75rem;
   align-items: flex-start;
   padding: 0.75rem;
   border: 1px solid var(--hwf-border);
   border-radius: var(--radius-md, 0.5rem);
   background: var(--hwf-surface);
+  cursor: pointer;
+}
+
+.hwf-selection-option input[type="radio"] {
+  min-width: 0;
+  width: 1rem;
+  inline-size: 1rem;
+  margin-top: 0.15rem;
+  accent-color: var(--color-primary);
   cursor: pointer;
 }
 

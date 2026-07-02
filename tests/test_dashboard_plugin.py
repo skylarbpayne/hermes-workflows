@@ -1190,6 +1190,10 @@ def test_dashboard_frontend_renders_structured_forms_instead_of_raw_trip_json_bo
     assert "fieldTypeLabel" in index_js
     assert "hasOwnProperty.call(ui.formValues" in index_js
     assert "options.find(function (option)" in index_js
+    assert "chooseSelection(option)" in index_js
+    assert "onClick: function () { chooseSelection(option); }" in index_js
+    assert 'grid-template-columns: 1.25rem minmax(0, 1fr);' in style_css
+    assert '.hwf-selection-option input[type="radio"]' in style_css
     assert "One item per line" in index_js
     assert "Raw JSON fallback" in index_js
     assert "Submit raw JSON" in index_js
@@ -1218,6 +1222,9 @@ def test_dashboard_can_cancel_waiting_run(tmp_path, monkeypatch):
     assert status["status"] == "cancelled"
     assert status["terminal_reason"]["reason"] == "wrong branch"
     assert all(command["status"] == "cancelled" for command in status["command_history"] if command["status"] in {"pending", "running", "cancelled"})
+
+    review_queue = run(api.active_review_requests(db="runtime-smoke", status="waiting"))
+    assert not [item for item in review_queue["review_requests"] if item["workflow_id"] == "wf_dashboard_cancel"]
 
 
 def test_dashboard_plugin_api_supports_catalog_run_history_artifacts_and_active_approval_detail(tmp_path, monkeypatch):

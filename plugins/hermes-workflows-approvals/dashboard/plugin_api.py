@@ -591,7 +591,8 @@ def _include_review_card_for_status(card: dict[str, Any], requested_status: str 
 def _review_cards(engine: WorkflowEngine, *, db_alias: str, status: str | None, limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     runtime_cache: dict[str, dict[str, Any] | None] = {}
     approvals: list[dict[str, Any]] = []
-    for approval in engine.list_approvals(status=None):
+    source_status = "waiting" if status == "waiting" else None
+    for approval in engine.list_approvals(status=source_status):
         payload = approval_view_to_dict(approval)
         runtime_state = _runtime_state_for_run(engine, payload.get("workflow_id"), db_alias=db_alias, cache=runtime_cache)
         card = _approval_card(payload, db_alias=db_alias, runtime_state=runtime_state)
@@ -602,7 +603,7 @@ def _review_cards(engine: WorkflowEngine, *, db_alias: str, status: str | None, 
     human_inputs: list[dict[str, Any]] = []
     remaining = max(0, limit - len(approvals))
     if remaining:
-        for step in engine.list_operator_steps(status=None):
+        for step in engine.list_operator_steps(status=source_status):
             payload = _strip_internal_fields(step)
             runtime_state = _runtime_state_for_run(engine, payload.get("workflow_id"), db_alias=db_alias, cache=runtime_cache)
             card = _operator_step_card(payload, db_alias=db_alias, runtime_state=runtime_state)
