@@ -887,6 +887,12 @@ def _public_label(name: str) -> str:
     return " ".join(part for part in text.split()) or str(name)
 
 
+def _single_value_payload(value: Any) -> Any:
+    if isinstance(value, Mapping) and set(value.keys()) == {"value"}:
+        return value["value"]
+    return value
+
+
 def _coerce_return(value: Any, returns: Any) -> Any:
     if returns in (None, Any, dict):
         return value
@@ -900,8 +906,10 @@ def _coerce_return(value: Any, returns: Any) -> Any:
             raise TypeError(f"cannot coerce {type(value).__name__} to list")
         return [_coerce_return(item, item_type) for item in value]
     if returns is str:
+        value = _single_value_payload(value)
         return value if isinstance(value, str) else str(value)
     if returns is bool:
+        value = _single_value_payload(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized in {"true", "yes", "y", "1", "approve", "approved", "ship", "pass"}:
@@ -910,6 +918,7 @@ def _coerce_return(value: Any, returns: Any) -> Any:
                 return False
         return bool(value)
     if returns in (int, float):
+        value = _single_value_payload(value)
         return returns(value)
     if is_dataclass(returns) and isinstance(returns, type):
         if isinstance(value, returns):

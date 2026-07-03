@@ -509,6 +509,21 @@
   gap: 0.25rem;
 }
 
+.hwf-selection-custom {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px dashed var(--hwf-border);
+  border-radius: var(--radius-md, 0.5rem);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hwf-selection-custom input,
+.hwf-selection-custom textarea,
+.hwf-selection-custom select {
+  width: 100%;
+}
+
 .hwf-structured-form {
   display: grid;
   gap: 0.75rem;

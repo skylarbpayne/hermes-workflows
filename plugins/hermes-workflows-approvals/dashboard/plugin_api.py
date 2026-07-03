@@ -1613,7 +1613,37 @@ def _selection_input_surface(descriptor: dict[str, Any], artifact: Any, fallback
     }
     if field:
         surface["field"] = field
+    custom = _custom_selection_descriptor(descriptor, submit=submit)
+    if custom:
+        surface["custom"] = custom
     return surface
+
+
+def _custom_selection_descriptor(descriptor: dict[str, Any], *, submit: str) -> dict[str, Any] | None:
+    kind = descriptor.get("kind")
+    if kind in {"text", "scalar"}:
+        return {
+            "enabled": True,
+            "mode": "scalar",
+            "submit": "value",
+            "schema": descriptor,
+            "payload_marker": "__hwf_selection_mode",
+            "payload_marker_value": "custom",
+        }
+    if kind == "structured_object":
+        fields = descriptor.get("fields")
+        if isinstance(fields, list) and fields:
+            if any(isinstance(field, dict) and field.get("kind") == "choice" for field in fields):
+                return None
+            return {
+                "enabled": True,
+                "mode": "structured",
+                "submit": "object",
+                "schema": descriptor,
+                "payload_marker": "__hwf_selection_mode",
+                "payload_marker_value": "custom",
+            }
+    return None
 
 
 def _review_action_descriptor(action: Any, *, has_feedback: bool = False) -> dict[str, Any]:
@@ -2240,7 +2270,8 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
     raw_payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
     if not raw_payload:
         raise HTTPException(status_code=400, detail="review response payload is required")
-    payload = {key: value for key, value in raw_payload.items() if key not in {"by", "source"}}
+    custom_selection = raw_payload.get("__hwf_selection_mode") == "custom"
+    payload = {key: value for key, value in raw_payload.items() if key not in {"by", "source", "__hwf_selection_mode"}}
     raw_idempotency_key = str(body.get("idempotency_key") or body.get("event_id") or "").strip()
     message_id = raw_idempotency_key or f"dashboard:{uuid.uuid4()}"
     if not message_id.startswith("dashboard:"):
@@ -2250,14 +2281,17 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
         _ensure_workflow_project_on_path(db_path)
         engine = WorkflowEngine(db_path)
         normalized_payload = _normalize_review_payload_for_dashboard_request(engine, workflow_id, key, payload)
+        source = {
+            "channel": "hermes-dashboard",
+            "message_id": message_id,
+        }
+        if custom_selection:
+            source["selection_source"] = "human_custom"
         receipt = engine.submit_operator_response(
             workflow_id=workflow_id,
             key=key,
             payload=normalized_payload,
-            source={
-                "channel": "hermes-dashboard",
-                "message_id": message_id,
-            },
+            source=source,
             idempotency_key=message_id,
             resume=True,
         )

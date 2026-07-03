@@ -496,7 +496,7 @@
   function HumanInputActions(props) {
     const step = props.step;
     const useState = hooks.useState;
-    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "", editedOutput: "", editLoaded: false, formValues: {} });
+    const state = useState({ busy: false, error: null, done: null, payloadText: "{}", feedback: "", selectedOptionId: "", customValue: "", editedOutput: "", editLoaded: false, formValues: {} });
     const ui = state[0];
     const setUi = state[1];
     if (!step || step.status !== "waiting") return e("span", { className: "hwf-muted" }, step && step.status === "completed" ? "answered" : "no actions");
@@ -645,6 +645,32 @@
       if (!option) { setUi(Object.assign({}, ui, { error: "Choose an option first" })); return; }
       submitPayload(selectionPayload(surface, option));
     }
+    function customSelectionPayload(surface) {
+      const custom = surface.custom || {};
+      const schema = custom.schema || {};
+      if (custom.mode === "structured" || schema.kind === "structured_object") {
+        return Object.assign({ __hwf_selection_mode: "custom" }, buildStructuredPayload({ schema: schema }));
+      }
+      const text = String(ui.customValue || "").trim();
+      if (!text) throw new Error("Enter a custom value first");
+      let value = text;
+      if (schema.kind === "scalar") {
+        if (schema.type === "int" || schema.type === "float") {
+          value = Number(text);
+          if (!Number.isFinite(value)) throw new Error("Custom value must be a number");
+          if (schema.type === "int" && !Number.isInteger(value)) throw new Error("Custom value must be an integer");
+        } else if (schema.type === "bool") {
+          const lowered = text.toLowerCase();
+          if (["true", "yes", "y", "1"].includes(lowered)) value = true;
+          else if (["false", "no", "n", "0"].includes(lowered)) value = false;
+          else throw new Error("Custom value must be true or false");
+        }
+      }
+      return { __hwf_selection_mode: "custom", value: value };
+    }
+    function submitCustomSelection(surface) {
+      try { submitPayload(customSelectionPayload(surface)); } catch (err) { setUi(Object.assign({}, ui, { error: err.message || String(err) })); }
+    }
     function chooseSelection(option) {
       setUi(Object.assign({}, ui, { selectedOptionId: String(option.id), error: null }));
     }
@@ -712,6 +738,9 @@
     }
     if (surface.kind === "selection") {
       const options = surface.options || [];
+      const custom = surface.custom || null;
+      const customSchema = custom && custom.schema || {};
+      const customFields = custom && (custom.mode === "structured" || customSchema.kind === "structured_object") ? schemaFields({ schema: customSchema }) : [];
       return e("div", { className: "hwf-approval-actions hwf-selection-actions" },
         e("div", { className: "hwf-section-title" }, "Choose one"),
         e("div", { className: "hwf-selection-options" }, options.map(function (option) {
@@ -729,6 +758,26 @@
               option.details && e("span", { className: "hwf-muted" }, option.details)));
         })),
         e(Button, { disabled: ui.busy || !ui.selectedOptionId, onClick: function () { submitSelection(surface); } }, "Submit selection"),
+        custom && custom.enabled && e("div", { className: "hwf-selection-custom" },
+          e("div", { className: "hwf-section-title" }, "Other / custom"),
+          customFields.length ? customFields.map(function (field) {
+            const value = structuredValue(field.name);
+            const help = field.help || field.description;
+            const common = { value: value, placeholder: field.kind === "list" ? "One item per line" : (field.kind === "object" ? "JSON object" : ""), onInput: function (event) { setStructuredValue(field.name, event.target.type === "checkbox" ? event.target.checked : event.target.value); } };
+            return e("label", { key: field.name, className: "hwf-structured-field" },
+              e("span", { className: "hwf-structured-field-label" },
+                e("strong", null, field.name),
+                e("span", { className: "hwf-structured-field-type" }, field.type || fieldTypeLabel(field)),
+                e("span", { className: field.required ? "hwf-required" : "hwf-muted" }, field.required ? "Required" : "Optional")),
+              help && e("span", { className: "hwf-muted" }, help),
+              field.kind === "choice" ? e("select", Object.assign({}, common),
+                e("option", { value: "" }, "Choose…"),
+                (field.options || []).map(function (option) { return e("option", { key: option, value: option }, option); })) :
+              field.kind === "boolean" ? e("input", { type: "checkbox", checked: Boolean(value), onInput: common.onInput }) :
+              field.kind === "list" || field.kind === "object" ? e("textarea", Object.assign({ rows: field.kind === "list" ? 4 : 6 }, common)) :
+              e("input", Object.assign({ type: field.kind === "number" ? "number" : "text" }, common)));
+          }) : e(Input, { value: ui.customValue, placeholder: "Enter a custom value", onInput: function (event) { setUi(Object.assign({}, ui, { customValue: event.target.value, error: null })); } }),
+          e(Button, { disabled: ui.busy, variant: "outline", onClick: function () { submitCustomSelection(surface); } }, "Submit custom value")),
         ui.done && e("span", { className: "hwf-ok" }, ui.done),
         ui.error && e("span", { className: "hwf-bad" }, ui.error));
     }

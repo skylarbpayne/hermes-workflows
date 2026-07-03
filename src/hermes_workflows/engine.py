@@ -3401,7 +3401,7 @@ class ApprovalClient:
         return decisions
 
 
-_OPERATOR_SOURCE_ALLOWLIST = ("channel", "message_url", "message_id", "event_id")
+_OPERATOR_SOURCE_ALLOWLIST = ("channel", "message_url", "message_id", "event_id", "selection_source")
 
 
 def _normalize_approval_decision_payload(payload: Any) -> Any:

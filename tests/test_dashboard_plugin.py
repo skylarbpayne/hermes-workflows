@@ -79,6 +79,32 @@ class DashboardTripPreferenceResponse:
     rest_or_leisure_preferences: list[str]
     budget_or_pace_notes: list[str]
 
+@dataclass
+class DashboardSelectCustomObject:
+    title: str
+    summary: str
+
+@workflow
+async def dashboard_scalar_select_workflow(inputs):
+    selected = await select(
+        "select_dashboard_scalar",
+        ["Guidance", "Commitments"],
+        returns=str,
+    )
+    return {"selected": selected}
+
+@workflow
+async def dashboard_structured_select_workflow(inputs):
+    selected = await select(
+        "select_dashboard_structured",
+        [
+            DashboardSelectCustomObject("Guidance", "Skills guide behavior."),
+            DashboardSelectCustomObject("Commitments", "Workflows preserve obligations."),
+        ],
+        returns=DashboardSelectCustomObject,
+    )
+    return {"selected": {"title": selected.title, "summary": selected.summary}}
+
 @workflow
 async def dashboard_review_decision_workflow(inputs):
     response = await ask(
@@ -1119,6 +1145,123 @@ def test_dashboard_select_response_does_not_require_dashboard_actor_identity(tmp
     assert completed.result["selected"] == {"title": "Commitments", "summary": "Workflows preserve obligations."}
 
 
+def test_dashboard_select_surface_exposes_custom_scalar_and_structured_inputs(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_scalar_select_workflow,
+        {},
+        workflow_id="wf_dashboard_select_scalar_surface",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_scalar_select_workflow",
+    )
+    WorkflowEngine(db).run_until_idle(
+        dashboard_structured_select_workflow,
+        {},
+        workflow_id="wf_dashboard_select_structured_surface",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_structured_select_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    review_requests = run(api.active_review_requests(db="runtime-smoke", status="waiting"))["review_requests"]
+    scalar_card = next(card for card in review_requests if card["key"] == "select_dashboard_scalar")
+    assert scalar_card["input_surface"]["kind"] == "selection"
+    assert scalar_card["input_surface"]["submit"] == "value"
+    assert [option["label"] for option in scalar_card["input_surface"]["options"]] == ["Guidance", "Commitments"]
+    assert scalar_card["input_surface"]["custom"] == {
+        "enabled": True,
+        "mode": "scalar",
+        "submit": "value",
+        "schema": {"id": "builtins:str", "name": "str", "kind": "text"},
+        "payload_marker": "__hwf_selection_mode",
+        "payload_marker_value": "custom",
+    }
+
+    structured_card = next(card for card in review_requests if card["key"] == "select_dashboard_structured")
+    assert structured_card["input_surface"]["kind"] == "selection"
+    assert [option["label"] for option in structured_card["input_surface"]["options"]] == ["Guidance", "Commitments"]
+    assert structured_card["input_surface"]["custom"]["enabled"] is True
+    assert structured_card["input_surface"]["custom"]["mode"] == "structured"
+    assert structured_card["input_surface"]["custom"]["submit"] == "object"
+    assert [field["name"] for field in structured_card["input_surface"]["custom"]["schema"]["fields"]] == ["title", "summary"]
+
+
+def test_dashboard_select_custom_scalar_response_is_validated_and_records_server_marker(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_scalar_select_workflow,
+        {},
+        workflow_id="wf_dashboard_select_scalar_custom",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_scalar_select_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_select_scalar_custom",
+                "key": "select_dashboard_scalar",
+                "payload": {"__hwf_selection_mode": "custom", "value": "Other custom answer", "source": {"selection_source": "spoofed"}},
+                "idempotency_key": "select-scalar-custom-1",
+            }
+        )
+    )
+
+    assert receipt["success"] is True
+    completed = WorkflowEngine(db).drain("wf_dashboard_select_scalar_custom")
+    assert completed.status == "completed"
+    assert completed.result["selected"] == "Other custom answer"
+    signal = [event for event in WorkflowEngine(db).events("wf_dashboard_select_scalar_custom") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["payload"] == {"value": "Other custom answer"}
+    assert signal["payload"]["source"]["selection_source"] == "human_custom"
+    assert signal["payload"]["source"]["channel"] == "hermes-dashboard"
+
+
+def test_dashboard_select_custom_structured_response_is_validated_and_records_server_marker(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_structured_select_workflow,
+        {},
+        workflow_id="wf_dashboard_select_structured_custom",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_structured_select_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    with pytest.raises(Exception, match="summary is required"):
+        run(
+            api.respond_review_request(
+                {
+                    "db": "runtime-smoke",
+                    "workflow_id": "wf_dashboard_select_structured_custom",
+                    "key": "select_dashboard_structured",
+                    "payload": {"__hwf_selection_mode": "custom", "title": "Human option"},
+                }
+            )
+        )
+
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_select_structured_custom",
+                "key": "select_dashboard_structured",
+                "payload": {"__hwf_selection_mode": "custom", "title": "Human option", "summary": "Typed in the dashboard."},
+                "idempotency_key": "select-structured-custom-1",
+            }
+        )
+    )
+
+    assert receipt["success"] is True
+    completed = WorkflowEngine(db).drain("wf_dashboard_select_structured_custom")
+    assert completed.status == "completed"
+    assert completed.result["selected"] == {"title": "Human option", "summary": "Typed in the dashboard."}
+    signal = [event for event in WorkflowEngine(db).events("wf_dashboard_select_structured_custom") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["payload"] == {"title": "Human option", "summary": "Typed in the dashboard."}
+    assert signal["payload"]["source"]["selection_source"] == "human_custom"
+
+
 def test_dashboard_structured_form_shows_trip_preference_fields_and_rejects_invalid_payload(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db).run_until_idle(
@@ -1192,6 +1335,11 @@ def test_dashboard_frontend_renders_structured_forms_instead_of_raw_trip_json_bo
     assert "options.find(function (option)" in index_js
     assert "chooseSelection(option)" in index_js
     assert "onClick: function () { chooseSelection(option); }" in index_js
+    assert "Other / custom" in index_js
+    assert "customSelectionPayload" in index_js
+    assert "__hwf_selection_mode" in index_js
+    assert "submitCustomSelection(surface)" in index_js
+    assert "hwf-selection-custom" in style_css
     assert 'grid-template-columns: 1.25rem minmax(0, 1fr);' in style_css
     assert '.hwf-selection-option input[type="radio"]' in style_css
     assert "One item per line" in index_js
