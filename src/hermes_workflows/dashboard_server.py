@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 from .approvals import ApprovalDecisionInput
 from .dashboard import render_dashboard
 from .engine import WorkflowEngine
+from .operator_services import OperatorServiceRegistry
 
 
 def _dashboard_server(handler: BaseHTTPRequestHandler) -> "DashboardServer":
@@ -32,6 +33,7 @@ class DashboardServer(ThreadingHTTPServer):
         workflow_ref: str,
         once: bool = False,
         approval_actions: bool = False,
+        operator_services: OperatorServiceRegistry | None = None,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.db_path = db_path
@@ -39,6 +41,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.workflow_ref = workflow_ref
         self.once = once
         self.approval_actions = approval_actions
+        self.operator_services = operator_services
 
     @property
     def url(self) -> str:
@@ -190,6 +193,7 @@ def serve_dashboard(
     port: int = 8765,
     once: bool = False,
     approval_actions: bool = False,
+    operator_services: OperatorServiceRegistry | None = None,
 ) -> str:
     server = DashboardServer(
         (host, port),
@@ -199,6 +203,7 @@ def serve_dashboard(
         workflow_ref=workflow_ref,
         once=once,
         approval_actions=approval_actions,
+        operator_services=operator_services,
     )
     print(json.dumps({"url": server.url, "db": str(db_path), "workflow_ref": workflow_ref}), flush=True)
     server.serve_forever()
