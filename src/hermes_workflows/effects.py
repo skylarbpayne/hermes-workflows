@@ -484,6 +484,8 @@ class EffectCoordinator:
         *,
         sensitive_receipt: bool = False,
     ) -> EffectRecord:
+        if claim.operation_id != record.identity.operation_id:
+            raise ValueError("effect claim operation_id mismatch")
         if record.identity.adapter_id != adapter.adapter_id:
             raise ValueError("effect adapter identity mismatch")
         if _sha256(canonical_json(input_value)) != record.identity.input_hash:
