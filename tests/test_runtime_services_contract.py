@@ -204,3 +204,48 @@ def test_marked_registry_rejected_by_framework_serializers_and_persistence(tmp_p
     assert marker not in db_path.read_bytes().decode("utf-8", errors="ignore")
     with pytest.raises(KeyError, match="unknown workflow_id"):
         engine.events("wf_marked_runtime_service_registry")
+
+
+@pytest.mark.parametrize(
+    ("key_factory", "workflow_id"),
+    [
+        pytest.param(lambda registry: registry, "wf_registry_direct_mapping_key", id="direct-key"),
+        pytest.param(lambda registry: ("nested", registry), "wf_registry_nested_mapping_key", id="nested-key"),
+    ],
+)
+def test_marked_registry_rejected_as_mapping_key_by_serializers_and_persistence(
+    tmp_path,
+    key_factory,
+    workflow_id,
+):
+    db_path = tmp_path / "workflow.sqlite"
+    secret = "mapping-key-registry-secret-must-not-persist"
+    registry = IntegrationOwnedRuntimeServices(marker=secret)
+    payload = {key_factory(registry): "safe value"}
+
+    for serialize in (
+        to_json_value,
+        JsonCodec.dumps,
+        StatusProjectionJsonCodec.dumps,
+        lambda value: JsonArtifact("runtime services", value),
+    ):
+        with pytest.raises(TypeError, match="process-local"):
+            serialize(payload)
+
+    engine = WorkflowEngine(db_path, runtime_services=registry)
+    with pytest.raises(TypeError, match="process-local"):
+        engine.start(
+            runtime_service_contract_workflow,
+            {"value": payload},
+            workflow_id=workflow_id,
+        )
+
+    assert secret not in db_path.read_bytes().decode("utf-8", errors="ignore")
+    with pytest.raises(KeyError, match="unknown workflow_id"):
+        engine.events(workflow_id)
+
+
+def test_safe_mapping_keys_preserve_string_conversion_compatibility():
+    payload = {7: "integer", ("safe", 1): "tuple"}
+
+    assert to_json_value(payload) == {"7": "integer", "('safe', 1)": "tuple"}
