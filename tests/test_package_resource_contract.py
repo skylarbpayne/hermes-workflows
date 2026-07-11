@@ -164,15 +164,21 @@ def test_package_version_must_match_installed_distribution():
         _manifest(package_version=" ")
 
 
-def test_package_version_is_coupled_to_declared_package_name():
+def test_manifest_constructor_rejects_alternate_installed_distribution():
     pytest_version = metadata.version("pytest")
 
-    with pytest.raises(ValueError, match="installed distribution version"):
-        _manifest(package_name="pytest", package_version=installed_package_version())
+    with pytest.raises(ValueError, match="package_name must equal hermes-workflows"):
+        _manifest(package_name="pytest", package_version=pytest_version)
 
-    manifest = _manifest(package_name="pytest", package_version=pytest_version)
-    assert manifest.package_name == "pytest"
-    assert manifest.package_version == pytest_version
+
+def test_manifest_decoder_rejects_alternate_installed_distribution():
+    payload = _manifest().to_dict()
+    payload["package_name"] = "pytest"
+    payload["package_version"] = metadata.version("pytest")
+    alternate_distribution_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    with pytest.raises(ValueError, match="package_name must equal hermes-workflows"):
+        manifest_from_json(alternate_distribution_json)
 
 
 @pytest.mark.parametrize(

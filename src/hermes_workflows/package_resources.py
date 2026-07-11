@@ -87,9 +87,11 @@ class PackageResourceManifestV1:
         ):
             if not isinstance(value, str) or _IDENTIFIER_PATTERN.fullmatch(value) is None:
                 raise ValueError(f"{field_name} is not a valid package resource identifier")
+        if self.package_name != _DISTRIBUTION_NAME:
+            raise ValueError("package_name must equal hermes-workflows")
         if not isinstance(self.package_version, str) or not self.package_version.strip():
             raise ValueError("package_version must be nonblank")
-        if self.package_version != installed_package_version(self.package_name):
+        if self.package_version != installed_package_version():
             raise ValueError("package_version must equal the installed distribution version")
 
         payload_root = _validate_relative_posix_path(self.payload_root, "payload_root")
@@ -118,8 +120,8 @@ class PackageResourceManifestV1:
         }
 
 
-def installed_package_version(package_name: str = _DISTRIBUTION_NAME) -> str:
-    version = metadata.version(package_name)
+def installed_package_version() -> str:
+    version = metadata.version(_DISTRIBUTION_NAME)
     if not version.strip():
         raise ValueError("installed distribution version must be nonblank")
     return version
