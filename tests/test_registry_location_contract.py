@@ -210,6 +210,33 @@ def test_resolution_fails_closed_on_symlink_escape(tmp_path):
         resolve_relative_db_path(resolved, RelativeDbPathV1(alias="main", path="linked-db/workflows.sqlite"))
 
 
+def test_registry_resolution_fails_closed_when_registry_dir_swaps_during_receipt_containment(tmp_path, monkeypatch):
+    config_root = tmp_path / "config"
+    registry_dir = config_root / "registry"
+    saved_registry_dir = config_root / "saved-registry"
+    outside = tmp_path / "outside"
+    registry_dir.mkdir(parents=True)
+    outside.mkdir()
+    original_require_contained = registry_location._require_contained
+    swapped = False
+
+    def swap_before_registry_path_check(parent, candidate, *, label):
+        nonlocal swapped
+        if label == "registry_path" and not swapped:
+            registry_dir.rename(saved_registry_dir)
+            registry_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        original_require_contained(parent, candidate, label=label)
+
+    monkeypatch.setattr(registry_location, "_require_contained", swap_before_registry_path_check)
+
+    with pytest.raises(ValueError, match="escape"):
+        resolve_registry_location(
+            config_root,
+            RegistryLocationV1(registry_file="registry/workflows.json", state_root="state"),
+        )
+
+
 def test_db_resolution_rechecks_state_root_containment_at_use_time(tmp_path):
     registry_dir = tmp_path / "registry"
     state_root = registry_dir / "state"

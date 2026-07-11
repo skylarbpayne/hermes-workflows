@@ -144,11 +144,17 @@ def resolve_registry_location(
     registry_path = _resolve_beneath(resolved_root, value.registry_file, label="registry_file")
     registry_dir = registry_path.parent.resolve(strict=False)
     state_root = _resolve_beneath(registry_dir, value.state_root, label="state_root")
-    return ResolvedRegistryLocationV1(
+    location = ResolvedRegistryLocationV1(
         registry_path=str(registry_path),
         registry_dir=str(registry_dir),
         state_root_path=str(state_root),
     )
+    _require_contained(
+        resolved_root,
+        Path(location.registry_path).resolve(strict=False),
+        label="registry_path",
+    )
+    return location
 
 
 def resolve_relative_db_path(
