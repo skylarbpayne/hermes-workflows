@@ -18,6 +18,7 @@ from urllib.parse import quote
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
 from .domain import CommandType, WorkflowStatus, decode_command_row, decode_event_row, make_command, make_event
 from .input_parsing import coerce_workflow_input
+from .runtime_services import EmptyRuntimeServicesV1, RuntimeOnlyServiceRegistry, RuntimeServiceRegistry
 from .status_projection import StatusProjection
 from .types import to_json_value
 from .workflow_values import Workflow
@@ -105,10 +106,17 @@ class WorkflowEngine:
         *,
         agent_runner: Optional[Callable[[Dict[str, Any]], Any]] = None,
         read_only: bool = False,
+        runtime_services: RuntimeServiceRegistry | None = None,
     ):
         self.db_path = Path(db_path)
         self.agent_runner = agent_runner
         self.read_only = read_only
+        registry = runtime_services if runtime_services is not None else EmptyRuntimeServicesV1()
+        if not isinstance(registry, RuntimeOnlyServiceRegistry):
+            raise TypeError("runtime_services must implement the runtime-only marker contract")
+        if not isinstance(registry, RuntimeServiceRegistry):
+            raise TypeError("runtime_services must implement RuntimeServiceRegistry")
+        self.runtime_services = registry
         self._status_projection = StatusProjection(self)
         self._active_command_claim = threading.local()
         if read_only:
@@ -117,6 +125,9 @@ class WorkflowEngine:
         else:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._init_db()
+
+    def resolve_runtime_service(self, service_id: str, contract_version: int) -> object | None:
+        return self.runtime_services.resolve(service_id, contract_version)
 
     def _ensure_writable(self, operation: str) -> None:
         if self.read_only:
