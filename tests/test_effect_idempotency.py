@@ -382,6 +382,52 @@ def test_coordinator_rejects_noncurrent_claim_before_adapter_call(tmp_path, clai
     assert rejected.receipt is None
 
 
+def test_coordinator_revalidates_claim_after_receipt_lookup_before_perform(tmp_path):
+    from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    coordinator = EffectCoordinator(store)
+    input_value = {"value": 1}
+    record = coordinator.prepare(
+        workflow_id="wf-lookup-claim-loss",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value=input_value,
+        policy=EffectPolicy.IDEMPOTENT,
+    )
+    claim = store.claim(record.identity.operation_id, token="original-token")
+
+    class ClaimReplacingAdapter:
+        adapter_id = "test.file.v1"
+
+        def __init__(self):
+            self.calls = []
+
+        def lookup_receipt(self, operation_id: str):
+            self.calls.append(("lookup", operation_id))
+            with sqlite3.connect(store.path) as conn:
+                conn.execute(
+                    "UPDATE effect_intents SET claim_token = ? WHERE operation_id = ?",
+                    ("replacement-token", operation_id),
+                )
+            return None
+
+        def perform(self, operation_id: str, input_value: Any):
+            self.calls.append(("perform", operation_id))
+            return {"operation_id": operation_id, "adapter_receipt_id": "unexpected"}
+
+    adapter = ClaimReplacingAdapter()
+
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        coordinator.execute_claimed(record, claim, adapter, input_value)
+
+    assert adapter.calls == [("lookup", record.identity.operation_id)]
+    rejected = store.get(record.identity.operation_id)
+    assert rejected.state == "claimed"
+    assert rejected.claim_token == "replacement-token"
+    assert rejected.receipt is None
+
+
 def test_concurrent_claim_race_has_one_winner(tmp_path):
     from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
 

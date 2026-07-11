@@ -518,7 +518,13 @@ class EffectCoordinator:
             raise ValueError("effect input conflicts with durable intent")
         operation_id = durable_record.identity.operation_id
         existing = adapter.lookup_receipt(operation_id)
-        payload = existing if existing is not None else adapter.perform(operation_id, input_value)
+        if existing is not None:
+            payload = existing
+        else:
+            current_record = self.store.require_active_claim(operation_id, claim.token)
+            if current_record.identity != durable_record.identity:
+                raise ValueError("effect record conflicts with durable intent")
+            payload = adapter.perform(operation_id, input_value)
         if not isinstance(payload, Mapping):
             raise TypeError("effect adapter receipt must be a mapping")
         if "operation_id" in payload and payload["operation_id"] != operation_id:
