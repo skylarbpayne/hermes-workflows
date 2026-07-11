@@ -141,6 +141,35 @@ def test_projection_section_validation_bounds_and_json_rules():
     assert len(json.dumps(dict(exact_limit.summary), sort_keys=True, separators=(",", ":")).encode("utf-8")) == 8192
 
 
+def test_projection_section_nested_summary_is_immutable_and_retains_validated_bound(tmp_path):
+    section = ProjectionSectionV1(
+        section_id="immutable.summary",
+        summary={"payload": {"value": "safe"}, "items": [1]},
+    )
+
+    payload = section.summary["payload"]
+    assert isinstance(payload, Mapping)
+    with pytest.raises(TypeError):
+        payload["value"] = "x" * 9000  # type: ignore[index]
+
+    items = section.summary["items"]
+    with pytest.raises((AttributeError, TypeError)):
+        items.append(2)  # type: ignore[union-attr]
+
+    assert len(encode_projection_section(section).encode("utf-8")) <= 8192
+
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite")
+    engine.start(lambda inputs: inputs, {}, workflow_id="wf_immutable_summary")
+    status = StatusProjection(
+        engine,
+        contributors=(RecordingContributor(section),),
+    ).workflow_status("wf_immutable_summary")
+    assert status["projection_sections"][0]["summary"] == {
+        "payload": {"value": "safe"},
+        "items": [1],
+    }
+
+
 def test_status_projection_is_unchanged_without_contributors_and_appends_validated_sections(tmp_path):
     db = tmp_path / "workflow.sqlite"
     engine = WorkflowEngine(db)

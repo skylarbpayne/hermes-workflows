@@ -52,14 +52,14 @@ class ProjectionSectionV1:
 
         object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(self, "section_id", section_id)
-        object.__setattr__(self, "summary", MappingProxyType(normalized_summary))
+        object.__setattr__(self, "summary", _freeze_json_object(normalized_summary))
         object.__setattr__(self, "detail_ref", detail_ref)
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
             "schema_version": self.schema_version,
             "section_id": self.section_id,
-            "summary": _normalize_json_object(self.summary),
+            "summary": _thaw_json_object(self.summary),
             "detail_ref": self.detail_ref,
         }
 
@@ -161,6 +161,30 @@ def _normalize_json_value(value: object) -> JsonValue:
     if isinstance(value, list):
         return [_normalize_json_value(item) for item in value]
     raise TypeError(f"value of type {type(value).__name__} is not a JSON value")
+
+
+def _freeze_json_object(value: Mapping[str, JsonValue]) -> Mapping[str, Any]:
+    return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+
+
+def _freeze_json_value(value: JsonValue) -> Any:
+    if isinstance(value, Mapping):
+        return _freeze_json_object(value)
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _thaw_json_object(value: Mapping[str, Any]) -> dict[str, JsonValue]:
+    return {key: _thaw_json_value(item) for key, item in value.items()}
+
+
+def _thaw_json_value(value: Any) -> JsonValue:
+    if isinstance(value, Mapping):
+        return _thaw_json_object(value)
+    if isinstance(value, tuple):
+        return [_thaw_json_value(item) for item in value]
+    return value
 
 
 def _canonical_json(value: object) -> str:
