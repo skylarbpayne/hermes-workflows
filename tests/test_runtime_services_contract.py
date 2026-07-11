@@ -211,6 +211,16 @@ def test_marked_registry_rejected_by_framework_serializers_and_persistence(tmp_p
     [
         pytest.param(lambda registry: registry, "wf_registry_direct_mapping_key", id="direct-key"),
         pytest.param(lambda registry: ("nested", registry), "wf_registry_nested_mapping_key", id="nested-key"),
+        pytest.param(
+            lambda registry: frozenset({registry}),
+            "wf_registry_direct_frozenset_mapping_key",
+            id="direct-frozenset-key",
+        ),
+        pytest.param(
+            lambda registry: ("nested", frozenset({registry})),
+            "wf_registry_nested_frozenset_mapping_key",
+            id="nested-frozenset-key",
+        ),
     ],
 )
 def test_marked_registry_rejected_as_mapping_key_by_serializers_and_persistence(

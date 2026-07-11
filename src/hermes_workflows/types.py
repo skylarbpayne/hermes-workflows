@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import fields, is_dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Union, cast
 
@@ -79,6 +79,9 @@ def _reject_runtime_service_registry(value: object) -> None:
             _reject_runtime_service_registry(key)
             _reject_runtime_service_registry(item)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _reject_runtime_service_registry(item)
+    elif isinstance(value, Set):
         for item in value:
             _reject_runtime_service_registry(item)
 
