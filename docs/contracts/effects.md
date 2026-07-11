@@ -1,6 +1,6 @@
 # Durable effects contract v1
 
-Hermes Workflows identifies a logical external operation independently of an execution attempt. The operation ID is the SHA-256 of canonical JSON containing the workflow instance ID, logical effect key, adapter ID, and canonical input hash. Attempt numbers, claim tokens, worker IDs, and clocks are deliberately excluded.
+Hermes Workflows identifies a logical external operation independently of an execution attempt. The operation ID is the SHA-256 of canonical JSON containing the workflow instance ID, logical effect key, adapter ID, and canonical input hash. Attempt numbers, claim tokens, worker IDs, and clocks are deliberately excluded. JSON object keys must be unique; mapping item streams with repeated keys are rejected rather than silently collapsed during normalization.
 
 ## Delivery semantics
 
@@ -17,7 +17,7 @@ No policy is inferred from a function name, tool name, or implementation.
 
 ## Durable records and fencing
 
-`effect_intents` stores canonical input, input hash, policy, state, attempt count, and the active claim token. State moves from `pending` to `claimed`, then to `completed` or `failed`. An expired claim may be replaced. Completion and failure use compare-and-swap on the active opaque claim token; a stale worker cannot write a receipt or terminal state.
+`effect_intents` stores canonical input, input hash, policy, state, attempt count, and the active claim token. Before insertion, the store recomputes the complete operation identity from workflow ID, effect key, adapter ID, and the canonicalized input and rejects any mismatch. State moves from `pending` to `claimed`, then to `completed` or `failed`. An expired claim may be replaced. Completion and failure use compare-and-swap on the active opaque claim token; a stale worker cannot write a receipt or terminal state.
 
 `effect_receipts` stores the adapter receipt, its SHA-256, sensitivity flag, completion time, and the claim token that fenced the write. Intent completion and receipt insertion are one SQLite transaction.
 

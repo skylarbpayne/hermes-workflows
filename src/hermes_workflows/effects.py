@@ -119,10 +119,21 @@ def operation_identity(
 ) -> OperationIdentity:
     """Build an attempt-independent identity from logical effect coordinates and input."""
     del attempt
+    input_json = canonical_json(input_value)
+    return _operation_identity_from_input_json(
+        workflow_id=workflow_id,
+        effect_key=effect_key,
+        adapter_id=adapter_id,
+        input_json=input_json,
+    )
+
+
+def _operation_identity_from_input_json(
+    *, workflow_id: str, effect_key: str, adapter_id: str, input_json: str
+) -> OperationIdentity:
     _validate_id(workflow_id, "workflow_id")
     _validate_id(effect_key, "effect_key")
     _validate_id(adapter_id, "adapter_id")
-    input_json = canonical_json(input_value)
     input_hash = _sha256(input_json)
     operation_document = canonical_json(
         {
@@ -181,8 +192,21 @@ class SQLiteEffectStore:
     ) -> EffectRecord:
         policy_value = _coerce_policy(policy)
         input_json = canonical_json(input_value)
-        if _sha256(input_json) != identity.input_hash:
+        expected_identity = _operation_identity_from_input_json(
+            workflow_id=identity.workflow_id,
+            effect_key=identity.effect_key,
+            adapter_id=identity.adapter_id,
+            input_json=input_json,
+        )
+        if identity.input_hash != expected_identity.input_hash:
             raise ValueError("input conflicts with operation identity")
+        if (
+            identity.operation_id != expected_identity.operation_id
+            or identity.workflow_id != expected_identity.workflow_id
+            or identity.effect_key != expected_identity.effect_key
+            or identity.adapter_id != expected_identity.adapter_id
+        ):
+            raise ValueError("operation identity mismatch")
         timestamp = _timestamp(now)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -538,6 +562,8 @@ def _normalize_json(value: Any) -> JsonValue:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("JSON object keys must be strings")
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
             result[key] = _normalize_json(item)
         return result
     raise TypeError(f"value is not canonical JSON: {type(value).__name__}")

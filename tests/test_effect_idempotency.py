@@ -3,9 +3,30 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from typing import Any
 
 import pytest
+
+
+class _RepeatedItemsMapping(Mapping[str, Any]):
+    """Adversarial Mapping whose item stream is not a JSON object."""
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "value":
+            return 2
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        yield "value"
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self) -> Any:
+        return (("value", 1), ("value", 2))
 
 
 def test_stable_operation_id_is_attempt_independent_and_input_sensitive():
@@ -58,6 +79,27 @@ def test_noncanonical_or_secret_bearing_inputs_are_rejected():
             adapter_id="test.file.v1",
             input_value={"bad": float("nan")},
         )
+
+
+def test_custom_mapping_with_repeated_items_cannot_collapse_into_json_object():
+    from hermes_workflows.effects import operation_identity
+
+    ordinary = operation_identity(
+        workflow_id="wf-123",
+        effect_key="publish-report",
+        adapter_id="test.file.v1",
+        input_value={"value": 2},
+    )
+
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        operation_identity(
+            workflow_id="wf-123",
+            effect_key="publish-report",
+            adapter_id="test.file.v1",
+            input_value=_RepeatedItemsMapping(),
+        )
+
+    assert ordinary.operation_id.startswith("op_")
 
 
 def test_sqlite_intent_claim_completion_and_stale_token_fencing(tmp_path):
@@ -199,6 +241,26 @@ def test_intent_identity_conflicts_fail_closed(tmp_path):
     store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1})
     with pytest.raises(ValueError, match="conflicts with durable intent"):
         store.ensure_intent(identity, EffectPolicy.PURE, {"value": 1})
+
+
+def test_intent_rejects_forged_hash_shaped_operation_id_before_persistence(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-forged",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    forged = replace(identity, operation_id="op_" + "0" * 64)
+
+    with pytest.raises(ValueError, match="operation identity mismatch"):
+        store.ensure_intent(forged, EffectPolicy.IDEMPOTENT, {"value": 1})
+
+    with sqlite3.connect(tmp_path / "effects.sqlite") as conn:
+        count = conn.execute("SELECT COUNT(*) FROM effect_intents").fetchone()[0]
+    assert count == 0
 
 
 def test_unclassified_and_legacy_effects_refuse_execution(tmp_path):
