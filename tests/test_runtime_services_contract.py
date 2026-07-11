@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 
 import pytest
 
@@ -36,6 +37,14 @@ class DuplicateItemsMapping(Mapping[str, object]):
     def items(self):  # type: ignore[override]
         recording = object()
         return (("test.recording", recording), ("test.recording", recording))
+
+
+@dataclass(frozen=True)
+class IntegrationOwnedRuntimeServices:
+    marker: str
+
+    def resolve(self, service_id: str, contract_version: int) -> object | None:
+        return None
 
 
 def test_runtime_services_resolve_recording_object_by_identity():
@@ -137,3 +146,35 @@ def test_engine_stores_one_registry_without_persisting_it(tmp_path):
 
     assert "test.recording" not in db_path.read_bytes().decode("utf-8", errors="ignore")
     assert all("test.recording" not in json.dumps(event) for event in engine.events("wf_runtime_service_injected"))
+
+
+def test_engine_rejects_arbitrary_protocol_registry_persistence(tmp_path):
+    db_path = tmp_path / "workflow.sqlite"
+    marker = "integration-registry-must-not-persist"
+    registry = IntegrationOwnedRuntimeServices(marker=marker)
+    engine = WorkflowEngine(db_path, runtime_services=registry)
+
+    assert engine.runtime_services is registry
+    assert engine.resolve_runtime_service("integration.any", 1) is None
+    with pytest.raises(TypeError):
+        json.dumps(registry)
+    for serialize in (
+        pickle.dumps,
+        to_json_value,
+        JsonCodec.dumps,
+        StatusProjectionJsonCodec.dumps,
+        lambda value: JsonArtifact("runtime services", value),
+    ):
+        with pytest.raises(TypeError, match="process-local"):
+            serialize(registry)
+
+    with pytest.raises(TypeError, match="process-local"):
+        engine.start(
+            runtime_service_contract_workflow,
+            {"value": {"registry": registry}},
+            workflow_id="wf_arbitrary_runtime_service_registry",
+        )
+
+    assert marker not in db_path.read_bytes().decode("utf-8", errors="ignore")
+    with pytest.raises(KeyError, match="unknown workflow_id"):
+        engine.events("wf_arbitrary_runtime_service_registry")

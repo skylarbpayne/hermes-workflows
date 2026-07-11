@@ -19,7 +19,7 @@ from urllib.parse import quote
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
 from .domain import CommandType, WorkflowStatus, decode_command_row, decode_event_row, make_command, make_event
 from .input_parsing import coerce_workflow_input
-from .runtime_services import EmptyRuntimeServicesV1, RuntimeServiceRegistry, RuntimeServicesV1
+from .runtime_services import EmptyRuntimeServicesV1, RuntimeServiceRegistry, _make_registry_process_local
 from .status_projection import StatusProjection
 from .types import to_json_value
 from .workflow_values import Workflow
@@ -112,7 +112,10 @@ class WorkflowEngine:
         self.db_path = Path(db_path)
         self.agent_runner = agent_runner
         self.read_only = read_only
-        self.runtime_services = runtime_services if runtime_services is not None else EmptyRuntimeServicesV1()
+        registry = runtime_services if runtime_services is not None else EmptyRuntimeServicesV1()
+        if not isinstance(registry, RuntimeServiceRegistry):
+            raise TypeError("runtime_services must implement RuntimeServiceRegistry")
+        self.runtime_services = _make_registry_process_local(registry)
         self._status_projection = StatusProjection(self)
         self._active_command_claim = threading.local()
         if read_only:
@@ -3650,7 +3653,7 @@ def _to_jsonable(value: Any) -> Any:
 
 
 def _reject_runtime_service_registries(value: Any, seen: set[int] | None = None) -> None:
-    if isinstance(value, (RuntimeServicesV1, EmptyRuntimeServicesV1)):
+    if isinstance(value, RuntimeServiceRegistry):
         raise TypeError("runtime service registries are process-local and cannot be serialized")
 
     seen = seen if seen is not None else set()
