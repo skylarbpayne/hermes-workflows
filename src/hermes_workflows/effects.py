@@ -387,6 +387,29 @@ class SQLiteEffectStore:
     def lookup_receipt(self, operation_id: str) -> EffectReceipt | None:
         return self.get(operation_id).receipt
 
+    def require_active_claim(
+        self,
+        operation_id: str,
+        claim_token: str,
+        *,
+        now: float | None = None,
+    ) -> EffectRecord:
+        """Return the durable intent only when the token currently owns its live claim."""
+        _validate_operation_id(operation_id)
+        timestamp = _timestamp(now)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM effect_intents
+                WHERE operation_id = ? AND state = 'claimed' AND claim_token = ?
+                  AND claim_expires_at > ?
+                """,
+                (operation_id, claim_token, timestamp),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("stale claim token cannot execute effect")
+        return _record_from_rows(row, None)
+
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.executescript(
@@ -486,22 +509,23 @@ class EffectCoordinator:
     ) -> EffectRecord:
         if claim.operation_id != record.identity.operation_id:
             raise ValueError("effect claim operation_id mismatch")
-        if record.identity.adapter_id != adapter.adapter_id:
+        durable_record = self.store.require_active_claim(claim.operation_id, claim.token)
+        if durable_record.identity != record.identity:
+            raise ValueError("effect record conflicts with durable intent")
+        if durable_record.identity.adapter_id != adapter.adapter_id:
             raise ValueError("effect adapter identity mismatch")
-        if _sha256(canonical_json(input_value)) != record.identity.input_hash:
+        if _sha256(canonical_json(input_value)) != durable_record.identity.input_hash:
             raise ValueError("effect input conflicts with durable intent")
-        existing = adapter.lookup_receipt(record.identity.operation_id)
-        payload = existing if existing is not None else adapter.perform(record.identity.operation_id, input_value)
+        operation_id = durable_record.identity.operation_id
+        existing = adapter.lookup_receipt(operation_id)
+        payload = existing if existing is not None else adapter.perform(operation_id, input_value)
         if not isinstance(payload, Mapping):
             raise TypeError("effect adapter receipt must be a mapping")
-        if (
-            "operation_id" in payload
-            and payload["operation_id"] != record.identity.operation_id
-        ):
+        if "operation_id" in payload and payload["operation_id"] != operation_id:
             raise ValueError("effect adapter receipt operation_id mismatch")
         adapter_receipt_id = payload.get("adapter_receipt_id")
         return self.store.complete(
-            record.identity.operation_id,
+            operation_id,
             claim.token,
             payload,
             adapter_receipt_id=str(adapter_receipt_id) if adapter_receipt_id is not None else None,

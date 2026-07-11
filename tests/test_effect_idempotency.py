@@ -332,6 +332,56 @@ def test_coordinator_rejects_claim_for_another_operation_before_adapter_call(tmp
     assert rejected.receipt is None
 
 
+@pytest.mark.parametrize("claim_state", ["forged", "stale", "expired"])
+def test_coordinator_rejects_noncurrent_claim_before_adapter_call(tmp_path, claim_state):
+    from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore
+
+    class RecordingAdapter:
+        adapter_id = "test.file.v1"
+
+        def __init__(self):
+            self.calls = []
+
+        def lookup_receipt(self, operation_id: str):
+            self.calls.append(("lookup", operation_id))
+            return None
+
+        def perform(self, operation_id: str, input_value: Any):
+            self.calls.append(("perform", operation_id))
+            return {"operation_id": operation_id, "adapter_receipt_id": "unexpected"}
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    coordinator = EffectCoordinator(store)
+    input_value = {"value": 1}
+    record = coordinator.prepare(
+        workflow_id=f"wf-{claim_state}-claim",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value=input_value,
+        policy=EffectPolicy.IDEMPOTENT,
+    )
+    claim_options = (
+        {"now": 10.0, "ttl_seconds": 1.0} if claim_state in {"stale", "expired"} else {}
+    )
+    claim = store.claim(record.identity.operation_id, token="original-token", **claim_options)
+    if claim_state == "forged":
+        rejected_claim = replace(claim, token="forged-token", expires_at=10_000.0)
+    elif claim_state == "stale":
+        store.claim(record.identity.operation_id, token="current-token", now=11.0)
+        rejected_claim = replace(claim, expires_at=10_000.0)
+    else:
+        rejected_claim = claim
+    adapter = RecordingAdapter()
+
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        coordinator.execute_claimed(record, rejected_claim, adapter, input_value)
+
+    assert adapter.calls == []
+    rejected = store.get(record.identity.operation_id)
+    assert rejected.state == "claimed"
+    assert rejected.receipt is None
+
+
 def test_concurrent_claim_race_has_one_winner(tmp_path):
     from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
 
