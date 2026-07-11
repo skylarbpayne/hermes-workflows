@@ -16,8 +16,14 @@ class RuntimeServiceRegistry(Protocol):
 
 @dataclass(frozen=True)
 class RuntimeServicesV1:
+    _serialization_guard: object = field(init=False, repr=False, compare=False)
     schema_version: int = 1
     services: Mapping[str, object] = field(default_factory=dict)
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "_serialization_guard":
+            raise TypeError("runtime service registries are process-local and cannot be serialized")
+        return super().__getattribute__(name)
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -43,6 +49,13 @@ class RuntimeServicesV1:
 
 @dataclass(frozen=True)
 class EmptyRuntimeServicesV1:
+    _serialization_guard: object = field(init=False, repr=False, compare=False)
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "_serialization_guard":
+            raise TypeError("runtime service registries are process-local and cannot be serialized")
+        return super().__getattribute__(name)
+
     def resolve(self, service_id: str, contract_version: int) -> object | None:
         _validate_resolution(service_id, contract_version)
         return None

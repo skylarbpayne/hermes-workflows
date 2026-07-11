@@ -7,8 +7,11 @@ from collections.abc import Iterator, Mapping
 import pytest
 
 from hermes_workflows import WorkflowEngine, workflow
+from hermes_workflows.artifacts import JsonArtifact
 from hermes_workflows.engine import JsonCodec
 from hermes_workflows.runtime_services import EmptyRuntimeServicesV1, RuntimeServicesV1
+from hermes_workflows.status_projection import JsonCodec as StatusProjectionJsonCodec
+from hermes_workflows.types import to_json_value
 
 
 @workflow
@@ -98,6 +101,23 @@ def test_runtime_services_are_process_local_and_nonserializable():
             JsonCodec.dumps(registry)
         with pytest.raises(TypeError, match="process-local"):
             JsonCodec.dumps({"nested": [registry]})
+
+
+@pytest.mark.parametrize(
+    "registry",
+    [
+        RuntimeServicesV1(services={"test.recording": "must not leak"}),
+        EmptyRuntimeServicesV1(),
+    ],
+)
+def test_runtime_services_reject_framework_persistence_helpers(registry):
+    for serialize in (
+        to_json_value,
+        StatusProjectionJsonCodec.dumps,
+        lambda value: JsonArtifact("runtime services", value),
+    ):
+        with pytest.raises(TypeError, match="process-local"):
+            serialize(registry)
 
 
 def test_engine_stores_one_registry_without_persisting_it(tmp_path):
