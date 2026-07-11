@@ -4,6 +4,7 @@ import subprocess
 import sys
 import zipfile
 from dataclasses import FrozenInstanceError
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,17 @@ def test_package_version_must_match_installed_distribution():
         _manifest(package_version="999.0.0")
     with pytest.raises(ValueError):
         _manifest(package_version=" ")
+
+
+def test_package_version_is_coupled_to_declared_package_name():
+    pytest_version = metadata.version("pytest")
+
+    with pytest.raises(ValueError, match="installed distribution version"):
+        _manifest(package_name="pytest", package_version=installed_package_version())
+
+    manifest = _manifest(package_name="pytest", package_version=pytest_version)
+    assert manifest.package_name == "pytest"
+    assert manifest.package_version == pytest_version
 
 
 @pytest.mark.parametrize(

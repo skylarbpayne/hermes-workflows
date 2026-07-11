@@ -89,7 +89,7 @@ class PackageResourceManifestV1:
                 raise ValueError(f"{field_name} is not a valid package resource identifier")
         if not isinstance(self.package_version, str) or not self.package_version.strip():
             raise ValueError("package_version must be nonblank")
-        if self.package_version != installed_package_version():
+        if self.package_version != installed_package_version(self.package_name):
             raise ValueError("package_version must equal the installed distribution version")
 
         payload_root = _validate_relative_posix_path(self.payload_root, "payload_root")
@@ -118,8 +118,8 @@ class PackageResourceManifestV1:
         }
 
 
-def installed_package_version() -> str:
-    version = metadata.version(_DISTRIBUTION_NAME)
+def installed_package_version(package_name: str = _DISTRIBUTION_NAME) -> str:
+    version = metadata.version(package_name)
     if not version.strip():
         raise ValueError("installed distribution version must be nonblank")
     return version
