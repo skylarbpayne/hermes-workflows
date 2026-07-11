@@ -104,7 +104,7 @@ def _mapping_key_contains_registry_or_cycle(value: object, *, active_ids: set[in
                 if _mapping_key_contains_registry_or_cycle(item, active_ids=active_ids):
                     cycle_found = True
         else:
-            for item in cast(Sequence[object] | Set[object], value):
+            for item in cast(Any, value):
                 if _mapping_key_contains_registry_or_cycle(item, active_ids=active_ids):
                     cycle_found = True
     finally:
