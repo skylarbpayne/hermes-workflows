@@ -70,6 +70,41 @@ def test_decoding_rejects_unknown_versions_and_fields(factory, payload):
 
 
 @pytest.mark.parametrize(
+    ("decoder", "payload", "field"),
+    [
+        (
+            decode_registry_location,
+            '{"schema_version":2,"schema_version":1,"registry_file":"registry.json","state_root":"state"}',
+            "schema_version",
+        ),
+        (
+            decode_registry_location,
+            '{"schema_version":1,"registry_file":"/invalid","registry_file":"registry.json","state_root":"state"}',
+            "registry_file",
+        ),
+        (
+            decode_registry_location,
+            '{"schema_version":1,"registry_file":"registry.json","state_root":"../invalid","state_root":"state"}',
+            "state_root",
+        ),
+        (
+            decode_relative_db_path,
+            '{"schema_version":1,"alias":"Main","alias":"main","path":"main.sqlite"}',
+            "alias",
+        ),
+        (
+            decode_relative_db_path,
+            '{"schema_version":1,"alias":"main","path":"../invalid","path":"main.sqlite"}',
+            "path",
+        ),
+    ],
+)
+def test_decoding_rejects_duplicate_object_keys(decoder, payload, field):
+    with pytest.raises(ValueError, match=rf"duplicate object key: {field}"):
+        decoder(payload)
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "",

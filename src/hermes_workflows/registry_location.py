@@ -254,10 +254,19 @@ def _require_exact_object(
 def _decode_json_object(value: str, *, label: str) -> Mapping[str, Any]:
     if not isinstance(value, str):
         raise TypeError(f"encoded {label} must be a string")
-    payload = json.loads(value)
+    payload = json.loads(value, object_pairs_hook=_reject_duplicate_object_keys)
     if not isinstance(payload, Mapping):
         raise TypeError(f"{label} must decode to an object")
     return payload
+
+
+def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate object key: {key}")
+        value[key] = item
+    return value
 
 
 def _canonical_json(value: Mapping[str, object]) -> str:
