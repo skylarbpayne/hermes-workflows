@@ -257,7 +257,6 @@ class SQLiteEffectStore:
         *,
         ttl_seconds: float = 30.0,
         now: float | None = None,
-        token: str | None = None,
     ) -> EffectClaim:
         _validate_operation_id(operation_id)
         if not isinstance(ttl_seconds, (int, float)) or isinstance(ttl_seconds, bool):
@@ -265,12 +264,23 @@ class SQLiteEffectStore:
         if not math.isfinite(float(ttl_seconds)) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be finite and greater than zero")
         timestamp = _timestamp(now)
-        claim_token = token or secrets.token_urlsafe(24)
-        if not isinstance(claim_token, str) or not claim_token:
-            raise ValueError("claim token must be a nonempty string")
         expires_at = timestamp + float(ttl_seconds)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT claim_token FROM effect_intents WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown operation_id: {operation_id}")
+            active_token = row[0]
+            claim_token = ""
+            for _ in range(8):
+                candidate = secrets.token_urlsafe(24)
+                if isinstance(candidate, str) and candidate and candidate != active_token:
+                    claim_token = candidate
+                    break
+            if not claim_token:
+                raise RuntimeError("could not generate fresh claim ownership token")
             cursor = conn.execute(
                 """
                 UPDATE effect_intents
@@ -288,10 +298,6 @@ class SQLiteEffectStore:
                 (claim_token, expires_at, timestamp, operation_id, timestamp),
             )
             if cursor.rowcount != 1:
-                if conn.execute(
-                    "SELECT 1 FROM effect_intents WHERE operation_id = ?", (operation_id,)
-                ).fetchone() is None:
-                    raise KeyError(f"unknown operation_id: {operation_id}")
                 raise RuntimeError("effect intent is not claimable")
             attempt = int(
                 conn.execute(

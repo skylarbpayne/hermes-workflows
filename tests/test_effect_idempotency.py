@@ -130,19 +130,19 @@ def test_sqlite_intent_claim_completion_and_stale_token_fencing(tmp_path):
     intent = store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"message": "hello"})
     assert intent.state == "pending"
 
-    claim_a = store.claim(identity.operation_id, now=10.0, ttl_seconds=1.0, token="token-a")
+    claim_a = store.claim(identity.operation_id, now=10.0, ttl_seconds=1.0)
     assert claim_a.attempt == 1
     with pytest.raises(RuntimeError, match="not claimable"):
-        store.claim(identity.operation_id, now=10.5, ttl_seconds=1.0, token="token-b")
+        store.claim(identity.operation_id, now=10.5, ttl_seconds=1.0)
 
-    claim_b = store.claim(identity.operation_id, now=11.1, ttl_seconds=5.0, token="token-b")
+    claim_b = store.claim(identity.operation_id, now=11.1, ttl_seconds=5.0)
     assert claim_b.attempt == 2
     with pytest.raises(RuntimeError, match="stale claim token"):
-        store.complete(identity.operation_id, "token-a", {"provider_id": "wrong"}, now=12.0)
+        store.complete(identity.operation_id, claim_a.token, {"provider_id": "wrong"}, now=12.0)
 
     completed = store.complete(
         identity.operation_id,
-        "token-b",
+        claim_b.token,
         {"provider_id": "receipt-1", "access_token": "must-not-project"},
         sensitive=True,
         now=12.0,
@@ -162,9 +162,9 @@ def test_sqlite_intent_claim_completion_and_stale_token_fencing(tmp_path):
             "SELECT claim_token, receipt_hash FROM effect_receipts WHERE operation_id = ?",
             (identity.operation_id,),
         ).fetchone()
-    assert row == ("completed", 2, "token-b")
+    assert row == ("completed", 2, claim_b.token)
     assert receipt_row is not None
-    assert receipt_row[0] == "token-b"
+    assert receipt_row[0] == claim_b.token
     assert len(receipt_row[1]) == 64
 
 
@@ -179,7 +179,7 @@ def test_failure_is_fenced_and_terminal(tmp_path):
         input_value={"value": 1},
     )
     store.ensure_intent(identity, EffectPolicy.PURE, {"value": 1})
-    claim = store.claim(identity.operation_id, token="winner")
+    claim = store.claim(identity.operation_id)
     with pytest.raises(RuntimeError, match="stale claim token"):
         store.fail(identity.operation_id, "loser", {"kind": "wrong-owner"})
     failed = store.fail(identity.operation_id, claim.token, {"kind": "adapter-error"})
@@ -200,7 +200,7 @@ def test_completion_rejects_repeated_mapping_items_without_terminal_state(tmp_pa
         input_value={"value": 1},
     )
     store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1})
-    claim = store.claim(identity.operation_id, token="receipt-owner")
+    claim = store.claim(identity.operation_id)
 
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         store.complete(identity.operation_id, claim.token, _RepeatedItemsMapping())
@@ -227,7 +227,7 @@ def test_failure_rejects_repeated_mapping_items_without_terminal_state(tmp_path)
         input_value={"value": 1},
     )
     store.ensure_intent(identity, EffectPolicy.PURE, {"value": 1})
-    claim = store.claim(identity.operation_id, token="error-owner")
+    claim = store.claim(identity.operation_id)
 
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         store.fail(identity.operation_id, claim.token, _RepeatedItemsMapping())
@@ -254,16 +254,47 @@ def test_expired_claim_cannot_complete_without_reclaim(tmp_path):
         input_value={"value": 1},
     )
     store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1}, now=10.0)
-    claim = store.claim(identity.operation_id, token="expired", now=10.0, ttl_seconds=1.0)
+    claim = store.claim(identity.operation_id, now=10.0, ttl_seconds=1.0)
 
     with pytest.raises(RuntimeError, match="stale claim token"):
         store.complete(identity.operation_id, claim.token, {"receipt": 1}, now=11.0)
 
-    replacement = store.claim(identity.operation_id, token="current", now=11.0)
+    replacement = store.claim(identity.operation_id, now=11.0)
     completed = store.complete(
         identity.operation_id, replacement.token, {"receipt": 1}, now=12.0
     )
     assert completed.state == "completed"
+
+
+def test_reclaim_gets_fresh_ownership_when_token_generator_repeats(tmp_path, monkeypatch):
+    from hermes_workflows import effects
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    generated_tokens = iter(("repeated-token", "repeated-token", "fresh-token"))
+    monkeypatch.setattr(effects.secrets, "token_urlsafe", lambda _size: next(generated_tokens))
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-repeated-claim-token",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1}, now=10.0)
+
+    stale_claim = store.claim(identity.operation_id, now=10.0, ttl_seconds=1.0)
+    current_claim = store.claim(identity.operation_id, now=11.0, ttl_seconds=5.0)
+
+    assert stale_claim.token == "repeated-token"
+    assert current_claim.token == "fresh-token"
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        store.complete(identity.operation_id, stale_claim.token, {"receipt": "stale"}, now=12.0)
+
+    completed = store.complete(
+        identity.operation_id, current_claim.token, {"receipt": "current"}, now=12.0
+    )
+    assert completed.receipt is not None
+    assert completed.receipt.payload == {"receipt": "current"}
 
 
 @pytest.mark.parametrize("source", ["lookup", "perform"])
@@ -280,7 +311,7 @@ def test_coordinator_rejects_conflicting_adapter_receipt_operation_id(tmp_path, 
         input_value=input_value,
         policy=EffectPolicy.IDEMPOTENT,
     )
-    claim = store.claim(record.identity.operation_id, token=f"{source}-claim")
+    claim = store.claim(record.identity.operation_id)
 
     with pytest.raises(ValueError, match="receipt operation_id mismatch"):
         coordinator.execute_claimed(
@@ -319,7 +350,7 @@ def test_coordinator_rejects_claim_for_another_operation_before_adapter_call(tmp
         input_value=input_value,
         policy=EffectPolicy.IDEMPOTENT,
     )
-    valid_claim = store.claim(record.identity.operation_id, token="valid-token")
+    valid_claim = store.claim(record.identity.operation_id)
     conflicting_claim = replace(valid_claim, operation_id="op_" + "0" * 64)
     adapter = RecordingAdapter()
 
@@ -363,11 +394,11 @@ def test_coordinator_rejects_noncurrent_claim_before_adapter_call(tmp_path, clai
     claim_options = (
         {"now": 10.0, "ttl_seconds": 1.0} if claim_state in {"stale", "expired"} else {}
     )
-    claim = store.claim(record.identity.operation_id, token="original-token", **claim_options)
+    claim = store.claim(record.identity.operation_id, **claim_options)
     if claim_state == "forged":
         rejected_claim = replace(claim, token="forged-token", expires_at=10_000.0)
     elif claim_state == "stale":
-        store.claim(record.identity.operation_id, token="current-token", now=11.0)
+        store.claim(record.identity.operation_id, now=11.0)
         rejected_claim = replace(claim, expires_at=10_000.0)
     else:
         rejected_claim = claim
@@ -395,7 +426,7 @@ def test_coordinator_revalidates_claim_after_receipt_lookup_before_perform(tmp_p
         input_value=input_value,
         policy=EffectPolicy.IDEMPOTENT,
     )
-    claim = store.claim(record.identity.operation_id, token="original-token")
+    claim = store.claim(record.identity.operation_id)
 
     class ClaimReplacingAdapter:
         adapter_id = "test.file.v1"
@@ -441,10 +472,10 @@ def test_concurrent_claim_race_has_one_winner(tmp_path):
     store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1}, now=10.0)
     barrier = threading.Barrier(2)
 
-    def compete(token):
+    def compete(_racer):
         barrier.wait()
         try:
-            return store.claim(identity.operation_id, token=token, now=10.0)
+            return store.claim(identity.operation_id, now=10.0)
         except RuntimeError:
             return None
 
@@ -544,10 +575,10 @@ def test_unsafe_effect_can_be_claimed_once_but_not_reclaimed_automatically(tmp_p
         policy=EffectPolicy.UNSAFE,
         allow_unsafe=True,
     )
-    store.claim(record.identity.operation_id, token="only-attempt", now=10.0, ttl_seconds=1.0)
+    store.claim(record.identity.operation_id, now=10.0, ttl_seconds=1.0)
 
     with pytest.raises(RuntimeError, match="not claimable"):
-        store.claim(record.identity.operation_id, token="forbidden-retry", now=11.0)
+        store.claim(record.identity.operation_id, now=11.0)
 
 
 def test_direct_unsafe_intent_without_authorization_refuses_execution(tmp_path):
@@ -581,7 +612,7 @@ def test_direct_unsafe_intent_without_authorization_refuses_execution(tmp_path):
         input_value=input_value,
     )
     record = store.ensure_intent(identity, EffectPolicy.UNSAFE, input_value)
-    claim = store.claim(identity.operation_id, token="unauthorized")
+    claim = store.claim(identity.operation_id)
     adapter = RecordingAdapter()
 
     with pytest.raises(ValueError, match="explicit authorization"):
@@ -605,7 +636,7 @@ def test_direct_unsafe_intent_without_authorization_refuses_completion(tmp_path)
         input_value=input_value,
     )
     store.ensure_intent(identity, EffectPolicy.UNSAFE, input_value)
-    claim = store.claim(identity.operation_id, token="unauthorized")
+    claim = store.claim(identity.operation_id)
 
     with pytest.raises(ValueError, match="explicit authorization"):
         store.complete(
@@ -653,7 +684,7 @@ def test_authorized_unsafe_intent_executes_with_durable_authorization(tmp_path):
         policy=EffectPolicy.UNSAFE,
         allow_unsafe=True,
     )
-    claim = store.claim(record.identity.operation_id, token="authorized")
+    claim = store.claim(record.identity.operation_id)
     adapter = RecordingAdapter()
 
     completed = coordinator.execute_claimed(record, claim, adapter, input_value)
