@@ -10,14 +10,14 @@ Policies are explicit:
 
 - `pure`: no externally observable mutation.
 - `idempotent`: repeats with the same operation ID converge on the same external result.
-- `unsafe`: execution is refused unless a caller explicitly authorizes it; a pending intent can be claimed once, but an expired uncertain claim cannot be reclaimed automatically and must go to human reconciliation.
+- `unsafe`: execution is refused unless a caller explicitly authorizes it. That authorization is persisted with the intent and rechecked by the coordinator immediately before any adapter lookup or external `perform` call. A pending intent can be claimed once, but an expired uncertain claim cannot be reclaimed automatically and must go to human reconciliation.
 - `unclassified`: refused. Legacy effects are unclassified until an owner classifies and adapts them.
 
 No policy is inferred from a function name, tool name, or implementation.
 
 ## Durable records and fencing
 
-`effect_intents` stores canonical input, input hash, policy, state, attempt count, and the active claim token. Before insertion, the store recomputes the complete operation identity from workflow ID, effect key, adapter ID, and the canonicalized input and rejects any mismatch. State moves from `pending` to `claimed`, then to `completed` or `failed`. An expired claim may be replaced. Completion and failure use compare-and-swap on the active opaque claim token; a stale worker cannot write a receipt or terminal state.
+`effect_intents` stores canonical input, input hash, policy, explicit unsafe-authorization evidence, state, attempt count, and the active claim token. Before insertion, the store recomputes the complete operation identity from workflow ID, effect key, adapter ID, and the canonicalized input and rejects any mismatch. State moves from `pending` to `claimed`, then to `completed` or `failed`. An expired claim may be replaced. Completion and failure use compare-and-swap on the active opaque claim token; a stale worker cannot write a receipt or terminal state. Directly persisted unsafe intents without authorization remain inventoriable and claimable once, but the execution boundary refuses them before adapter lookup, external mutation, or durable completion.
 
 `effect_receipts` stores the adapter receipt, its SHA-256, sensitivity flag, completion time, and the claim token that fenced the write. Intent completion and receipt insertion are one SQLite transaction.
 

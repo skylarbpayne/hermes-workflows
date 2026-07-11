@@ -548,3 +548,93 @@ def test_unsafe_effect_can_be_claimed_once_but_not_reclaimed_automatically(tmp_p
 
     with pytest.raises(RuntimeError, match="not claimable"):
         store.claim(record.identity.operation_id, token="forbidden-retry", now=11.0)
+
+
+def test_direct_unsafe_intent_without_authorization_refuses_execution(tmp_path):
+    from hermes_workflows.effects import (
+        EffectCoordinator,
+        EffectPolicy,
+        SQLiteEffectStore,
+        operation_identity,
+    )
+
+    class RecordingAdapter:
+        adapter_id = "payments.v1"
+
+        def __init__(self):
+            self.calls = []
+
+        def lookup_receipt(self, operation_id: str):
+            self.calls.append(("lookup", operation_id))
+            return None
+
+        def perform(self, operation_id: str, input_value: Any):
+            self.calls.append(("perform", operation_id))
+            return {"operation_id": operation_id, "adapter_receipt_id": "charge-1"}
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    input_value = {"amount": 100}
+    identity = operation_identity(
+        workflow_id="wf-direct-unsafe",
+        effect_key="charge-card",
+        adapter_id="payments.v1",
+        input_value=input_value,
+    )
+    record = store.ensure_intent(identity, EffectPolicy.UNSAFE, input_value)
+    claim = store.claim(identity.operation_id, token="unauthorized")
+    adapter = RecordingAdapter()
+
+    with pytest.raises(ValueError, match="explicit authorization"):
+        EffectCoordinator(store).execute_claimed(record, claim, adapter, input_value)
+
+    assert adapter.calls == []
+    refused = store.get(identity.operation_id)
+    assert refused.state == "claimed"
+    assert refused.receipt is None
+
+
+def test_authorized_unsafe_intent_executes_with_durable_authorization(tmp_path):
+    from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore
+
+    class RecordingAdapter:
+        adapter_id = "payments.v1"
+
+        def __init__(self):
+            self.calls = []
+
+        def lookup_receipt(self, operation_id: str):
+            self.calls.append(("lookup", operation_id))
+            return None
+
+        def perform(self, operation_id: str, input_value: Any):
+            self.calls.append(("perform", operation_id))
+            return {"operation_id": operation_id, "adapter_receipt_id": "charge-1"}
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    coordinator = EffectCoordinator(store)
+    input_value = {"amount": 100}
+    record = coordinator.prepare(
+        workflow_id="wf-authorized-unsafe",
+        effect_key="charge-card",
+        adapter_id="payments.v1",
+        input_value=input_value,
+        policy=EffectPolicy.UNSAFE,
+        allow_unsafe=True,
+    )
+    claim = store.claim(record.identity.operation_id, token="authorized")
+    adapter = RecordingAdapter()
+
+    completed = coordinator.execute_claimed(record, claim, adapter, input_value)
+
+    assert completed.state == "completed"
+    assert completed.receipt is not None
+    assert adapter.calls == [
+        ("lookup", record.identity.operation_id),
+        ("perform", record.identity.operation_id),
+    ]
+    with sqlite3.connect(store.path) as conn:
+        authorization = conn.execute(
+            "SELECT unsafe_authorized FROM effect_intents WHERE operation_id = ?",
+            (record.identity.operation_id,),
+        ).fetchone()[0]
+    assert authorization == 1

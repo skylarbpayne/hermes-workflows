@@ -96,6 +96,7 @@ def test_file_backed_adapter_subprocess_is_idempotent_and_lookupable(tmp_path):
     fixture = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "effect_contract_v1.json").read_text()
     )
+    assert fixture["adapter_contract"]["unsafe_requires_durable_authorization"] is True
     vector = fixture["identity_vectors"][0]
     identity = operation_identity(
         workflow_id=vector["workflow_id"],

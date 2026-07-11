@@ -16,6 +16,7 @@
     "service_id": "effects.adapters",
     "contract_version": 1,
     "lookup_before_perform": true,
+    "unsafe_requires_durable_authorization": true,
     "receipt_projection_excludes_payload": true,
     "delivery_semantics": "at-least-once"
   },

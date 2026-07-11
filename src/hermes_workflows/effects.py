@@ -76,6 +76,7 @@ class EffectReceipt:
 class EffectRecord:
     identity: OperationIdentity
     policy: EffectPolicy
+    unsafe_authorized: bool
     state: str
     attempts: int
     claim_token: str | None
@@ -188,9 +189,13 @@ class SQLiteEffectStore:
         policy: EffectPolicy | str,
         input_value: Any,
         *,
+        allow_unsafe: bool = False,
         now: float | None = None,
     ) -> EffectRecord:
         policy_value = _coerce_policy(policy)
+        if not isinstance(allow_unsafe, bool):
+            raise TypeError("allow_unsafe must be a boolean")
+        unsafe_authorized = policy_value is EffectPolicy.UNSAFE and allow_unsafe
         input_json = canonical_json(input_value)
         expected_identity = _operation_identity_from_input_json(
             workflow_id=identity.workflow_id,
@@ -213,9 +218,9 @@ class SQLiteEffectStore:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO effect_intents (
-                    operation_id, workflow_id, effect_key, adapter_id, policy,
+                    operation_id, workflow_id, effect_key, adapter_id, policy, unsafe_authorized,
                     input_hash, input_json, state, attempts, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
                 (
                     identity.operation_id,
@@ -223,6 +228,7 @@ class SQLiteEffectStore:
                     identity.effect_key,
                     identity.adapter_id,
                     policy_value.value,
+                    int(unsafe_authorized),
                     identity.input_hash,
                     input_json,
                     timestamp,
@@ -235,6 +241,7 @@ class SQLiteEffectStore:
                 identity.effect_key,
                 identity.adapter_id,
                 policy_value.value,
+                int(unsafe_authorized),
                 identity.input_hash,
                 input_json,
             )
@@ -420,6 +427,7 @@ class SQLiteEffectStore:
                     effect_key TEXT NOT NULL,
                     adapter_id TEXT NOT NULL,
                     policy TEXT NOT NULL CHECK (policy IN ('pure','idempotent','unsafe','unclassified')),
+                    unsafe_authorized INTEGER NOT NULL DEFAULT 0 CHECK (unsafe_authorized IN (0,1)),
                     input_hash TEXT NOT NULL,
                     input_json TEXT NOT NULL,
                     state TEXT NOT NULL CHECK (state IN ('pending','claimed','completed','failed')),
@@ -496,7 +504,9 @@ class EffectCoordinator:
             adapter_id=adapter_id,
             input_value=input_value,
         )
-        return self.store.ensure_intent(identity, policy_value, input_value)
+        return self.store.ensure_intent(
+            identity, policy_value, input_value, allow_unsafe=allow_unsafe
+        )
 
     def execute_claimed(
         self,
@@ -512,6 +522,8 @@ class EffectCoordinator:
         durable_record = self.store.require_active_claim(claim.operation_id, claim.token)
         if durable_record.identity != record.identity:
             raise ValueError("effect record conflicts with durable intent")
+        if durable_record.policy is EffectPolicy.UNSAFE and not durable_record.unsafe_authorized:
+            raise ValueError("unsafe effects require explicit authorization")
         if durable_record.identity.adapter_id != adapter.adapter_id:
             raise ValueError("effect adapter identity mismatch")
         if _sha256(canonical_json(input_value)) != durable_record.identity.input_hash:
@@ -540,7 +552,15 @@ class EffectCoordinator:
 
 
 def expected_intent_columns() -> tuple[str, ...]:
-    return ("workflow_id", "effect_key", "adapter_id", "policy", "input_hash", "input_json")
+    return (
+        "workflow_id",
+        "effect_key",
+        "adapter_id",
+        "policy",
+        "unsafe_authorized",
+        "input_hash",
+        "input_json",
+    )
 
 
 def _record_from_rows(row: sqlite3.Row, receipt_row: sqlite3.Row | None) -> EffectRecord:
@@ -570,6 +590,7 @@ def _record_from_rows(row: sqlite3.Row, receipt_row: sqlite3.Row | None) -> Effe
     return EffectRecord(
         identity=identity,
         policy=EffectPolicy(str(row["policy"])),
+        unsafe_authorized=bool(row["unsafe_authorized"]),
         state=state,
         attempts=int(row["attempts"]),
         claim_token=str(row["claim_token"]) if row["claim_token"] is not None else None,
