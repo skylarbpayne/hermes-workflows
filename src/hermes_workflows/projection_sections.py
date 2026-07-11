@@ -15,6 +15,7 @@ else:
 
 
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_DETAIL_REF_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$")
 _SECTION_FIELDS = frozenset({"schema_version", "section_id", "summary", "detail_ref"})
 _MAX_SUMMARY_BYTES = 8192
 _MAX_DETAIL_REF_BYTES = 512
@@ -44,8 +45,8 @@ class ProjectionSectionV1:
         if len(summary_json.encode("utf-8")) > _MAX_SUMMARY_BYTES:
             raise ValueError(f"summary canonical JSON must be <= {_MAX_SUMMARY_BYTES} UTF-8 bytes")
         if detail_ref is not None:
-            if not isinstance(detail_ref, str) or not detail_ref.strip():
-                raise ValueError("detail_ref must be a nonblank string or None")
+            if not isinstance(detail_ref, str) or _DETAIL_REF_PATTERN.fullmatch(detail_ref) is None:
+                raise ValueError("detail_ref must be a nonblank URI-like token or None")
             if len(detail_ref.encode("utf-8")) > _MAX_DETAIL_REF_BYTES:
                 raise ValueError(f"detail_ref must be <= {_MAX_DETAIL_REF_BYTES} UTF-8 bytes")
 

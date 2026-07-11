@@ -17,7 +17,8 @@ from hermes_workflows.projection_sections import (
     decode_projection_section,
     encode_projection_section,
 )
-from hermes_workflows.status_projection import StatusProjection
+from hermes_workflows.status_projection import JsonCodec, StatusProjection
+from hermes_workflows.types import to_json_value
 
 
 class DuplicateItemsMapping(Mapping[str, object]):
@@ -58,7 +59,7 @@ def test_operator_service_registry_contract_and_identity_lookup():
     for service_id in ("", "Review", "a/b", "a" * 65):
         with pytest.raises(ValueError):
             registry.resolve(service_id, 1)
-    for version in (True, 0, -1, 1.5, "1"):
+    for version in (True, 0, -1, 2, 999, 1.5, "1"):
         with pytest.raises(ValueError):
             registry.resolve("review.service", version)  # type: ignore[arg-type]
 
@@ -74,6 +75,10 @@ def test_operator_service_registry_rejects_invalid_schema_ids_duplicates_and_ser
     registry = OperatorServicesV1(services={})
     with pytest.raises(TypeError):
         json.dumps(registry)
+    with pytest.raises(TypeError, match="process-local"):
+        to_json_value(registry)
+    with pytest.raises(TypeError, match="process-local"):
+        JsonCodec.dumps(registry)
     with pytest.raises(TypeError):
         pickle.dumps(registry)
 
@@ -126,8 +131,11 @@ def test_projection_section_validation_bounds_and_json_rules():
         ProjectionSectionV1(section_id="valid", summary={"payload": "x" * 8193})
     with pytest.raises(ValueError):
         ProjectionSectionV1(section_id="valid", summary={}, detail_ref=" ")
+    for detail_ref in ("not a uri", "abc", "://"):
+        with pytest.raises(ValueError, match="URI-like"):
+            ProjectionSectionV1(section_id="valid", summary={}, detail_ref=detail_ref)
     with pytest.raises(ValueError):
-        ProjectionSectionV1(section_id="valid", summary={}, detail_ref="é" * 257)
+        ProjectionSectionV1(section_id="valid", summary={}, detail_ref="artifact:" + "é" * 252)
 
     exact_limit = ProjectionSectionV1(section_id="valid", summary={"payload": "x" * 8178})
     assert len(json.dumps(dict(exact_limit.summary), sort_keys=True, separators=(",", ":")).encode("utf-8")) == 8192

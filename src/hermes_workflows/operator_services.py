@@ -39,9 +39,17 @@ class OperatorServicesV1:
 
     def resolve(self, service_id: str, contract_version: int) -> object | None:
         _validate_id(service_id, label="service_id")
-        if isinstance(contract_version, bool) or not isinstance(contract_version, int) or contract_version < 1:
-            raise ValueError("contract_version must be an integer >= 1")
+        if isinstance(contract_version, bool) or not isinstance(contract_version, int) or contract_version != 1:
+            raise ValueError("contract_version must equal 1")
         return self.services.get(service_id)
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "__dataclass_fields__":
+            # Framework JSON normalization introspects dataclass fields. Refuse
+            # that process-local serialization path without changing the shared
+            # serializer or weakening this type's frozen-dataclass contract.
+            raise TypeError("operator service registries are process-local and nonserializable")
+        return object.__getattribute__(self, name)
 
     def __reduce_ex__(self, protocol: object):
         raise TypeError("operator service registries are process-local and nonserializable")
