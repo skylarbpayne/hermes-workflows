@@ -7,6 +7,7 @@ from collections.abc import Iterator, Mapping
 import pytest
 
 from hermes_workflows import WorkflowEngine, workflow
+from hermes_workflows.engine import JsonCodec
 from hermes_workflows.runtime_services import EmptyRuntimeServicesV1, RuntimeServicesV1
 
 
@@ -85,7 +86,7 @@ def test_runtime_services_reject_duplicate_ids():
 
 
 def test_runtime_services_are_process_local_and_nonserializable():
-    services = RuntimeServicesV1(services={"test.recording": object()})
+    services = RuntimeServicesV1(services={"test.recording": "must not leak"})
     empty = EmptyRuntimeServicesV1()
 
     for registry in (services, empty):
@@ -93,6 +94,10 @@ def test_runtime_services_are_process_local_and_nonserializable():
             json.dumps(registry)
         with pytest.raises(TypeError, match="process-local"):
             pickle.dumps(registry)
+        with pytest.raises(TypeError, match="process-local"):
+            JsonCodec.dumps(registry)
+        with pytest.raises(TypeError, match="process-local"):
+            JsonCodec.dumps({"nested": [registry]})
 
 
 def test_engine_stores_one_registry_without_persisting_it(tmp_path):

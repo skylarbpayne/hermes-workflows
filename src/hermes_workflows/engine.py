@@ -9,8 +9,9 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_type_hints
 from urllib.parse import quote
@@ -18,7 +19,7 @@ from urllib.parse import quote
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
 from .domain import CommandType, WorkflowStatus, decode_command_row, decode_event_row, make_command, make_event
 from .input_parsing import coerce_workflow_input
-from .runtime_services import EmptyRuntimeServicesV1, RuntimeServiceRegistry
+from .runtime_services import EmptyRuntimeServicesV1, RuntimeServiceRegistry, RuntimeServicesV1
 from .status_projection import StatusProjection
 from .types import to_json_value
 from .workflow_values import Workflow
@@ -3644,7 +3645,30 @@ def _validate_step_request_fingerprint(step_key: str, stored_payload: Any, curre
 
 
 def _to_jsonable(value: Any) -> Any:
+    _reject_runtime_service_registries(value)
     return to_json_value(value)
+
+
+def _reject_runtime_service_registries(value: Any, seen: set[int] | None = None) -> None:
+    if isinstance(value, (RuntimeServicesV1, EmptyRuntimeServicesV1)):
+        raise TypeError("runtime service registries are process-local and cannot be serialized")
+
+    seen = seen if seen is not None else set()
+    value_id = id(value)
+    if value_id in seen:
+        return
+    seen.add(value_id)
+
+    if is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            _reject_runtime_service_registries(getattr(value, field.name), seen)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_runtime_service_registries(key, seen)
+            _reject_runtime_service_registries(item, seen)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _reject_runtime_service_registries(item, seen)
 
 
 def _from_jsonable(value: Any) -> Any:
