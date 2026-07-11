@@ -47,6 +47,28 @@ def _manifest(**overrides):
     return PackageResourceManifestV1(**values)
 
 
+class _HostileFile(PackageResourceFileV1):
+    def to_dict(self):
+        return {
+            "schema_version": 2,
+            "path": "../escaped.txt",
+            "sha256": "not-a-sha256",
+            "size_bytes": -1,
+        }
+
+
+class _HostileManifest(PackageResourceManifestV1):
+    def to_dict(self):
+        return {
+            "schema_version": 2,
+            "owner_id": "attacker",
+            "package_name": "attacker",
+            "package_version": "999.0.0",
+            "payload_root": "../escaped",
+            "files": [],
+        }
+
+
 def test_foundation_manifest_is_frozen_empty_and_canonical():
     manifest = foundation_manifest()
 
@@ -66,6 +88,25 @@ def test_foundation_manifest_is_frozen_empty_and_canonical():
     canonical = canonical_manifest_json(manifest)
     assert canonical == json.dumps(expected, sort_keys=True, separators=(",", ":"))
     assert ownership_key(manifest) == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_canonical_serialization_and_ownership_reject_manifest_subclasses():
+    hostile = _HostileManifest(**_manifest().__dict__)
+
+    with pytest.raises(TypeError, match="PackageResourceManifestV1"):
+        canonical_manifest_json(hostile)
+    with pytest.raises(TypeError, match="PackageResourceManifestV1"):
+        ownership_key(hostile)
+
+
+def test_canonical_serialization_and_ownership_reject_nested_file_subclasses():
+    hostile_file = _HostileFile(**_file().__dict__)
+    manifest = _manifest(files=(hostile_file,))
+
+    with pytest.raises(TypeError, match="PackageResourceFileV1"):
+        canonical_manifest_json(manifest)
+    with pytest.raises(TypeError, match="PackageResourceFileV1"):
+        ownership_key(manifest)
 
 
 def test_manifest_resource_is_present_and_canonical_in_built_wheel(tmp_path):

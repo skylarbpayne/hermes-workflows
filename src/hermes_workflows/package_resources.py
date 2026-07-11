@@ -116,7 +116,7 @@ class PackageResourceManifestV1:
             "package_name": self.package_name,
             "package_version": self.package_version,
             "payload_root": self.payload_root,
-            "files": [entry.to_dict() for entry in self.files],
+            "files": [PackageResourceFileV1.to_dict(entry) for entry in self.files],
         }
 
 
@@ -128,10 +128,12 @@ def installed_package_version() -> str:
 
 
 def canonical_manifest_json(manifest: PackageResourceManifestV1) -> str:
-    if not isinstance(manifest, PackageResourceManifestV1):
-        raise TypeError("manifest must be a PackageResourceManifestV1")
+    if type(manifest) is not PackageResourceManifestV1:
+        raise TypeError("manifest must be exactly PackageResourceManifestV1")
+    if any(type(entry) is not PackageResourceFileV1 for entry in manifest.files):
+        raise TypeError("manifest files must be exactly PackageResourceFileV1")
     return json.dumps(
-        manifest.to_dict(),
+        PackageResourceManifestV1.to_dict(manifest),
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
