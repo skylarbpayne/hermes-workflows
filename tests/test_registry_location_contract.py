@@ -237,6 +237,33 @@ def test_registry_resolution_fails_closed_when_registry_dir_swaps_during_receipt
         )
 
 
+def test_registry_resolution_fails_closed_on_same_root_swap_during_final_validation(tmp_path, monkeypatch):
+    config_root = tmp_path / "config"
+    registry_dir = config_root / "registry"
+    saved_registry_dir = config_root / "saved-registry"
+    alternate_registry_dir = config_root / "alternate-registry"
+    registry_dir.mkdir(parents=True)
+    alternate_registry_dir.mkdir()
+    original_require_contained = registry_location._require_contained
+    swapped = False
+
+    def swap_during_final_registry_path_check(parent, candidate, *, label):
+        nonlocal swapped
+        if label == "registry_path" and parent == config_root and not swapped:
+            registry_dir.rename(saved_registry_dir)
+            registry_dir.symlink_to(alternate_registry_dir, target_is_directory=True)
+            swapped = True
+        original_require_contained(parent, candidate, label=label)
+
+    monkeypatch.setattr(registry_location, "_require_contained", swap_during_final_registry_path_check)
+
+    with pytest.raises(ValueError, match="symlink-resolved"):
+        resolve_registry_location(
+            config_root,
+            RegistryLocationV1(registry_file="registry/workflows.json", state_root="state"),
+        )
+
+
 def test_db_resolution_rechecks_state_root_containment_at_use_time(tmp_path):
     registry_dir = tmp_path / "registry"
     state_root = registry_dir / "state"

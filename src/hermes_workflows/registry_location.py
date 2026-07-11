@@ -154,7 +154,11 @@ def resolve_registry_location(
         Path(location.registry_path).resolve(strict=False),
         label="registry_path",
     )
-    return location
+    return ResolvedRegistryLocationV1(
+        registry_path=location.registry_path,
+        registry_dir=location.registry_dir,
+        state_root_path=location.state_root_path,
+    )
 
 
 def resolve_relative_db_path(
