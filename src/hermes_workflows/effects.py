@@ -305,7 +305,7 @@ class SQLiteEffectStore:
         now: float | None = None,
     ) -> EffectRecord:
         _validate_operation_id(operation_id)
-        payload_json = canonical_json(dict(receipt_payload))
+        payload_json = canonical_json(receipt_payload)
         timestamp = _timestamp(now)
         receipt_hash = _sha256(payload_json)
         receipt_id = adapter_receipt_id or receipt_hash
@@ -353,7 +353,7 @@ class SQLiteEffectStore:
         now: float | None = None,
     ) -> EffectRecord:
         _validate_operation_id(operation_id)
-        error_json = canonical_json(dict(error))
+        error_json = canonical_json(error)
         timestamp = _timestamp(now)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")

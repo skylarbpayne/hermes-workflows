@@ -189,6 +189,60 @@ def test_failure_is_fenced_and_terminal(tmp_path):
         store.claim(identity.operation_id)
 
 
+def test_completion_rejects_repeated_mapping_items_without_terminal_state(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-receipt-shape",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1})
+    claim = store.claim(identity.operation_id, token="receipt-owner")
+
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        store.complete(identity.operation_id, claim.token, _RepeatedItemsMapping())
+
+    rejected = store.get(identity.operation_id)
+    assert rejected.state == "claimed"
+    assert rejected.receipt is None
+    with sqlite3.connect(tmp_path / "effects.sqlite") as conn:
+        receipt_count = conn.execute(
+            "SELECT COUNT(*) FROM effect_receipts WHERE operation_id = ?",
+            (identity.operation_id,),
+        ).fetchone()[0]
+    assert receipt_count == 0
+
+
+def test_failure_rejects_repeated_mapping_items_without_terminal_state(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-error-shape",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.PURE, {"value": 1})
+    claim = store.claim(identity.operation_id, token="error-owner")
+
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        store.fail(identity.operation_id, claim.token, _RepeatedItemsMapping())
+
+    rejected = store.get(identity.operation_id)
+    assert rejected.state == "claimed"
+    assert rejected.error is None
+    with sqlite3.connect(tmp_path / "effects.sqlite") as conn:
+        state, error_json = conn.execute(
+            "SELECT state, error_json FROM effect_intents WHERE operation_id = ?",
+            (identity.operation_id,),
+        ).fetchone()
+    assert (state, error_json) == ("claimed", None)
+
+
 def test_expired_claim_cannot_complete_without_reclaim(tmp_path):
     from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
 
