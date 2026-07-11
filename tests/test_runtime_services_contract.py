@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import pickle
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass
 
 import pytest
@@ -54,6 +54,69 @@ class IntegrationOwnedRuntimeServices(RuntimeOnlyServiceRegistry):
 class UnmarkedStructuralRuntimeServices:
     def resolve(self, service_id: str, contract_version: int) -> object | None:
         return None
+
+
+class HashableCycleSequence(Sequence[object]):
+    def __init__(self, registry: RuntimeOnlyServiceRegistry | None = None):
+        self._items = (self, registry) if registry is not None else (self,)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __getitem__(self, index):
+        return self._items[index]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class HashableCycleMapping(Mapping[object, object]):
+    def __init__(self, registry: RuntimeOnlyServiceRegistry):
+        self._items = (("self", self), ("registry", registry))
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __getitem__(self, key: object) -> object:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[object]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def items(self):  # type: ignore[override]
+        return self._items
+
+
+class HashableCycleSet(Set[object]):
+    def __init__(self, registry: RuntimeOnlyServiceRegistry):
+        self._items = (self, registry)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __contains__(self, item: object) -> bool:
+        return any(candidate is item for candidate in self._items)
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+@dataclass(eq=False)
+class HashableCycleDataclass:
+    self_reference: object | None = None
+    registry: RuntimeOnlyServiceRegistry | None = None
+
+    def __hash__(self) -> int:
+        return id(self)
 
 
 def test_runtime_services_resolve_recording_object_by_identity():
@@ -259,3 +322,60 @@ def test_safe_mapping_keys_preserve_string_conversion_compatibility():
     payload = {7: "integer", ("safe", 1): "tuple"}
 
     assert to_json_value(payload) == {"7": "integer", "('safe', 1)": "tuple"}
+
+
+def _cyclic_key_with_registry(shape: str, registry: RuntimeOnlyServiceRegistry) -> object:
+    if shape == "sequence":
+        return HashableCycleSequence(registry)
+    if shape == "mapping":
+        return HashableCycleMapping(registry)
+    if shape == "set":
+        return HashableCycleSet(registry)
+    if shape == "dataclass":
+        value = HashableCycleDataclass(registry=registry)
+        value.self_reference = value
+        return value
+    raise AssertionError(f"unknown shape: {shape}")
+
+
+@pytest.mark.parametrize("shape", ["sequence", "mapping", "set", "dataclass"])
+def test_cyclic_mapping_keys_do_not_mask_marked_registry_rejection(tmp_path, shape):
+    db_path = tmp_path / "workflow.sqlite"
+    secret = f"cyclic-{shape}-registry-secret-must-not-persist"
+    registry = IntegrationOwnedRuntimeServices(marker=secret)
+    payload = {_cyclic_key_with_registry(shape, registry): "safe value"}
+
+    for serialize in (
+        to_json_value,
+        JsonCodec.dumps,
+        StatusProjectionJsonCodec.dumps,
+        lambda value: JsonArtifact("runtime services", value),
+    ):
+        with pytest.raises(TypeError, match="process-local"):
+            serialize(payload)
+
+    workflow_id = f"wf_cyclic_{shape}_registry_mapping_key"
+    engine = WorkflowEngine(db_path, runtime_services=registry)
+    with pytest.raises(TypeError, match="process-local"):
+        engine.start(
+            runtime_service_contract_workflow,
+            {"value": payload},
+            workflow_id=workflow_id,
+        )
+
+    assert secret not in db_path.read_bytes().decode("utf-8", errors="ignore")
+    with pytest.raises(KeyError, match="unknown workflow_id"):
+        engine.events(workflow_id)
+
+
+def test_safe_cyclic_non_string_mapping_key_fails_closed_deterministically():
+    payload = {HashableCycleSequence(): "safe value"}
+
+    for serialize in (
+        to_json_value,
+        JsonCodec.dumps,
+        StatusProjectionJsonCodec.dumps,
+        lambda value: JsonArtifact("cyclic key", value),
+    ):
+        with pytest.raises(TypeError, match="cyclic mapping keys are not JSON-serializable"):
+            serialize(payload)

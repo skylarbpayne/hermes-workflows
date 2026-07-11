@@ -67,23 +67,49 @@ def to_json_object(value: object) -> JsonObject:
 def _reject_runtime_service_registry(value: object) -> None:
     """Reject process-local registries nested in values about to become mapping keys."""
 
+    if _mapping_key_contains_registry_or_cycle(value, active_ids=set()):
+        raise TypeError("cyclic mapping keys are not JSON-serializable")
+
+
+def _mapping_key_contains_registry_or_cycle(value: object, *, active_ids: set[int]) -> bool:
+    """Reject registries eagerly and report cycles after inspecting sibling values."""
+
     from .runtime_services import RuntimeOnlyServiceRegistry
 
     if isinstance(value, RuntimeOnlyServiceRegistry):
         raise TypeError("runtime service registries are process-local and cannot be serialized")
-    if is_dataclass(value) and not isinstance(value, type):
-        for field in fields(value):
-            _reject_runtime_service_registry(getattr(value, field.name))
-    elif isinstance(value, Mapping):
-        for key, item in value.items():
-            _reject_runtime_service_registry(key)
-            _reject_runtime_service_registry(item)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            _reject_runtime_service_registry(item)
-    elif isinstance(value, Set):
-        for item in value:
-            _reject_runtime_service_registry(item)
+
+    is_dataclass_instance = is_dataclass(value) and not isinstance(value, type)
+    is_mapping = isinstance(value, Mapping)
+    is_sequence = isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    is_set = isinstance(value, Set)
+    if not (is_dataclass_instance or is_mapping or is_sequence or is_set):
+        return False
+
+    value_id = id(value)
+    if value_id in active_ids:
+        return True
+
+    active_ids.add(value_id)
+    cycle_found = False
+    try:
+        if is_dataclass_instance:
+            for field in fields(cast(Any, value)):
+                if _mapping_key_contains_registry_or_cycle(getattr(value, field.name), active_ids=active_ids):
+                    cycle_found = True
+        elif is_mapping:
+            for key, item in cast(Mapping[object, object], value).items():
+                if _mapping_key_contains_registry_or_cycle(key, active_ids=active_ids):
+                    cycle_found = True
+                if _mapping_key_contains_registry_or_cycle(item, active_ids=active_ids):
+                    cycle_found = True
+        else:
+            for item in cast(Sequence[object] | Set[object], value):
+                if _mapping_key_contains_registry_or_cycle(item, active_ids=active_ids):
+                    cycle_found = True
+    finally:
+        active_ids.remove(value_id)
+    return cycle_found
 
 
 def _is_framework_json_value(value: object) -> bool:
