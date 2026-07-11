@@ -5,6 +5,7 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from .projection_sections import ProjectionContributorV1, collect_projection_sections, validate_workflow_id
 from .types import to_json_value
 from .workflow_values import Workflow
 
@@ -33,8 +34,14 @@ class StatusProjection:
     and event-derived summaries used by CLI/dashboard/review surfaces.
     """
 
-    def __init__(self, engine: Any):
+    def __init__(
+        self,
+        engine: Any,
+        *,
+        contributors: Tuple[ProjectionContributorV1, ...] = (),
+    ):
         self._engine = engine
+        self._contributors = tuple(contributors)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._engine, name)
@@ -103,6 +110,7 @@ class StatusProjection:
         command_limit: int = 20,
         command_payload_chars: int = 500,
     ) -> Dict[str, Any]:
+        validate_workflow_id(workflow_id)
         row = self._instance(workflow_id)
         events = self.events(workflow_id)
         pending_commands = self._active_commands(workflow_id)
@@ -149,6 +157,9 @@ class StatusProjection:
             status["command_history_mode"] = command_history
             status["command_history_truncated"] = truncated
             status["command_history"] = history
+        sections = collect_projection_sections(workflow_id, self._contributors)
+        if sections:
+            status["projection_sections"] = [section.to_dict() for section in sections]
         return status
 
     def _command_history(
