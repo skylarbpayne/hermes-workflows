@@ -593,6 +593,38 @@ def test_direct_unsafe_intent_without_authorization_refuses_execution(tmp_path):
     assert refused.receipt is None
 
 
+def test_direct_unsafe_intent_without_authorization_refuses_completion(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    input_value = {"amount": 100}
+    identity = operation_identity(
+        workflow_id="wf-direct-unsafe-completion",
+        effect_key="charge-card",
+        adapter_id="payments.v1",
+        input_value=input_value,
+    )
+    store.ensure_intent(identity, EffectPolicy.UNSAFE, input_value)
+    claim = store.claim(identity.operation_id, token="unauthorized")
+
+    with pytest.raises(ValueError, match="explicit authorization"):
+        store.complete(
+            identity.operation_id,
+            claim.token,
+            {"operation_id": identity.operation_id, "adapter_receipt_id": "charge-1"},
+        )
+
+    refused = store.get(identity.operation_id)
+    assert refused.state == "claimed"
+    assert refused.receipt is None
+    with sqlite3.connect(store.path) as conn:
+        receipt_count = conn.execute(
+            "SELECT COUNT(*) FROM effect_receipts WHERE operation_id = ?",
+            (identity.operation_id,),
+        ).fetchone()[0]
+    assert receipt_count == 0
+
+
 def test_authorized_unsafe_intent_executes_with_durable_authorization(tmp_path):
     from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore
 

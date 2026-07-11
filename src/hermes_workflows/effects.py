@@ -326,10 +326,22 @@ class SQLiteEffectStore:
                 SET state = 'completed', updated_at = ?
                 WHERE operation_id = ? AND state = 'claimed' AND claim_token = ?
                   AND claim_expires_at > ?
+                  AND (policy != 'unsafe' OR unsafe_authorized = 1)
                 """,
                 (timestamp, operation_id, claim_token, timestamp),
             )
             if cursor.rowcount != 1:
+                unauthorized = conn.execute(
+                    """
+                    SELECT 1 FROM effect_intents
+                    WHERE operation_id = ? AND state = 'claimed' AND claim_token = ?
+                      AND claim_expires_at > ? AND policy = 'unsafe'
+                      AND unsafe_authorized = 0
+                    """,
+                    (operation_id, claim_token, timestamp),
+                ).fetchone()
+                if unauthorized is not None:
+                    raise ValueError("unsafe effects require explicit authorization")
                 raise RuntimeError("stale claim token cannot complete effect")
             conn.execute(
                 """
