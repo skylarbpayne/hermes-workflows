@@ -105,6 +105,48 @@ def test_canonical_json_round_trips_and_rejects_unknown_fields():
         manifest_from_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "duplicate_json",
+    [
+        lambda canonical: canonical.replace(
+            '"owner_id":"hermes-workflows"',
+            '"owner_id":"hermes-workflows","owner_id":"hermes-workflows"',
+        ),
+        lambda canonical: canonical.replace(
+            '"path":"plugin_payload/example.txt"',
+            '"path":"plugin_payload/example.txt","path":"plugin_payload/example.txt"',
+        ),
+    ],
+    ids=["manifest-object", "resource-file-object"],
+)
+def test_manifest_json_rejects_duplicate_keys_at_every_object_boundary(duplicate_json):
+    canonical = canonical_manifest_json(_manifest(files=(_file(),)))
+
+    with pytest.raises(ValueError, match="canonical JSON"):
+        manifest_from_json(duplicate_json(canonical))
+
+
+@pytest.mark.parametrize(
+    "noncanonical_json",
+    [
+        lambda manifest, canonical: canonical.replace(",", ", ", 1),
+        lambda manifest, canonical: json.dumps(
+            manifest.to_dict(), ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ),
+    ],
+    ids=["whitespace", "key-order"],
+)
+def test_manifest_json_rejects_noncanonical_byte_spellings(noncanonical_json):
+    manifest = _manifest(files=(_file(),))
+    canonical = canonical_manifest_json(manifest)
+    value = noncanonical_json(manifest, canonical)
+    assert json.loads(value) == json.loads(canonical)
+    assert value != canonical
+
+    with pytest.raises(ValueError, match="canonical JSON"):
+        manifest_from_json(value)
+
+
 @pytest.mark.parametrize("field", ["owner_id", "package_name"])
 @pytest.mark.parametrize(
     "value",

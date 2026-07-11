@@ -168,7 +168,7 @@ def manifest_from_json(value: str) -> PackageResourceManifestV1:
             )
         )
 
-    return PackageResourceManifestV1(
+    manifest = PackageResourceManifestV1(
         schema_version=payload["schema_version"],
         owner_id=payload["owner_id"],
         package_name=payload["package_name"],
@@ -176,6 +176,9 @@ def manifest_from_json(value: str) -> PackageResourceManifestV1:
         payload_root=payload["payload_root"],
         files=tuple(entries),
     )
+    if value != canonical_manifest_json(manifest):
+        raise ValueError("manifest must use canonical JSON encoding")
+    return manifest
 
 
 def foundation_manifest() -> PackageResourceManifestV1:
