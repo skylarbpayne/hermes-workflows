@@ -252,6 +252,34 @@ def test_db_resolution_fails_closed_when_state_root_swaps_during_resolution(tmp_
         resolve_relative_db_path(resolved, RelativeDbPathV1(alias="main", path="escaped.sqlite"))
 
 
+def test_db_resolution_fails_closed_when_state_root_swaps_after_candidate_resolution(tmp_path, monkeypatch):
+    registry_dir = tmp_path / "registry"
+    state_root = registry_dir / "state"
+    saved_state_root = registry_dir / "saved-state"
+    outside = tmp_path / "outside"
+    state_root.mkdir(parents=True)
+    outside.mkdir()
+    resolved = resolve_registry_location(
+        tmp_path,
+        RegistryLocationV1(registry_file="registry/workflows.json", state_root="state"),
+    )
+    original_require_contained = registry_location._require_contained
+    swapped = False
+
+    def swap_before_candidate_check(parent, candidate, *, label):
+        nonlocal swapped
+        if label == "DB path for alias 'main'" and not swapped:
+            state_root.rename(saved_state_root)
+            state_root.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        original_require_contained(parent, candidate, label=label)
+
+    monkeypatch.setattr(registry_location, "_require_contained", swap_before_candidate_check)
+
+    with pytest.raises(ValueError, match="escape"):
+        resolve_relative_db_path(resolved, RelativeDbPathV1(alias="main", path="escaped.sqlite"))
+
+
 def test_duplicate_db_aliases_fail_closed(tmp_path):
     resolved = resolve_registry_location(
         tmp_path,

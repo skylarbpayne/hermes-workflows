@@ -226,6 +226,7 @@ def _validate_normalized_absolute_path(value: object, *, label: str) -> str:
 def _resolve_beneath(parent: Path, relative_path: str, *, label: str) -> Path:
     candidate = (parent / relative_path).resolve(strict=False)
     _require_contained(parent, candidate, label=label)
+    _require_contained(parent, candidate.resolve(strict=False), label=label)
     return candidate
 
 
