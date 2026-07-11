@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+
+def test_stable_operation_id_is_attempt_independent_and_input_sensitive():
+    from hermes_workflows.effects import operation_identity
+
+    first = operation_identity(
+        workflow_id="wf-123",
+        effect_key="publish-report",
+        adapter_id="test.file.v1",
+        input_value={"b": [2, 3], "a": 1},
+        attempt=1,
+    )
+    replay = operation_identity(
+        workflow_id="wf-123",
+        effect_key="publish-report",
+        adapter_id="test.file.v1",
+        input_value={"a": 1, "b": [2, 3]},
+        attempt=99,
+    )
+    changed = operation_identity(
+        workflow_id="wf-123",
+        effect_key="publish-report",
+        adapter_id="test.file.v1",
+        input_value={"a": 2, "b": [2, 3]},
+        attempt=1,
+    )
+
+    assert first.operation_id == replay.operation_id
+    assert first.input_hash == replay.input_hash
+    assert first.operation_id != changed.operation_id
+    assert first.input_hash != changed.input_hash
+    assert first.operation_id.startswith("op_")
+    assert len(first.input_hash) == 64
+
+
+def test_noncanonical_or_secret_bearing_inputs_are_rejected():
+    from hermes_workflows.effects import operation_identity
+
+    with pytest.raises(TypeError, match="JSON"):
+        operation_identity(
+            workflow_id="wf-123",
+            effect_key="publish-report",
+            adapter_id="test.file.v1",
+            input_value={"not-json": object()},
+        )
+    with pytest.raises(ValueError, match="finite"):
+        operation_identity(
+            workflow_id="wf-123",
+            effect_key="publish-report",
+            adapter_id="test.file.v1",
+            input_value={"bad": float("nan")},
+        )
+
+
+def test_sqlite_intent_claim_completion_and_stale_token_fencing(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-cas",
+        effect_key="send",
+        adapter_id="test.file.v1",
+        input_value={"message": "hello"},
+    )
+    intent = store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"message": "hello"})
+    assert intent.state == "pending"
+
+    claim_a = store.claim(identity.operation_id, now=10.0, ttl_seconds=1.0, token="token-a")
+    assert claim_a.attempt == 1
+    with pytest.raises(RuntimeError, match="not claimable"):
+        store.claim(identity.operation_id, now=10.5, ttl_seconds=1.0, token="token-b")
+
+    claim_b = store.claim(identity.operation_id, now=11.1, ttl_seconds=5.0, token="token-b")
+    assert claim_b.attempt == 2
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        store.complete(identity.operation_id, "token-a", {"provider_id": "wrong"}, now=12.0)
+
+    completed = store.complete(
+        identity.operation_id,
+        "token-b",
+        {"provider_id": "receipt-1", "access_token": "must-not-project"},
+        sensitive=True,
+        now=12.0,
+    )
+    assert completed.state == "completed"
+    assert completed.receipt is not None
+    assert completed.receipt.payload["provider_id"] == "receipt-1"
+    assert completed.receipt.descriptor()["sensitive"] is True
+    assert "access_token" not in json.dumps(completed.receipt.descriptor())
+
+    with sqlite3.connect(tmp_path / "effects.sqlite") as conn:
+        row = conn.execute(
+            "SELECT state, attempts, claim_token FROM effect_intents WHERE operation_id = ?",
+            (identity.operation_id,),
+        ).fetchone()
+        receipt_row = conn.execute(
+            "SELECT claim_token, receipt_hash FROM effect_receipts WHERE operation_id = ?",
+            (identity.operation_id,),
+        ).fetchone()
+    assert row == ("completed", 2, "token-b")
+    assert receipt_row is not None
+    assert receipt_row[0] == "token-b"
+    assert len(receipt_row[1]) == 64
+
+
+def test_failure_is_fenced_and_terminal(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-fail",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.PURE, {"value": 1})
+    claim = store.claim(identity.operation_id, token="winner")
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        store.fail(identity.operation_id, "loser", {"kind": "wrong-owner"})
+    failed = store.fail(identity.operation_id, claim.token, {"kind": "adapter-error"})
+    assert failed.state == "failed"
+    assert failed.error == {"kind": "adapter-error"}
+    with pytest.raises(RuntimeError, match="not claimable"):
+        store.claim(identity.operation_id)
+
+
+def test_expired_claim_cannot_complete_without_reclaim(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-expired",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1}, now=10.0)
+    claim = store.claim(identity.operation_id, token="expired", now=10.0, ttl_seconds=1.0)
+
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        store.complete(identity.operation_id, claim.token, {"receipt": 1}, now=11.0)
+
+    replacement = store.claim(identity.operation_id, token="current", now=11.0)
+    completed = store.complete(
+        identity.operation_id, replacement.token, {"receipt": 1}, now=12.0
+    )
+    assert completed.state == "completed"
+
+
+def test_concurrent_claim_race_has_one_winner(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-race",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1}, now=10.0)
+    barrier = threading.Barrier(2)
+
+    def compete(token):
+        barrier.wait()
+        try:
+            return store.claim(identity.operation_id, token=token, now=10.0)
+        except RuntimeError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(pool.map(compete, ("racer-a", "racer-b")))
+
+    winners = [claim for claim in claims if claim is not None]
+    assert len(winners) == 1
+    record = store.get(identity.operation_id)
+    assert record.state == "claimed"
+    assert record.attempts == 1
+    assert record.claim_token == winners[0].token
+
+
+def test_intent_identity_conflicts_fail_closed(tmp_path):
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-conflict",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1})
+    with pytest.raises(ValueError, match="conflicts with durable intent"):
+        store.ensure_intent(identity, EffectPolicy.PURE, {"value": 1})
+
+
+def test_unclassified_and_legacy_effects_refuse_execution(tmp_path):
+    from hermes_workflows.effects import (
+        EffectCoordinator,
+        EffectPolicy,
+        SQLiteEffectStore,
+        operation_identity,
+    )
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    coordinator = EffectCoordinator(store)
+    with pytest.raises(ValueError, match="unclassified"):
+        coordinator.prepare(
+            workflow_id="wf-legacy",
+            effect_key="legacy-call",
+            adapter_id="legacy.adapter.v0",
+            input_value={"value": 1},
+            policy=EffectPolicy.UNCLASSIFIED,
+        )
+    with pytest.raises(ValueError, match="unsafe"):
+        coordinator.prepare(
+            workflow_id="wf-unsafe",
+            effect_key="charge-card",
+            adapter_id="payments.v1",
+            input_value={"amount": 100},
+            policy=EffectPolicy.UNSAFE,
+        )
+
+    legacy_identity = operation_identity(
+        workflow_id="wf-legacy-row",
+        effect_key="old-step",
+        adapter_id="legacy.adapter.v0",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(legacy_identity, EffectPolicy.UNCLASSIFIED, {"value": 1})
+    with pytest.raises(RuntimeError, match="not claimable"):
+        store.claim(legacy_identity.operation_id)
+
+
+def test_unsafe_effect_can_be_claimed_once_but_not_reclaimed_automatically(tmp_path):
+    from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    record = EffectCoordinator(store).prepare(
+        workflow_id="wf-unsafe-once",
+        effect_key="charge-card",
+        adapter_id="payments.v1",
+        input_value={"amount": 100},
+        policy=EffectPolicy.UNSAFE,
+        allow_unsafe=True,
+    )
+    store.claim(record.identity.operation_id, token="only-attempt", now=10.0, ttl_seconds=1.0)
+
+    with pytest.raises(RuntimeError, match="not claimable"):
+        store.claim(record.identity.operation_id, token="forbidden-retry", now=11.0)

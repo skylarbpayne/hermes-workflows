@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "identity_vectors": [
+    {
+      "workflow_id": "wf-contract-001",
+      "effect_key": "publish-report",
+      "adapter_id": "contract.file.v1",
+      "input": {"report_id": "r-7", "sections": ["summary", "risks"]},
+      "input_hash": "0443d565a2434c98e2d2034c8bdc5621cc77e23864d75088f7b6e29e3d8ed928",
+      "operation_id": "op_779cfb267aaf4485e131af3c56d0366053f28814563e018beefab5b9627eaf95"
+    }
+  ],
+  "policies": ["pure", "idempotent", "unsafe", "unclassified"],
+  "claim_states": ["pending", "claimed", "completed", "failed"],
+  "adapter_contract": {
+    "service_id": "effects.adapters",
+    "contract_version": 1,
+    "lookup_before_perform": true,
+    "receipt_projection_excludes_payload": true,
+    "delivery_semantics": "at-least-once"
+  },
+  "crash_windows": [
+    "before_adapter_call",
+    "during_adapter_call",
+    "after_effect_before_adapter_receipt",
+    "after_receipt_commit_before_command_completion"
+  ]
+}
