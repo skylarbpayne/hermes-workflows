@@ -10,7 +10,11 @@ import pytest
 from hermes_workflows import WorkflowEngine, workflow
 from hermes_workflows.artifacts import JsonArtifact
 from hermes_workflows.engine import JsonCodec
-from hermes_workflows.runtime_services import EmptyRuntimeServicesV1, RuntimeServicesV1
+from hermes_workflows.runtime_services import (
+    EmptyRuntimeServicesV1,
+    RuntimeOnlyServiceRegistry,
+    RuntimeServicesV1,
+)
 from hermes_workflows.status_projection import JsonCodec as StatusProjectionJsonCodec
 from hermes_workflows.types import to_json_value
 
@@ -40,9 +44,14 @@ class DuplicateItemsMapping(Mapping[str, object]):
 
 
 @dataclass(frozen=True)
-class IntegrationOwnedRuntimeServices:
+class IntegrationOwnedRuntimeServices(RuntimeOnlyServiceRegistry):
     marker: str
 
+    def resolve(self, service_id: str, contract_version: int) -> object | None:
+        return None
+
+
+class UnmarkedStructuralRuntimeServices:
     def resolve(self, service_id: str, contract_version: int) -> object | None:
         return None
 
@@ -148,33 +157,50 @@ def test_engine_stores_one_registry_without_persisting_it(tmp_path):
     assert all("test.recording" not in json.dumps(event) for event in engine.events("wf_runtime_service_injected"))
 
 
-def test_engine_rejects_arbitrary_protocol_registry_persistence(tmp_path):
+def test_engine_preserves_marked_registry_identity_without_mutation_or_wrapping(tmp_path):
+    db_path = tmp_path / "workflow.sqlite"
+    marker = "integration-registry-must-not-persist"
+    registry = IntegrationOwnedRuntimeServices(marker=marker)
+    original_type = type(registry)
+    original_state = dict(registry.__dict__)
+    engine = WorkflowEngine(db_path, runtime_services=registry)
+
+    assert engine.runtime_services is registry
+    assert type(registry) is original_type
+    assert registry.__dict__ == original_state
+    assert engine.resolve_runtime_service("integration.any", 1) is None
+
+
+def test_engine_rejects_unmarked_structural_registry(tmp_path):
+    registry = UnmarkedStructuralRuntimeServices()
+
+    with pytest.raises(TypeError, match="runtime-only marker"):
+        WorkflowEngine(tmp_path / "workflow.sqlite", runtime_services=registry)
+
+
+def test_marked_registry_rejected_by_framework_serializers_and_persistence(tmp_path):
     db_path = tmp_path / "workflow.sqlite"
     marker = "integration-registry-must-not-persist"
     registry = IntegrationOwnedRuntimeServices(marker=marker)
     engine = WorkflowEngine(db_path, runtime_services=registry)
+    nested = {"outer": [{"registry": registry}]}
 
-    assert engine.runtime_services is registry
-    assert engine.resolve_runtime_service("integration.any", 1) is None
-    with pytest.raises(TypeError):
-        json.dumps(registry)
     for serialize in (
-        pickle.dumps,
         to_json_value,
         JsonCodec.dumps,
         StatusProjectionJsonCodec.dumps,
         lambda value: JsonArtifact("runtime services", value),
     ):
         with pytest.raises(TypeError, match="process-local"):
-            serialize(registry)
+            serialize(nested)
 
     with pytest.raises(TypeError, match="process-local"):
         engine.start(
             runtime_service_contract_workflow,
-            {"value": {"registry": registry}},
-            workflow_id="wf_arbitrary_runtime_service_registry",
+            {"value": nested},
+            workflow_id="wf_marked_runtime_service_registry",
         )
 
     assert marker not in db_path.read_bytes().decode("utf-8", errors="ignore")
     with pytest.raises(KeyError, match="unknown workflow_id"):
-        engine.events("wf_arbitrary_runtime_service_registry")
+        engine.events("wf_marked_runtime_service_registry")

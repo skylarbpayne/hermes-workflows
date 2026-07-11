@@ -32,6 +32,10 @@ def to_json_value(value: object) -> JsonValue:
     at typed input boundaries; this helper only guarantees JSON shape.
     """
 
+    from .runtime_services import RuntimeOnlyServiceRegistry
+
+    if isinstance(value, RuntimeOnlyServiceRegistry):
+        raise TypeError("runtime service registries are process-local and cannot be serialized")
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if _is_framework_json_value(value):
