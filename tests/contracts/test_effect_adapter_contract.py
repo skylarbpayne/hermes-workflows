@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hermes_workflows.effects import (
     EFFECT_ADAPTER_CONTRACT_VERSION,
     EFFECT_ADAPTER_SERVICE_ID,
@@ -144,6 +146,37 @@ def test_coordinator_queries_receipt_before_perform(tmp_path):
     assert completed.state == "completed"
     with sqlite3.connect(adapter.path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM external_effects").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("source", ["lookup", "perform"])
+def test_adapter_receipt_operation_id_must_match_requested_operation(tmp_path, source):
+    class ConflictingFileAdapter(FileAdapter):
+        def lookup_receipt(self, operation_id: str):
+            if source == "lookup":
+                return {"adapter_receipt_id": "wrong", "operation_id": "op_" + "0" * 64}
+            return None
+
+        def perform(self, operation_id: str, input_value):
+            return {"adapter_receipt_id": "wrong", "operation_id": "op_" + "0" * 64}
+
+    adapter = ConflictingFileAdapter(tmp_path / "adapter.sqlite")
+    coordinator = EffectCoordinator(SQLiteEffectStore(tmp_path / "effects.sqlite"))
+    input_value = {"report_id": "r-conflict"}
+    record = coordinator.prepare(
+        workflow_id="wf-contract-001",
+        effect_key="publish-report",
+        adapter_id=adapter.adapter_id,
+        input_value=input_value,
+        policy=EffectPolicy.IDEMPOTENT,
+    )
+    claim = coordinator.store.claim(record.identity.operation_id)
+
+    with pytest.raises(ValueError, match="receipt operation_id mismatch"):
+        coordinator.execute_claimed(record, claim, adapter, input_value)
+
+    rejected = coordinator.store.get(record.identity.operation_id)
+    assert rejected.state == "claimed"
+    assert rejected.receipt is None
 
 
 def _adapter_worker(args: list[str]) -> int:

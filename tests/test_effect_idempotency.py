@@ -29,6 +29,21 @@ class _RepeatedItemsMapping(Mapping[str, Any]):
         return (("value", 1), ("value", 2))
 
 
+class _ConflictingReceiptAdapter:
+    adapter_id = "test.file.v1"
+
+    def __init__(self, source: str):
+        self.source = source
+
+    def lookup_receipt(self, operation_id: str):
+        if self.source == "lookup":
+            return {"operation_id": "op_" + "0" * 64, "adapter_receipt_id": "wrong"}
+        return None
+
+    def perform(self, operation_id: str, input_value: Any):
+        return {"operation_id": "op_" + "0" * 64, "adapter_receipt_id": "wrong"}
+
+
 def test_stable_operation_id_is_attempt_independent_and_input_sensitive():
     from hermes_workflows.effects import operation_identity
 
@@ -195,6 +210,32 @@ def test_expired_claim_cannot_complete_without_reclaim(tmp_path):
         identity.operation_id, replacement.token, {"receipt": 1}, now=12.0
     )
     assert completed.state == "completed"
+
+
+@pytest.mark.parametrize("source", ["lookup", "perform"])
+def test_coordinator_rejects_conflicting_adapter_receipt_operation_id(tmp_path, source):
+    from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    coordinator = EffectCoordinator(store)
+    input_value = {"value": 1}
+    record = coordinator.prepare(
+        workflow_id="wf-receipt-conflict",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value=input_value,
+        policy=EffectPolicy.IDEMPOTENT,
+    )
+    claim = store.claim(record.identity.operation_id, token=f"{source}-claim")
+
+    with pytest.raises(ValueError, match="receipt operation_id mismatch"):
+        coordinator.execute_claimed(
+            record, claim, _ConflictingReceiptAdapter(source), input_value
+        )
+
+    rejected = store.get(record.identity.operation_id)
+    assert rejected.state == "claimed"
+    assert rejected.receipt is None
 
 
 def test_concurrent_claim_race_has_one_winner(tmp_path):

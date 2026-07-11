@@ -492,6 +492,11 @@ class EffectCoordinator:
         payload = existing if existing is not None else adapter.perform(record.identity.operation_id, input_value)
         if not isinstance(payload, Mapping):
             raise TypeError("effect adapter receipt must be a mapping")
+        if (
+            "operation_id" in payload
+            and payload["operation_id"] != record.identity.operation_id
+        ):
+            raise ValueError("effect adapter receipt operation_id mismatch")
         adapter_receipt_id = payload.get("adapter_receipt_id")
         return self.store.complete(
             record.identity.operation_id,

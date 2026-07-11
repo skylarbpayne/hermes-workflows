@@ -30,7 +30,7 @@ Adapters are obtained through the FND-RT process-local service registry at servi
 - `lookup_receipt(operation_id)`
 - `perform(operation_id, canonical_input)`
 
-The coordinator always queries the adapter receipt before performing the operation. This closes the recovery window where the external system accepted the operation but the local receipt transaction did not commit, provided the external adapter can look up the stable operation ID.
+The coordinator always queries the adapter receipt before performing the operation. This closes the recovery window where the external system accepted the operation but the local receipt transaction did not commit, provided the external adapter can look up the stable operation ID. A receipt may omit `operation_id`; if it includes one, it must exactly match the requested operation or the coordinator rejects it before durable completion.
 
 ## Crash windows
 
