@@ -97,13 +97,18 @@ def _mapping_key_contains_registry_or_cycle(value: object, *, active_ids: set[in
             for field in fields(cast(Any, value)):
                 if _mapping_key_contains_registry_or_cycle(getattr(value, field.name), active_ids=active_ids):
                     cycle_found = True
-        elif is_mapping:
+        if is_mapping:
             for key, item in cast(Mapping[object, object], value).items():
                 if _mapping_key_contains_registry_or_cycle(key, active_ids=active_ids):
                     cycle_found = True
                 if _mapping_key_contains_registry_or_cycle(item, active_ids=active_ids):
                     cycle_found = True
-        else:
+        if is_sequence:
+            sequence = cast(Sequence[object], value)
+            for index in range(len(sequence)):
+                if _mapping_key_contains_registry_or_cycle(sequence[index], active_ids=active_ids):
+                    cycle_found = True
+        if is_set:
             for item in cast(Any, value):
                 if _mapping_key_contains_registry_or_cycle(item, active_ids=active_ids):
                     cycle_found = True

@@ -4,6 +4,7 @@ import json
 import pickle
 from collections.abc import Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass
+from typing import overload
 
 import pytest
 
@@ -117,6 +118,119 @@ class HashableCycleDataclass:
 
     def __hash__(self) -> int:
         return id(self)
+
+
+@dataclass(eq=False)
+class HashableDataclassMapping(Mapping[object, object]):
+    label: str
+
+    def __post_init__(self) -> None:
+        self._items: tuple[tuple[object, object], ...] = ()
+
+    def hide(self, *items: tuple[object, object]) -> None:
+        self._items = items
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __str__(self) -> str:
+        for _, value in self._items:
+            if isinstance(value, IntegrationOwnedRuntimeServices):
+                return value.marker
+        return self.label
+
+    def __getitem__(self, key: object) -> object:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[object]:
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def items(self):  # type: ignore[override]
+        return self._items
+
+
+@dataclass(eq=False)
+class HashableDataclassSequence(Sequence[object]):
+    label: str
+
+    def __post_init__(self) -> None:
+        self._items: tuple[object, ...] = ()
+
+    def hide(self, *items: object) -> None:
+        self._items = items
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    @overload
+    def __getitem__(self, index: int) -> object: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[object]: ...
+
+    def __getitem__(self, index: int | slice) -> object | Sequence[object]:
+        return self._items[index]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+@dataclass(eq=False)
+class HashableDataclassSet(Set[object]):
+    label: str
+
+    def __post_init__(self) -> None:
+        self._items: tuple[object, ...] = ()
+
+    def hide(self, *items: object) -> None:
+        self._items = items
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __contains__(self, item: object) -> bool:
+        return any(candidate is item for candidate in self._items)
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+class HashableMappingSequence(Mapping[object, object], Sequence[object]):
+    def __init__(self, registry: IntegrationOwnedRuntimeServices):
+        self._mapping_items = (("safe", "value"), ("also-safe", "value"))
+        self._sequence_items = (self, registry)
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __str__(self) -> str:
+        return self._sequence_items[1].marker
+
+    def __getitem__(self, key):  # type: ignore[override]
+        if isinstance(key, int):
+            return self._sequence_items[key]
+        for candidate, value in self._mapping_items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[object]:
+        return (key for key, _ in self._mapping_items)
+
+    def __len__(self) -> int:
+        return len(self._mapping_items)
+
+    def items(self):  # type: ignore[override]
+        return self._mapping_items
 
 
 def test_runtime_services_resolve_recording_object_by_identity():
@@ -322,6 +436,55 @@ def test_safe_mapping_keys_preserve_string_conversion_compatibility():
     payload = {7: "integer", ("safe", 1): "tuple"}
 
     assert to_json_value(payload) == {"7": "integer", "('safe', 1)": "tuple"}
+
+
+def _overlapping_shape_key(shape: str, registry: RuntimeOnlyServiceRegistry) -> object:
+    if shape == "mapping":
+        value = HashableDataclassMapping("safe dataclass field")
+        value.hide(("self", value), ("registry", registry))
+        return value
+    if shape == "sequence":
+        value = HashableDataclassSequence("safe dataclass field")
+        value.hide(value, registry)
+        return value
+    if shape == "set":
+        value = HashableDataclassSet("safe dataclass field")
+        value.hide(value, registry)
+        return value
+    if shape == "mapping-sequence":
+        assert isinstance(registry, IntegrationOwnedRuntimeServices)
+        return HashableMappingSequence(registry)
+    raise AssertionError(f"unknown shape: {shape}")
+
+
+@pytest.mark.parametrize("shape", ["mapping", "sequence", "set", "mapping-sequence"])
+def test_overlapping_dataclass_container_keys_traverse_every_applicable_shape(tmp_path, shape):
+    db_path = tmp_path / "workflow.sqlite"
+    secret = f"overlapping-{shape}-registry-secret-must-not-persist"
+    registry = IntegrationOwnedRuntimeServices(marker=secret)
+    payload = {_overlapping_shape_key(shape, registry): "safe value"}
+
+    for serialize in (
+        to_json_value,
+        JsonCodec.dumps,
+        StatusProjectionJsonCodec.dumps,
+        lambda value: JsonArtifact("overlapping key", value),
+    ):
+        with pytest.raises(TypeError, match="process-local"):
+            serialize(payload)
+
+    workflow_id = f"wf_overlapping_{shape}_registry_mapping_key"
+    engine = WorkflowEngine(db_path, runtime_services=registry)
+    with pytest.raises(TypeError, match="process-local"):
+        engine.start(
+            runtime_service_contract_workflow,
+            {"value": payload},
+            workflow_id=workflow_id,
+        )
+
+    assert secret not in db_path.read_bytes().decode("utf-8", errors="ignore")
+    with pytest.raises(KeyError, match="unknown workflow_id"):
+        engine.events(workflow_id)
 
 
 def _cyclic_key_with_registry(shape: str, registry: RuntimeOnlyServiceRegistry) -> object:
