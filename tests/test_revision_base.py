@@ -154,13 +154,17 @@ def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
         nonlocal replace_attempts
         replace_attempts += 1
         if replace_attempts == 1:
-            raise OSError("simulated persistence failure")
+            raise OSError("SECRET_PERSIST_PATH:" + "x" * 10_000)
         return real_replace(source, destination)
 
     monkeypatch.setattr("hermes_workflows.revision.os.replace", fail_first_replace)
 
-    with pytest.raises(OSError, match="simulated persistence failure"):
+    with pytest.raises(RevisionError) as caught:
         ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+
+    assert str(caught.value) == "revision ledger persistence failed"
+    assert "SECRET_PERSIST_PATH" not in str(caught.value)
+    assert len(str(caught.value).encode("utf-8")) < 128
 
     assert ledger.revisions("wf_revision") == ()
     assert not path.exists()
@@ -171,6 +175,24 @@ def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
     assert ledger.revisions("wf_revision") == (retried,)
     assert RevisionLedger(path).revisions("wf_revision") == (retried,)
     assert replace_attempts == 2
+
+
+def test_stale_writer_cannot_overwrite_a_conflicting_durable_slot(tmp_path):
+    path = tmp_path / "revisions.json"
+    first = RevisionLedger(path)
+    stale = RevisionLedger(path)
+
+    durable = first.record_output(
+        "wf_revision", 1, Draft("First writer", 1), value_type=Draft
+    )
+
+    with pytest.raises(RevisionConflictError, match="already has a different revision"):
+        stale.record_output(
+            "wf_revision", 1, Draft("Stale writer", 2), value_type=Draft
+        )
+
+    assert RevisionLedger(path).revisions("wf_revision") == (durable,)
+    assert stale.revisions("wf_revision") == (durable,)
 
 
 @pytest.mark.parametrize(

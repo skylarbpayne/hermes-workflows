@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -275,27 +276,47 @@ class RevisionLedger:
         return matches[-1] if matches else None
 
     def _append_or_existing(self, record: RevisionRecordV1) -> RevisionRecordV1:
-        for existing in self._records:
-            same_slot = (
-                existing.workflow_id == record.workflow_id
-                and existing.attempt_number == record.attempt_number
-                and existing.kind == record.kind
-            )
-            if same_slot and existing.revision_id != record.revision_id:
-                raise RevisionConflictError(
-                    f"{record.kind} slot for attempt {record.attempt_number} already has a different revision"
-                )
-            if existing.revision_id != record.revision_id:
-                continue
-            if existing.to_dict(include_value=True) != record.to_dict(include_value=True):
-                raise RevisionConflictError(
-                    f"revision_id {record.revision_id} already exists with different content"
-                )
-            return replace(existing, value=record.value)
-        records = [*self._records, record]
-        self._persist(records)
-        self._records = records
-        return record
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+b") as lock:
+                os.fchmod(lock.fileno(), 0o600)
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                durable_records = self._load()
+                self._records = durable_records
+                records_after = durable_records
+                for existing in durable_records:
+                    same_slot = (
+                        existing.workflow_id == record.workflow_id
+                        and existing.attempt_number == record.attempt_number
+                        and existing.kind == record.kind
+                    )
+                    if same_slot and existing.revision_id != record.revision_id:
+                        raise RevisionConflictError(
+                            f"{record.kind} slot for attempt {record.attempt_number} already has a different revision"
+                        )
+                    if existing.revision_id != record.revision_id:
+                        continue
+                    if existing.to_dict(include_value=True) != record.to_dict(
+                        include_value=True
+                    ):
+                        raise RevisionConflictError(
+                            f"revision_id {record.revision_id} already exists with different content"
+                        )
+                    result = replace(existing, value=record.value)
+                    break
+                else:
+                    records_after = [*durable_records, record]
+                    _validate_lineage(records_after)
+                    self._persist(records_after)
+                    result = record
+        except RevisionError:
+            raise
+        except OSError as exc:
+            raise RevisionError("revision ledger persistence failed") from exc
+
+        self._records = records_after
+        return result
 
     def _load(self) -> list[RevisionRecordV1]:
         if not self.path.exists():
@@ -335,7 +356,6 @@ class RevisionLedger:
             "revisions": [record.to_dict(include_value=True) for record in records],
         }
         encoded = _canonical_json(payload) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
         try:
             with temporary.open("w", encoding="utf-8") as handle:
@@ -344,9 +364,13 @@ class RevisionLedger:
                 os.fsync(handle.fileno())
             os.chmod(temporary, 0o600)
             os.replace(temporary, self.path)
+        except OSError as exc:
+            raise RevisionError("revision ledger persistence failed") from exc
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def canonical_value_hash(value: object) -> str:
