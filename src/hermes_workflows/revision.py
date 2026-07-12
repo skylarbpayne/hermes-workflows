@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
@@ -533,7 +534,25 @@ def _safe_revision_type_hints(value_type: Any) -> dict[str, Any]:
     try:
         return get_type_hints(value_type, include_extras=True)
     except Exception:
-        return dict(getattr(value_type, "__annotations__", {}) or {})
+        annotations = dict(getattr(value_type, "__annotations__", {}) or {})
+        module = sys.modules.get(getattr(value_type, "__module__", ""))
+        globalns = vars(module) if module is not None else {}
+        localns = dict(vars(value_type)) if isinstance(value_type, type) else {}
+        return {
+            name: _resolve_revision_fallback_annotation(annotation, globalns, localns)
+            for name, annotation in annotations.items()
+        }
+
+
+def _resolve_revision_fallback_annotation(
+    annotation: Any, globalns: dict[str, Any], localns: dict[str, Any]
+) -> Any:
+    if not isinstance(annotation, str):
+        return annotation
+    try:
+        return eval(annotation, globalns, localns)
+    except Exception:
+        return annotation
 
 
 def _is_revision_typed_dict_type(value_type: Any) -> bool:
