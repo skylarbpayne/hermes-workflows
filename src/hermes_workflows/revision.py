@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -17,6 +18,7 @@ from .types import JsonValue, to_json_value
 SCHEMA_VERSION = 1
 MAX_DIFF_DESCRIPTOR_BYTES = 512
 REVISION_SERVICE_ID = "revision.service"
+_MAX_PERSISTED_INTEGER_DIGITS = 4300
 
 
 class RevisionError(ValueError):
@@ -283,8 +285,11 @@ class RevisionLedger:
         if not self.path.exists():
             return []
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            payload = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                parse_int=_parse_persisted_integer,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise RevisionError("revision ledger must contain valid UTF-8 JSON") from exc
         if not isinstance(payload, dict) or set(payload) != {"schema_version", "revisions"}:
             raise RevisionError("revision ledger has an invalid top-level shape")
@@ -343,12 +348,13 @@ def _coerce_value(value: object, value_type: Any) -> Any:
             if unknown:
                 raise TypeError(f"unknown revision fields: {sorted(unknown)}")
         coerced = coerce_workflow_input(value, value_type)
-        to_json_value(coerced)
-        return coerced
+        json_value = to_json_value(coerced)
     except (TypeError, ValueError) as exc:
         field_names = getattr(value_type, "__dataclass_fields__", {})
         fields_text = ", ".join(field_names) if field_names else getattr(value_type, "__name__", str(value_type))
         raise RevisionValueError(f"invalid revision value for {fields_text}: {exc}") from exc
+    _validate_finite_json_numbers(json_value)
+    return coerced
 
 
 def _coerce_exact_value(value: object, value_type: Any, *, expected_sha256: str) -> Any:
@@ -592,6 +598,24 @@ def _canonical_json(value: object) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _parse_persisted_integer(value: str) -> int:
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > _MAX_PERSISTED_INTEGER_DIGITS:
+        raise ValueError("persisted JSON integer exceeds the supported digit limit")
+    return int(value)
+
+
+def _validate_finite_json_numbers(value: JsonValue) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise RevisionValueError("revision value must contain only finite JSON numbers")
+    if isinstance(value, dict):
+        for nested in value.values():
+            _validate_finite_json_numbers(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _validate_finite_json_numbers(nested)
 
 
 def _validate_attempt_number(value: object) -> int:

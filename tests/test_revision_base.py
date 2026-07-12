@@ -35,6 +35,11 @@ class DriftedDraft:
     format: str = "markdown"
 
 
+@dataclass(frozen=True)
+class FloatDraft:
+    score: float
+
+
 def test_valid_edit_is_schema_coerced_and_becomes_exact_next_base(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     original = ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
@@ -332,6 +337,60 @@ def test_restart_normalizes_nonfinite_persisted_values_to_revision_error(
         RevisionLedger(path)
 
     assert str(caught.value) == "revision ledger contains invalid persisted revision data"
+
+
+def test_restart_normalizes_huge_json_integer_parse_failure_to_revision_error(tmp_path):
+    path = tmp_path / "revisions.json"
+    huge_version = "9" * 5000
+    path.write_text(
+        '{"schema_version":' + huge_version + ',"revisions":[]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RevisionError) as caught:
+        RevisionLedger(path)
+
+    assert str(caught.value) == "revision ledger must contain valid UTF-8 JSON"
+    assert huge_version not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type"),
+    [
+        (float("nan"), float),
+        ({"score": float("inf")}, FloatDraft),
+    ],
+)
+def test_generated_output_rejects_nonfinite_values_with_bounded_revision_error(
+    tmp_path, value, value_type
+):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output("wf_revision", 1, value, value_type=value_type)
+
+    assert str(caught.value) == "revision value must contain only finite JSON numbers"
+    assert ledger.revisions("wf_revision") == ()
+
+
+@pytest.mark.parametrize(
+    ("initial", "edit", "value_type"),
+    [
+        (1.0, float("inf"), float),
+        (FloatDraft(1.0), {"score": float("nan")}, FloatDraft),
+    ],
+)
+def test_schema_coerced_edit_rejects_nonfinite_values_with_bounded_revision_error(
+    tmp_path, initial, edit, value_type
+):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    original = ledger.record_output("wf_revision", 1, initial, value_type=value_type)
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_edit("wf_revision", 1, edit, value_type=value_type)
+
+    assert str(caught.value) == "revision value must contain only finite JSON numbers"
+    assert ledger.revisions("wf_revision") == (original,)
 
 
 def test_restart_rejects_duplicate_workflow_attempt_kind_slot(tmp_path):
