@@ -454,15 +454,35 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
 
     _reject_unknown_dataclass_fields(value, value_type)
 
-    if is_dataclass(value_type) and isinstance(value_type, type) and isinstance(value, Mapping):
+    if is_dataclass(value_type) and isinstance(value_type, type):
         type_hints = _safe_revision_type_hints(value_type)
-        prepared = dict(value)
+        if isinstance(value, Mapping):
+            prepared = dict(value)
+        elif isinstance(value, value_type):
+            prepared = {item.name: getattr(value, item.name) for item in fields(value_type)}
+        else:
+            return coerce_workflow_input(value, value_type)
         for item in fields(value_type):
             if item.name in prepared:
                 prepared[item.name] = _coerce_revision_value(
                     prepared[item.name], type_hints.get(item.name, item.type)
                 )
         return coerce_workflow_input(prepared, value_type)
+
+    if _is_revision_typed_dict_type(value_type):
+        if not isinstance(value, Mapping):
+            return coerce_workflow_input(value, value_type)
+        type_hints = _safe_revision_type_hints(value_type)
+        prepared = dict(value)
+        if any(key not in type_hints for key in prepared):
+            raise RevisionValueError("invalid revision value: unknown revision fields")
+        required_keys = set(getattr(value_type, "__required_keys__", ()))
+        if required_keys - set(prepared):
+            raise TypeError("revision value is missing required fields")
+        return {
+            key: _coerce_revision_value(item, type_hints[key])
+            for key, item in prepared.items()
+        }
 
     if origin in (list, Sequence) and isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray)
@@ -504,11 +524,19 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     return coerce_workflow_input(value, value_type)
 
 
-def _safe_revision_type_hints(value_type: type[Any]) -> dict[str, Any]:
+def _safe_revision_type_hints(value_type: Any) -> dict[str, Any]:
     try:
         return get_type_hints(value_type, include_extras=True)
     except Exception:
         return dict(getattr(value_type, "__annotations__", {}) or {})
+
+
+def _is_revision_typed_dict_type(value_type: Any) -> bool:
+    return (
+        isinstance(value_type, type)
+        and hasattr(value_type, "__required_keys__")
+        and hasattr(value_type, "__optional_keys__")
+    )
 
 
 def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:

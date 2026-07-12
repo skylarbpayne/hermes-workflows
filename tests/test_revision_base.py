@@ -6,7 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Optional, Union
+from typing import Annotated, Optional, TypedDict, Union
 
 import pytest
 
@@ -67,6 +67,11 @@ class NarrowDraft:
 class ExpandedDraft:
     title: str
     score: int = 0
+
+
+class TypedDraft(TypedDict):
+    title: str
+    score: int
 
 
 def _test_stable_id(prefix, payload):
@@ -140,6 +145,73 @@ def test_invalid_edit_is_rejected_without_mutating_lineage(tmp_path):
         )
 
     assert ledger.revisions("wf_revision") == (original,)
+
+
+def test_invalid_dataclass_instance_is_rejected_without_mutating_lineage(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError, match="score"):
+        ledger.record_output(
+            "wf_dataclass_instance_revision",
+            1,
+            Draft("Bad", "not-an-int"),  # type: ignore[arg-type]
+            value_type=Draft,
+        )
+
+    assert ledger.revisions("wf_dataclass_instance_revision") == ()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            {"title": "Bad", "score": "not-an-int"},
+            "invalid revision value for TypedDraft",
+        ),
+        (
+            {"title": "Bad", "score": 2, "secret_extra": True},
+            "invalid revision value: unknown revision fields",
+        ),
+        ({"title": "Missing score"}, "invalid revision value for TypedDraft"),
+    ],
+)
+def test_invalid_typed_dict_is_rejected_without_mutating_lineage(
+    tmp_path, value, expected
+):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output("wf_typed_dict_revision", 1, value, value_type=TypedDraft)
+
+    assert str(caught.value) == expected
+    assert "secret_extra" not in str(caught.value)
+    assert ledger.revisions("wf_typed_dict_revision") == ()
+
+
+def test_valid_typed_dict_edit_restarts_into_exact_selected_base(tmp_path):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output(
+        "wf_typed_dict_revision",
+        1,
+        {"title": "Draft", "score": "1"},
+        value_type=TypedDraft,
+    )
+    edited = ledger.record_edit(
+        "wf_typed_dict_revision",
+        1,
+        {"title": "Human edit", "score": "2"},
+        value_type=TypedDraft,
+    )
+
+    restarted = RevisionLedger(path)
+    selected = restarted.select_next_base(
+        "wf_typed_dict_revision", 2, value_type=TypedDraft
+    )
+
+    assert selected.value == {"title": "Human edit", "score": 2}
+    assert selected.value_sha256 == edited.value_sha256
+    assert selected.base_revision_id == edited.revision_id
 
 
 def test_persistence_failure_is_not_retained_as_an_idempotent_replay(

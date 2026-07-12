@@ -8,6 +8,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +21,11 @@ from hermes_workflows.revision import RevisionError, RevisionLedger  # noqa: E40
 
 @dataclass(frozen=True)
 class Draft:
+    title: str
+    score: int
+
+
+class TypedDraft(TypedDict):
     title: str
     score: int
 
@@ -219,6 +225,72 @@ def _verify_unfinalized_base_is_rejected(directory: Path) -> dict[str, str]:
     raise RuntimeError("restart accepted a descendant base derived from an unfinalized base")
 
 
+def _verify_typed_schema_validation(directory: Path) -> dict[str, object]:
+    dataclass_path = directory / "invalid-dataclass-instance.json"
+    dataclass_ledger = RevisionLedger(dataclass_path)
+    try:
+        dataclass_ledger.record_output(
+            "wf_revision_invalid_dataclass",
+            1,
+            Draft("Bad", "not-an-int"),  # type: ignore[arg-type]
+            value_type=Draft,
+        )
+    except RevisionError as exc:
+        dataclass_rejection = str(exc)
+    else:
+        raise RuntimeError("typed revision accepted an invalid dataclass instance")
+    if dataclass_ledger.revisions("wf_revision_invalid_dataclass") or dataclass_path.exists():
+        raise RuntimeError("invalid dataclass instance appended revision lineage")
+
+    typed_dict_path = directory / "invalid-typed-dict.json"
+    typed_dict_ledger = RevisionLedger(typed_dict_path)
+    typed_dict_rejections = []
+    for value in (
+        {"title": "Bad", "score": "not-an-int"},
+        {"title": "Bad", "score": 2, "secret_extra": True},
+    ):
+        try:
+            typed_dict_ledger.record_output(
+                "wf_revision_invalid_typed_dict", 1, value, value_type=TypedDraft
+            )
+        except RevisionError as exc:
+            typed_dict_rejections.append(str(exc))
+            continue
+        raise RuntimeError("typed revision accepted an invalid TypedDict value")
+    if typed_dict_ledger.revisions("wf_revision_invalid_typed_dict") or typed_dict_path.exists():
+        raise RuntimeError("invalid TypedDict value appended revision lineage")
+
+    valid_path = directory / "valid-typed-dict.json"
+    valid = RevisionLedger(valid_path)
+    valid.record_output(
+        "wf_revision_valid_typed_dict",
+        1,
+        {"title": "Draft", "score": "1"},
+        value_type=TypedDraft,
+    )
+    edited = valid.record_edit(
+        "wf_revision_valid_typed_dict",
+        1,
+        {"title": "Human edit", "score": "2"},
+        value_type=TypedDraft,
+    )
+    restarted = RevisionLedger(valid_path)
+    selected = restarted.select_next_base(
+        "wf_revision_valid_typed_dict", 2, value_type=TypedDraft
+    )
+    if selected.value != {"title": "Human edit", "score": 2}:
+        raise RuntimeError("valid TypedDict did not restart with coerced values")
+    if selected.value_sha256 != edited.value_sha256:
+        raise RuntimeError("valid TypedDict restart did not preserve the exact edited hash")
+
+    return {
+        "dataclass_rejection": dataclass_rejection,
+        "typed_dict_rejections": typed_dict_rejections,
+        "typed_dict_edited_hash": edited.value_sha256,
+        "typed_dict_base_hash": selected.value_sha256,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -247,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         schema_rejections = _verify_invalid_schema_versions_are_rejected(Path(temporary))
         duplicate_slot_rejection = _verify_duplicate_slot_is_rejected(Path(temporary))
         unfinalized_base_rejections = _verify_unfinalized_base_is_rejected(Path(temporary))
+        typed_schema_validation = _verify_typed_schema_validation(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -267,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema_rejections": schema_rejections,
         "duplicate_slot_rejection": duplicate_slot_rejection,
         "unfinalized_base_rejections": unfinalized_base_rejections,
+        "typed_schema_validation": typed_schema_validation,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
