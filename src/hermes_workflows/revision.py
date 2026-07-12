@@ -16,6 +16,7 @@ from typing import (
     Annotated,
     Any,
     Callable,
+    ForwardRef,
     Literal,
     Protocol,
     Union,
@@ -534,29 +535,54 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
 
 def _safe_revision_type_hints(value_type: Any) -> dict[str, Any]:
     try:
-        return get_type_hints(value_type, include_extras=True)
+        resolved = get_type_hints(value_type, include_extras=True)
+        if not any(_contains_revision_forward_ref(value) for value in resolved.values()):
+            return resolved
     except Exception:
-        annotations = dict(getattr(value_type, "__annotations__", {}) or {})
-        module = sys.modules.get(getattr(value_type, "__module__", ""))
-        globalns = vars(module) if module is not None else {}
-        localns = dict(vars(value_type)) if isinstance(value_type, type) else {}
-        return {
-            name: _resolve_revision_fallback_annotation(annotation, globalns, localns)
-            for name, annotation in annotations.items()
-        }
+        pass
+    annotations = dict(getattr(value_type, "__annotations__", {}) or {})
+    module = sys.modules.get(getattr(value_type, "__module__", ""))
+    globalns = vars(module) if module is not None else {}
+    localns = dict(vars(value_type)) if isinstance(value_type, type) else {}
+    return {
+        name: _resolve_revision_fallback_annotation(annotation, globalns, localns)
+        for name, annotation in annotations.items()
+    }
+
+
+def _contains_revision_forward_ref(annotation: Any) -> bool:
+    if isinstance(annotation, (str, ForwardRef)):
+        return True
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return False
+    if origin is Annotated:
+        return bool(args) and _contains_revision_forward_ref(args[0])
+    return any(_contains_revision_forward_ref(item) for item in args)
 
 
 def _resolve_revision_fallback_annotation(
     annotation: Any, globalns: dict[str, Any], localns: dict[str, Any]
 ) -> Any:
+    if isinstance(annotation, ForwardRef):
+        annotation = annotation.__forward_arg__
     if not isinstance(annotation, str):
         return annotation
     expression = ast.parse(annotation, mode="eval").body
-    return _eval_revision_fallback_annotation(expression, {**globalns, **localns})
+    return _eval_revision_fallback_annotation(
+        expression,
+        {**globalns, **localns},
+        resolve_forward_ref=True,
+    )
 
 
 def _eval_revision_fallback_annotation(
-    node: ast.expr, namespace: dict[str, Any], *, allow_union: bool = True
+    node: ast.expr,
+    namespace: dict[str, Any],
+    *,
+    allow_union: bool = True,
+    resolve_forward_ref: bool = False,
 ) -> Any:
     if isinstance(node, ast.Name):
         if node.id in namespace:
@@ -573,12 +599,22 @@ def _eval_revision_fallback_annotation(
         )
 
     if isinstance(node, ast.Constant):
+        if resolve_forward_ref and isinstance(node.value, str):
+            expression = ast.parse(node.value, mode="eval").body
+            return _eval_revision_fallback_annotation(
+                expression,
+                namespace,
+                resolve_forward_ref=True,
+            )
         return node.value
 
     if isinstance(node, ast.Tuple):
         return tuple(
             _eval_revision_fallback_annotation(
-                item, namespace, allow_union=allow_union
+                item,
+                namespace,
+                allow_union=allow_union,
+                resolve_forward_ref=resolve_forward_ref,
             )
             for item in node.elts
         )
@@ -586,7 +622,10 @@ def _eval_revision_fallback_annotation(
     if isinstance(node, ast.List):
         return [
             _eval_revision_fallback_annotation(
-                item, namespace, allow_union=allow_union
+                item,
+                namespace,
+                allow_union=allow_union,
+                resolve_forward_ref=resolve_forward_ref,
             )
             for item in node.elts
         ]
@@ -604,19 +643,36 @@ def _eval_revision_fallback_annotation(
         slice_node = node.slice
         if type(slice_node).__name__ == "Index":
             slice_node = getattr(slice_node, "value")
-        argument = _eval_revision_fallback_annotation(
-            slice_node,
-            namespace,
-            allow_union=target is not Literal,
-        )
+        if target is Annotated and isinstance(slice_node, ast.Tuple):
+            argument = tuple(
+                _eval_revision_fallback_annotation(
+                    item,
+                    namespace,
+                    resolve_forward_ref=index == 0,
+                )
+                for index, item in enumerate(slice_node.elts)
+            )
+        else:
+            argument = _eval_revision_fallback_annotation(
+                slice_node,
+                namespace,
+                allow_union=target is not Literal,
+                resolve_forward_ref=target is not Literal,
+            )
         return target[argument]
 
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
         left = _eval_revision_fallback_annotation(
-            node.left, namespace, allow_union=allow_union
+            node.left,
+            namespace,
+            allow_union=allow_union,
+            resolve_forward_ref=allow_union,
         )
         right = _eval_revision_fallback_annotation(
-            node.right, namespace, allow_union=allow_union
+            node.right,
+            namespace,
+            allow_union=allow_union,
+            resolve_forward_ref=allow_union,
         )
         if not allow_union:
             if type(left) is not int or type(right) is not int:

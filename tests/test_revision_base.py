@@ -110,6 +110,20 @@ class PostponedAnnotatedPep604LiteralDraft:
 
 
 @dataclass(frozen=True)
+class PostponedQuotedPep604LiteralDraft:
+    choice: "Literal[1] | None"
+
+
+@dataclass(frozen=True)
+class PostponedNestedQuotedPep604LiteralDraft:
+    choices: list["Literal[1] | None"]
+
+
+class PostponedQuotedPep604LiteralTypedDraft(TypedDict):
+    choice: "Literal[1] | None"
+
+
+@dataclass(frozen=True)
 class PostponedBitwiseLiteralDraft:
     choice: object
     note: str | None = None
@@ -388,6 +402,9 @@ def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path)
     [
         ({"choices": [True]}, PostponedNestedPep604LiteralDraft),
         ({"choice": True}, PostponedAnnotatedPep604LiteralDraft),
+        ({"choice": True}, PostponedQuotedPep604LiteralDraft),
+        ({"choices": [True]}, PostponedNestedQuotedPep604LiteralDraft),
+        ({"choice": True}, PostponedQuotedPep604LiteralTypedDraft),
     ],
 )
 def test_nested_postponed_pep604_literal_unions_preserve_identity_on_python39(
