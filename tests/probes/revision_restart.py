@@ -128,14 +128,13 @@ def _verify_invalid_schema_versions_are_rejected(directory: Path) -> list[str]:
 
 def _verify_duplicate_slot_is_rejected(directory: Path) -> str:
     path = directory / "duplicate-slot.json"
+    workflow_id = "SENSITIVE_" + "x" * 10_000
     ledger = RevisionLedger(path)
-    ledger.record_output("wf_revision_duplicate", 1, Draft("first", 1), value_type=Draft)
+    ledger.record_output(workflow_id, 1, Draft("first", 1), value_type=Draft)
 
     conflicting_path = directory / "duplicate-slot-conflict.json"
     conflicting = RevisionLedger(conflicting_path)
-    conflicting.record_output(
-        "wf_revision_duplicate", 1, Draft("second", 2), value_type=Draft
-    )
+    conflicting.record_output(workflow_id, 1, Draft("second", 2), value_type=Draft)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     conflicting_payload = json.loads(conflicting_path.read_text(encoding="utf-8"))
@@ -146,12 +145,11 @@ def _verify_duplicate_slot_is_rejected(directory: Path) -> str:
         RevisionLedger(path)
     except RevisionError as exc:
         message = str(exc)
-        expected = (
-            "duplicate revision slot: "
-            "workflow=wf_revision_duplicate attempt=1 kind=output"
-        )
+        expected = "duplicate revision slot"
         if message != expected:
             raise RuntimeError(f"unexpected duplicate-slot rejection: {message}") from exc
+        if len(message.encode("utf-8")) > 256 or "SENSITIVE" in message:
+            raise RuntimeError("duplicate-slot rejection was unbounded or leaked workflow data")
         return message
     raise RuntimeError("restart accepted a duplicate workflow/attempt/kind slot")
 

@@ -763,11 +763,35 @@ def test_restart_rejects_duplicate_workflow_attempt_kind_slot(tmp_path):
     payload["revisions"].append(second_payload["revisions"][0])
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(
-        RevisionError,
-        match="duplicate revision slot: workflow=wf_revision attempt=1 kind=output",
-    ):
+    with pytest.raises(RevisionError, match="^duplicate revision slot$"):
         RevisionLedger(path)
+
+
+def test_duplicate_slot_restart_error_is_bounded_deterministic_and_nonleaking(tmp_path):
+    workflow_id = "SENSITIVE_" + "x" * 10_000
+    messages = []
+
+    for index in range(2):
+        path = tmp_path / f"revisions-{index}.json"
+        first = RevisionLedger(path)
+        first.record_output(workflow_id, 1, Draft("first", 1), value_type=Draft)
+
+        second_path = tmp_path / f"second-{index}.json"
+        second = RevisionLedger(second_path)
+        second.record_output(workflow_id, 1, Draft("second", 2), value_type=Draft)
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        second_payload = json.loads(second_path.read_text(encoding="utf-8"))
+        payload["revisions"].append(second_payload["revisions"][0])
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(RevisionError) as caught:
+            RevisionLedger(path)
+        messages.append(str(caught.value))
+
+    assert messages == ["duplicate revision slot", "duplicate revision slot"]
+    assert len(messages[0].encode("utf-8")) <= 256
+    assert "SENSITIVE" not in messages[0]
 
 
 def test_revision_projection_is_bounded_and_nonleaking(tmp_path):

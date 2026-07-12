@@ -659,10 +659,7 @@ def _validate_lineage(records: list[RevisionRecordV1]) -> None:
     for record in records:
         slot = (record.workflow_id, record.attempt_number, record.kind)
         if slot in seen_slots:
-            raise RevisionError(
-                "duplicate revision slot: "
-                f"workflow={record.workflow_id} attempt={record.attempt_number} kind={record.kind}"
-            )
+            raise RevisionError("duplicate revision slot")
         if record.revision_id in seen:
             raise RevisionError(f"duplicate revision_id: {record.revision_id}")
         if record.parent_revision_id is not None:
