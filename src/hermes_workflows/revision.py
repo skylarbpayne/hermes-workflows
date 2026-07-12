@@ -429,6 +429,11 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     if origin is Annotated:
         return _coerce_revision_value(value, args[0])
 
+    if origin is Literal:
+        if any(type(value) is type(option) and value == option for option in args):
+            return value
+        raise TypeError("revision value does not match any declared literal")
+
     if origin is Union or (union_type is not None and origin is union_type):
         if value is None and type(None) in args:
             return None

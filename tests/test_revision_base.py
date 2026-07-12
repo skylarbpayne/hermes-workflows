@@ -6,7 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, TypedDict, Union
 
 import pytest
 
@@ -72,6 +72,20 @@ class ExpandedDraft:
 class TypedDraft(TypedDict):
     title: str
     score: int
+
+
+@dataclass(frozen=True)
+class LiteralDraft:
+    choice: Literal[1, "one"]
+
+
+class LiteralTypedDraft(TypedDict):
+    choice: Literal[1, "one"]
+
+
+@dataclass(frozen=True)
+class BoolLiteralDraft:
+    choice: Literal[True]
 
 
 def _test_stable_id(prefix, payload):
@@ -212,6 +226,65 @@ def test_valid_typed_dict_edit_restarts_into_exact_selected_base(tmp_path):
     assert selected.value == {"title": "Human edit", "score": 2}
     assert selected.value_sha256 == edited.value_sha256
     assert selected.base_revision_id == edited.revision_id
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type"),
+    [
+        ({"choice": True}, LiteralDraft),
+        (LiteralDraft(True), LiteralDraft),  # type: ignore[arg-type]
+        ({"choice": True}, LiteralTypedDraft),
+    ],
+)
+def test_literal_bool_int_identity_collisions_are_rejected_without_persistence(
+    tmp_path, value, value_type
+):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output("wf_literal_revision", 1, value, value_type=value_type)
+
+    assert ledger.revisions("wf_literal_revision") == ()
+    assert not (tmp_path / "revisions.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type", "expected"),
+    [
+        ({"choice": 1}, LiteralDraft, LiteralDraft(1)),
+        (LiteralDraft("one"), LiteralDraft, LiteralDraft("one")),
+        ({"choice": "one"}, LiteralTypedDraft, {"choice": "one"}),
+    ],
+)
+def test_valid_literal_values_preserve_value_and_type(tmp_path, value, value_type, expected):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    record = ledger.record_output(
+        "wf_valid_literal_revision", 1, value, value_type=value_type
+    )
+    actual_choice = (
+        record.value["choice"]
+        if isinstance(record.value, dict)
+        else record.value.choice
+    )
+    expected_choice = expected["choice"] if isinstance(expected, dict) else expected.choice
+
+    assert record.value == expected
+    assert type(actual_choice) is type(expected_choice)
+
+
+def test_literal_int_bool_identity_collision_is_rejected_in_reverse(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_bool_literal_revision",
+            1,
+            {"choice": 1},
+            value_type=BoolLiteralDraft,
+        )
+
+    assert ledger.revisions("wf_bool_literal_revision") == ()
 
 
 def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
