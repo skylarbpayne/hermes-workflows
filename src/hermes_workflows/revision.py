@@ -292,8 +292,9 @@ class RevisionLedger:
                     f"revision_id {record.revision_id} already exists with different content"
                 )
             return replace(existing, value=record.value)
-        self._records.append(record)
-        self._persist()
+        records = [*self._records, record]
+        self._persist(records)
+        self._records = records
         return record
 
     def _load(self) -> list[RevisionRecordV1]:
@@ -328,10 +329,10 @@ class RevisionLedger:
             ) from exc
         return records
 
-    def _persist(self) -> None:
+    def _persist(self, records: list[RevisionRecordV1]) -> None:
         payload = {
             "schema_version": SCHEMA_VERSION,
-            "revisions": [record.to_dict(include_value=True) for record in self._records],
+            "revisions": [record.to_dict(include_value=True) for record in records],
         }
         encoded = _canonical_json(payload) + "\n"
         self.path.parent.mkdir(parents=True, exist_ok=True)

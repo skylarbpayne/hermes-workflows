@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,6 +140,37 @@ def test_invalid_edit_is_rejected_without_mutating_lineage(tmp_path):
         )
 
     assert ledger.revisions("wf_revision") == (original,)
+
+
+def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    real_replace = os.replace
+    replace_attempts = 0
+
+    def fail_first_replace(source, destination):
+        nonlocal replace_attempts
+        replace_attempts += 1
+        if replace_attempts == 1:
+            raise OSError("simulated persistence failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("hermes_workflows.revision.os.replace", fail_first_replace)
+
+    with pytest.raises(OSError, match="simulated persistence failure"):
+        ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+
+    assert ledger.revisions("wf_revision") == ()
+    assert not path.exists()
+
+    retried = ledger.record_output(
+        "wf_revision", 1, Draft("Draft", 1), value_type=Draft
+    )
+    assert ledger.revisions("wf_revision") == (retried,)
+    assert RevisionLedger(path).revisions("wf_revision") == (retried,)
+    assert replace_attempts == 2
 
 
 @pytest.mark.parametrize(
