@@ -109,6 +109,24 @@ class RaisingAbsoluteInteger(int):
         raise self.error_type()
 
 
+class StatefulInteger(int):
+    state: dict[str, str]
+
+    def __new__(cls, value: int):
+        instance = super().__new__(cls, value)
+        instance.state = {"status": "original"}
+        return instance
+
+
+class StatefulFloat(float):
+    state: dict[str, str]
+
+    def __new__(cls, value: float):
+        instance = super().__new__(cls, value)
+        instance.state = {"status": "original"}
+        return instance
+
+
 def _cyclic_list() -> list[object]:
     value: list[object] = []
     value.append(value)
@@ -370,6 +388,37 @@ def test_normalized_json_object_keys_are_exact_builtin_strings():
     plain = validate_revision_action(
         {"action": "request_changes", "edited_output": {"body": "revised"}}
     )
+    assert result.idempotency_key == plain.idempotency_key
+
+
+@pytest.mark.parametrize(
+    ("numeric_subclass", "plain_value", "builtin_type"),
+    [
+        pytest.param(StatefulInteger(7), 7, int, id="integer-subclass"),
+        pytest.param(StatefulFloat(7.5), 7.5, float, id="float-subclass"),
+    ],
+)
+def test_numeric_subclasses_are_detached_exact_builtin_snapshots_with_stable_hashes(
+    numeric_subclass: object,
+    plain_value: object,
+    builtin_type: type,
+):
+    result = validate_revision_action(
+        {"action": "request_changes", "edited_output": {"score": numeric_subclass}}
+    )
+    plain = validate_revision_action(
+        {"action": "request_changes", "edited_output": {"score": plain_value}}
+    )
+
+    normalized_edit = result.normalized_payload["edited_output"]
+    assert isinstance(normalized_edit, Mapping)
+    normalized_number = normalized_edit["score"]
+    assert type(normalized_number) is builtin_type
+    assert normalized_number is not numeric_subclass
+    assert not hasattr(normalized_number, "state")
+    numeric_subclass.state["status"] = "mutated"  # type: ignore[attr-defined]
+    assert normalized_number == plain_value
+    assert result.normalized_payload_hash == plain.normalized_payload_hash
     assert result.idempotency_key == plain.idempotency_key
 
 

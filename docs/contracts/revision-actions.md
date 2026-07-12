@@ -26,7 +26,9 @@ on `approve` are rejected.
 The validator snapshots every mapping before reading fields. Custom mapping iteration
 and `items()` must expose the same unique string keys; an overridable `get()` is never
 trusted. Accepted string values and mapping keys are copied to exact built-in strings
-without invoking subclass overrides before whitespace checks or persistence. Edited JSON
+without invoking string subclass overrides before whitespace checks or persistence.
+Accepted numeric subclasses are copied to detached exact built-in integers or floats,
+without retaining subclass state in the normalized payload. Edited JSON
 rejects cycles, nesting beyond 64 levels, more than 10,000 values,
 strings or canonical payloads beyond 1,000,000 UTF-8 bytes, integers beyond 4,096
 decimal digits, and invalid Unicode scalar values. Every such failure is returned as a

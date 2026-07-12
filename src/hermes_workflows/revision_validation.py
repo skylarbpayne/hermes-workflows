@@ -219,11 +219,11 @@ def _normalize_json_value(
             raise ValueError(
                 f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
             )
-        return value
+        return int.__int__(value)
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("edited_output JSON numbers must be finite")
-        return value
+        return float.__float__(value)
     if isinstance(value, Mapping):
         identity = id(value)
         if identity in seen:
@@ -342,6 +342,12 @@ def _freeze_json_value(value: object) -> object:
         return _freeze_json_object(value)
     if isinstance(value, list):
         return tuple(_freeze_json_value(item) for item in value)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return int.__int__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
     return value
 
 
