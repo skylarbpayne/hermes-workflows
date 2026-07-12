@@ -177,7 +177,14 @@ class RevisionLedger:
         attempt_number = _validate_attempt_number(attempt_number)
         existing = self._latest(workflow_id, attempt_number, kinds=("base",))
         if existing is not None:
-            return replace(existing, value=_coerce_value(existing.value, value_type))
+            return replace(
+                existing,
+                value=_coerce_exact_value(
+                    existing.value,
+                    value_type,
+                    expected_sha256=existing.value_sha256,
+                ),
+            )
 
         previous_attempt = attempt_number - 1
         if previous_attempt < 1:
@@ -188,7 +195,11 @@ class RevisionLedger:
         if chosen is None:
             raise RevisionError("no prior output is available as the next revision base")
 
-        typed_value = _coerce_value(chosen.value, value_type)
+        typed_value = _coerce_exact_value(
+            chosen.value,
+            value_type,
+            expected_sha256=chosen.value_sha256,
+        )
         record = _make_record(
             workflow_id=workflow_id,
             attempt_number=attempt_number,
@@ -324,6 +335,13 @@ def _coerce_value(value: object, value_type: Any) -> Any:
         field_names = getattr(value_type, "__dataclass_fields__", {})
         fields_text = ", ".join(field_names) if field_names else getattr(value_type, "__name__", str(value_type))
         raise RevisionValueError(f"invalid revision value for {fields_text}: {exc}") from exc
+
+
+def _coerce_exact_value(value: object, value_type: Any, *, expected_sha256: str) -> Any:
+    coerced = _coerce_value(value, value_type)
+    if canonical_value_hash(coerced) != expected_sha256:
+        raise RevisionValueError("declared schema must preserve the exact revision value")
+    return coerced
 
 
 def _make_record(

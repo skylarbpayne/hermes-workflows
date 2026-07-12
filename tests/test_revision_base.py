@@ -28,6 +28,13 @@ class Draft:
     score: int
 
 
+@dataclass(frozen=True)
+class DriftedDraft:
+    title: str
+    score: int
+    format: str = "markdown"
+
+
 def test_valid_edit_is_schema_coerced_and_becomes_exact_next_base(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     original = ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
@@ -116,6 +123,28 @@ def test_attempt_parent_and_revision_ids_are_stable_across_restart(tmp_path):
     )
     assert output_v2.parent_revision_id == selected.revision_id
     assert output_v2.base_revision_id == selected.revision_id
+
+
+def test_schema_drift_cannot_change_exact_edited_revision_base(tmp_path):
+    path = tmp_path / "revisions.json"
+    first = RevisionLedger(path)
+    first.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    edited = first.record_edit("wf_revision", 1, Draft("Edited", 2), value_type=Draft)
+
+    drifted = RevisionLedger(path)
+    with pytest.raises(RevisionValueError, match="exact revision value"):
+        drifted.select_next_base("wf_revision", 2, value_type=DriftedDraft)
+    assert drifted.revisions("wf_revision") == tuple(first.revisions("wf_revision"))
+
+    restarted = RevisionLedger(path)
+    selected = restarted.select_next_base("wf_revision", 2, value_type=Draft)
+    assert selected.value_sha256 == edited.value_sha256
+    assert selected.base_revision_id == edited.revision_id
+    selected_drifted = RevisionLedger(path)
+    with pytest.raises(RevisionValueError, match="exact revision value"):
+        selected_drifted.select_next_base("wf_revision", 2, value_type=DriftedDraft)
+    assert restarted.select_next_base("wf_revision", 2, value_type=Draft) == selected
+    assert RevisionLedger(path).revisions("wf_revision") == (*first.revisions("wf_revision"), selected)
 
 
 def test_revision_ledger_is_resolved_through_generic_operator_service_registry(tmp_path):
