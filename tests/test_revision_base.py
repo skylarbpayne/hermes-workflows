@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,22 @@ class DriftedDraft:
 @dataclass(frozen=True)
 class FloatDraft:
     score: float
+
+
+class BrokenMapping(Mapping):
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+    def __iter__(self):
+        raise RuntimeError("SECRET_MAPPING_ITERATION")
+
+    def __len__(self):
+        return 1
+
+
+class HostileInt(int):
+    def __lt__(self, other):
+        raise RuntimeError("SECRET_NUMERIC_COMPARATOR")
 
 
 def test_valid_edit_is_schema_coerced_and_becomes_exact_next_base(tmp_path):
@@ -84,6 +101,55 @@ def test_invalid_edit_is_rejected_without_mutating_lineage(tmp_path):
         )
 
     assert ledger.revisions("wf_revision") == (original,)
+
+
+def test_hostile_revision_mappings_fail_with_bounded_nonleaking_errors(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    secret = "SECRET_" + "x" * 10_000
+
+    for value in (
+        {"title": "Bad", "score": 2, secret: True},
+        BrokenMapping(),
+    ):
+        with pytest.raises(RevisionValueError) as caught:
+            ledger.record_output("wf_revision", 1, value, value_type=Draft)
+
+        message = str(caught.value)
+        assert len(message.encode("utf-8")) <= 256
+        assert "SECRET" not in message
+
+    assert ledger.revisions("wf_revision") == ()
+
+
+def test_revision_values_reject_keys_that_collide_in_canonical_json(tmp_path):
+    colliding = {1: "first", "1": "second"}
+    reduced = {"1": "second"}
+
+    with pytest.raises(RevisionValueError) as caught:
+        canonical_value_hash(colliding)
+    assert str(caught.value) == "revision value contains duplicate canonical object keys"
+    assert canonical_value_hash(reduced)
+
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    with pytest.raises(RevisionValueError, match="duplicate canonical object keys"):
+        ledger.record_output("wf_revision", 1, colliding, value_type=object)
+    assert ledger.revisions("wf_revision") == ()
+
+
+def test_attempt_number_rejects_hostile_int_subclasses_without_comparison(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionError) as caught:
+        ledger.record_output("wf_revision", HostileInt(1), Draft("Draft", 1), value_type=Draft)
+
+    assert str(caught.value) == "attempt_number must be a positive integer"
+    assert "SECRET" not in str(caught.value)
+    assert ledger.revisions("wf_revision") == ()
+
+    with pytest.raises(RevisionError) as caught_diff:
+        RevisionDiffV1("0" * 64, "1" * 64, HostileInt(0))
+    assert str(caught_diff.value) == "changed_leaf_count must be a nonnegative integer"
+    assert "SECRET" not in str(caught_diff.value)
 
 
 def test_without_edit_the_generated_output_is_the_next_base(tmp_path):
@@ -352,6 +418,32 @@ def test_restart_normalizes_huge_json_integer_parse_failure_to_revision_error(tm
 
     assert str(caught.value) == "revision ledger must contain valid UTF-8 JSON"
     assert huge_version not in str(caught.value)
+
+
+def test_restart_rejects_duplicate_persisted_json_object_keys(tmp_path):
+    path = tmp_path / "revisions.json"
+    path.write_text(
+        '{"schema_version":1,"schema_version":1,"revisions":[]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RevisionError) as caught:
+        RevisionLedger(path)
+
+    assert str(caught.value) == "revision ledger must contain valid UTF-8 JSON"
+
+
+def test_restart_normalizes_excessively_deep_json_across_python_versions(tmp_path):
+    path = tmp_path / "revisions.json"
+    path.write_text(
+        '{"schema_version":1,"revisions":' + "[" * 2_000 + "]" * 2_000 + "}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RevisionError) as caught:
+        RevisionLedger(path)
+
+    assert str(caught.value) == "revision ledger must contain valid UTF-8 JSON"
 
 
 @pytest.mark.parametrize(

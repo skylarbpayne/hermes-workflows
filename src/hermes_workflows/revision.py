@@ -4,10 +4,10 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from .input_parsing import coerce_workflow_input
 from .operator_services import OperatorServiceRegistry
@@ -19,6 +19,7 @@ SCHEMA_VERSION = 1
 MAX_DIFF_DESCRIPTOR_BYTES = 512
 REVISION_SERVICE_ID = "revision.service"
 _MAX_PERSISTED_INTEGER_DIGITS = 4300
+_MAX_PERSISTED_JSON_DEPTH = 100
 
 
 class RevisionError(ValueError):
@@ -288,8 +289,10 @@ class RevisionLedger:
             payload = json.loads(
                 self.path.read_text(encoding="utf-8"),
                 parse_int=_parse_persisted_integer,
+                object_pairs_hook=_reject_duplicate_json_object_keys,
             )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            _validate_persisted_json_depth(payload)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
             raise RevisionError("revision ledger must contain valid UTF-8 JSON") from exc
         if not isinstance(payload, dict) or set(payload) != {"schema_version", "revisions"}:
             raise RevisionError("revision ledger has an invalid top-level shape")
@@ -299,6 +302,10 @@ class RevisionLedger:
         try:
             records = [_record_from_dict(item) for item in payload["revisions"]]
             _validate_lineage(records)
+        except RevisionValueError as exc:
+            raise RevisionError(
+                "revision ledger contains invalid persisted revision data"
+            ) from exc
         except RevisionError:
             raise
         except (TypeError, ValueError) as exc:
@@ -328,7 +335,7 @@ class RevisionLedger:
 
 
 def canonical_value_hash(value: object) -> str:
-    return hashlib.sha256(_canonical_json(to_json_value(value)).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def resolve_revision_service(registry: OperatorServiceRegistry) -> RevisionServiceV1:
@@ -344,15 +351,16 @@ def _coerce_value(value: object, value_type: Any) -> Any:
     try:
         declared_fields = getattr(value_type, "__dataclass_fields__", None)
         if declared_fields is not None and isinstance(value, Mapping):
-            unknown = set(value) - set(declared_fields)
-            if unknown:
-                raise TypeError(f"unknown revision fields: {sorted(unknown)}")
+            if any(key not in declared_fields for key in value):
+                raise RevisionValueError("invalid revision value: unknown revision fields")
         coerced = coerce_workflow_input(value, value_type)
-        json_value = to_json_value(coerced)
-    except (TypeError, ValueError) as exc:
-        field_names = getattr(value_type, "__dataclass_fields__", {})
-        fields_text = ", ".join(field_names) if field_names else getattr(value_type, "__name__", str(value_type))
-        raise RevisionValueError(f"invalid revision value for {fields_text}: {exc}") from exc
+        json_value = _revision_json_value(coerced)
+    except RevisionValueError:
+        raise
+    except Exception as exc:
+        raise RevisionValueError(
+            f"invalid revision value for {_revision_value_type_label(value_type)}"
+        ) from exc
     _validate_finite_json_numbers(json_value)
     return coerced
 
@@ -591,13 +599,103 @@ def _stable_id(prefix: str, payload: object) -> str:
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(
-        to_json_value(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
+    try:
+        return json.dumps(
+            _revision_json_value(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except RevisionValueError:
+        raise
+    except Exception as exc:
+        raise RevisionValueError("revision value must be deterministic JSON") from exc
+
+
+def _revision_json_value(value: object) -> JsonValue:
+    try:
+        return _normalize_revision_json_value(value, depth=0, active_ids=set())
+    except RevisionValueError:
+        raise
+    except Exception as exc:
+        raise RevisionValueError("revision value must be deterministic JSON") from exc
+
+
+def _normalize_revision_json_value(
+    value: object,
+    *,
+    depth: int,
+    active_ids: set[int],
+) -> JsonValue:
+    if depth > _MAX_PERSISTED_JSON_DEPTH:
+        raise RevisionValueError("revision value exceeds the supported JSON depth limit")
+    is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
+    is_mapping = isinstance(value, Mapping)
+    is_sequence = isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
     )
+    if not (is_dataclass_value or is_mapping or is_sequence):
+        normalized = to_json_value(value)
+        if normalized is value:
+            return normalized
+        return _normalize_revision_json_value(
+            normalized,
+            depth=depth,
+            active_ids=active_ids,
+        )
+
+    value_id = id(value)
+    if value_id in active_ids:
+        raise RevisionValueError("revision value must be acyclic JSON")
+    active_ids.add(value_id)
+    try:
+        if is_dataclass_value:
+            return {
+                item.name: _normalize_revision_json_value(
+                    getattr(value, item.name),
+                    depth=depth + 1,
+                    active_ids=active_ids,
+                )
+                for item in fields(cast(Any, value))
+            }
+        if is_mapping:
+            result: dict[str, JsonValue] = {}
+            for key, item in cast(Mapping[object, object], value).items():
+                canonical_key = str(key)
+                if canonical_key in result:
+                    raise RevisionValueError(
+                        "revision value contains duplicate canonical object keys"
+                    )
+                result[canonical_key] = _normalize_revision_json_value(
+                    item,
+                    depth=depth + 1,
+                    active_ids=active_ids,
+                )
+            return result
+        return [
+            _normalize_revision_json_value(
+                item,
+                depth=depth + 1,
+                active_ids=active_ids,
+            )
+            for item in cast(Sequence[object], value)
+        ]
+    finally:
+        active_ids.remove(value_id)
+
+
+def _revision_value_type_label(value_type: Any) -> str:
+    try:
+        field_names = getattr(value_type, "__dataclass_fields__", {})
+        if field_names:
+            label = ", ".join(str(name) for name in field_names)
+        else:
+            label = str(getattr(value_type, "__name__", "declared schema"))
+    except Exception:
+        return "declared schema"
+    encoded = label.encode("utf-8")[:160]
+    return encoded.decode("utf-8", errors="ignore") or "declared schema"
 
 
 def _parse_persisted_integer(value: str) -> int:
@@ -605,6 +703,29 @@ def _parse_persisted_integer(value: str) -> int:
     if len(digits) > _MAX_PERSISTED_INTEGER_DIGITS:
         raise ValueError("persisted JSON integer exceeds the supported digit limit")
     return int(value)
+
+
+def _reject_duplicate_json_object_keys(
+    pairs: list[tuple[str, JsonValue]],
+) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("persisted JSON contains duplicate object keys")
+        result[key] = value
+    return result
+
+
+def _validate_persisted_json_depth(value: JsonValue) -> None:
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > _MAX_PERSISTED_JSON_DEPTH:
+            raise ValueError("persisted JSON exceeds the supported depth limit")
+        if isinstance(current, dict):
+            pending.extend((nested, depth + 1) for nested in current.values())
+        elif isinstance(current, list):
+            pending.extend((nested, depth + 1) for nested in current)
 
 
 def _validate_finite_json_numbers(value: JsonValue) -> None:
@@ -619,7 +740,7 @@ def _validate_finite_json_numbers(value: JsonValue) -> None:
 
 
 def _validate_attempt_number(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if type(value) is not int or value < 1:
         raise RevisionError("attempt_number must be a positive integer")
     return value
 
@@ -631,7 +752,7 @@ def _validate_schema_version(value: object, *, level: str) -> int:
 
 
 def _validate_nonnegative_int(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise RevisionError("changed_leaf_count must be a nonnegative integer")
     return value
 
