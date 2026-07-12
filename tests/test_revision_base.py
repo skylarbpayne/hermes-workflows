@@ -92,6 +92,51 @@ def test_without_edit_the_generated_output_is_the_next_base(tmp_path):
     assert selected.parent_revision_id == output.revision_id
 
 
+def test_late_edit_is_rejected_after_descendant_base_selection(tmp_path):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    selected = ledger.select_next_base("wf_revision", 2, value_type=Draft)
+
+    with pytest.raises(RevisionConflictError, match="descendant base"):
+        ledger.record_edit("wf_revision", 1, Draft("Too late", 2), value_type=Draft)
+
+    assert ledger.revisions("wf_revision") == (output, selected)
+    restarted = RevisionLedger(path)
+    assert restarted.revisions("wf_revision") == (output, selected)
+    assert restarted.select_next_base("wf_revision", 2, value_type=Draft) == selected
+
+
+def test_preselection_edit_replay_remains_idempotent_after_descendant_base(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    output = ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    edit = ledger.record_edit("wf_revision", 1, Draft("Edited", 2), value_type=Draft)
+    selected = ledger.select_next_base("wf_revision", 2, value_type=Draft)
+
+    assert ledger.record_edit("wf_revision", 1, Draft("Edited", 2), value_type=Draft) == edit
+    assert ledger.revisions("wf_revision") == (output, edit, selected)
+
+
+def test_restart_rejects_ledger_with_edit_after_descendant_base(tmp_path):
+    stale_path = tmp_path / "stale.json"
+    stale = RevisionLedger(stale_path)
+    stale.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    stale.select_next_base("wf_revision", 2, value_type=Draft)
+
+    edit_path = tmp_path / "edit.json"
+    edit_source = RevisionLedger(edit_path)
+    edit_source.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    edit_source.record_edit("wf_revision", 1, Draft("Too late", 2), value_type=Draft)
+
+    stale_payload = json.loads(stale_path.read_text(encoding="utf-8"))
+    edit_payload = json.loads(edit_path.read_text(encoding="utf-8"))
+    stale_payload["revisions"].append(edit_payload["revisions"][-1])
+    stale_path.write_text(json.dumps(stale_payload), encoding="utf-8")
+
+    with pytest.raises(RevisionError, match="edit cannot follow descendant base selection"):
+        RevisionLedger(stale_path)
+
+
 def test_stable_attempt_slots_reject_conflicting_output_or_edit(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)

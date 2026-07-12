@@ -145,6 +145,12 @@ class RevisionLedger:
     ) -> RevisionRecordV1:
         workflow_id = validate_workflow_id(workflow_id)
         attempt_number = _validate_attempt_number(attempt_number)
+        existing_edit = self._latest(workflow_id, attempt_number, kinds=("edit",))
+        descendant_base = self._latest(workflow_id, attempt_number + 1, kinds=("base",))
+        if descendant_base is not None and existing_edit is None:
+            raise RevisionConflictError(
+                f"edit for attempt {attempt_number} cannot be recorded after descendant base selection"
+            )
         parent = self._latest(workflow_id, attempt_number, kinds=("output", "base"))
         if parent is None:
             raise RevisionError("an output or selected base must exist before an edit")
@@ -481,6 +487,12 @@ def _validate_lineage(records: list[RevisionRecordV1]) -> None:
                 ):
                     raise RevisionError("later-attempt output must descend from that attempt's selected base")
         elif record.kind == "edit":
+            if any(
+                descendant.kind == "base"
+                and descendant.attempt_number == record.attempt_number + 1
+                for descendant in seen.values()
+            ):
+                raise RevisionError("edit cannot follow descendant base selection")
             parent = seen.get(record.parent_revision_id or "")
             if (
                 parent is None
