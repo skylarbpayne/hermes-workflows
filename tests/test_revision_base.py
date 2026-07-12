@@ -150,6 +150,32 @@ PostponedAttributeAliasPep604LiteralDraft.__annotations__["choice"] = (
 )
 
 
+PostponedNestedAnnotatedPep604LiteralAlias = Annotated[
+    "Literal[1] | None", "revision choice"
+]
+PostponedNestedListPep604LiteralAlias = list["Literal[1] | None"]
+
+
+@dataclass(frozen=True)
+class PostponedNestedAnnotatedAliasPep604LiteralDraft:
+    choice: object
+
+
+PostponedNestedAnnotatedAliasPep604LiteralDraft.__annotations__["choice"] = (
+    "PostponedNestedAnnotatedPep604LiteralAlias"
+)
+
+
+@dataclass(frozen=True)
+class PostponedNestedListAliasPep604LiteralDraft:
+    choices: object
+
+
+PostponedNestedListAliasPep604LiteralDraft.__annotations__["choices"] = (
+    "PostponedNestedListPep604LiteralAlias"
+)
+
+
 CyclicRevisionAlias = "CyclicRevisionAlias"
 
 
@@ -445,6 +471,8 @@ def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path)
         ({"choice": True}, PostponedQuotedPep604LiteralTypedDraft),
         ({"choice": True}, PostponedAliasPep604LiteralDraft),
         ({"choice": True}, PostponedAttributeAliasPep604LiteralDraft),
+        ({"choice": True}, PostponedNestedAnnotatedAliasPep604LiteralDraft),
+        ({"choices": [True]}, PostponedNestedListAliasPep604LiteralDraft),
     ],
 )
 def test_nested_postponed_pep604_literal_unions_preserve_identity_on_python39(
@@ -462,6 +490,28 @@ def test_nested_postponed_pep604_literal_unions_preserve_identity_on_python39(
 
     assert ledger.revisions("wf_nested_postponed_pep604_literal_revision") == ()
     assert not (tmp_path / "revisions.json").exists()
+
+
+def test_nested_alias_postponed_pep604_literal_unions_accept_exact_values(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    annotated = ledger.record_output(
+        "wf_valid_nested_annotated_alias_revision",
+        1,
+        {"choice": 1},
+        value_type=PostponedNestedAnnotatedAliasPep604LiteralDraft,
+    )
+    listed = ledger.record_output(
+        "wf_valid_nested_list_alias_revision",
+        1,
+        {"choices": [1, None]},
+        value_type=PostponedNestedListAliasPep604LiteralDraft,
+    )
+
+    assert annotated.value == PostponedNestedAnnotatedAliasPep604LiteralDraft(1)
+    assert type(annotated.value.choice) is int
+    assert listed.value == PostponedNestedListAliasPep604LiteralDraft([1, None])
+    assert type(listed.value.choices[0]) is int
 
 
 def test_unsupported_postponed_annotation_fails_closed_without_repeated_evaluation(

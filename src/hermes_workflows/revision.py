@@ -553,6 +553,8 @@ def _safe_revision_type_hints(value_type: Any) -> dict[str, Any]:
 def _contains_revision_forward_ref(annotation: Any) -> bool:
     if isinstance(annotation, (str, ForwardRef)):
         return True
+    if isinstance(annotation, (list, tuple)):
+        return any(_contains_revision_forward_ref(item) for item in annotation)
     origin = get_origin(annotation)
     args = get_args(annotation)
     if origin is Literal:
@@ -572,7 +574,11 @@ def _resolve_revision_fallback_annotation(
     if isinstance(annotation, ForwardRef):
         annotation = annotation.__forward_arg__
     if not isinstance(annotation, str):
-        return annotation
+        return _resolve_revision_type_position(
+            annotation,
+            {**globalns, **localns},
+            _seen_forward_refs=_seen_forward_refs,
+        )
     if annotation in _seen_forward_refs:
         raise TypeError("cyclic revision forward reference")
     seen_forward_refs = _seen_forward_refs | {annotation}
@@ -583,6 +589,72 @@ def _resolve_revision_fallback_annotation(
         resolve_forward_ref=True,
         _seen_forward_refs=seen_forward_refs,
     )
+
+
+def _resolve_revision_type_position(
+    annotation: Any,
+    namespace: dict[str, Any],
+    *,
+    _seen_forward_refs: frozenset[str],
+) -> Any:
+    if isinstance(annotation, (str, ForwardRef)):
+        return _resolve_revision_fallback_annotation(
+            annotation,
+            namespace,
+            {},
+            _seen_forward_refs=_seen_forward_refs,
+        )
+    if isinstance(annotation, list):
+        return [
+            _resolve_revision_type_position(
+                item,
+                namespace,
+                _seen_forward_refs=_seen_forward_refs,
+            )
+            for item in annotation
+        ]
+    if isinstance(annotation, tuple):
+        return tuple(
+            _resolve_revision_type_position(
+                item,
+                namespace,
+                _seen_forward_refs=_seen_forward_refs,
+            )
+            for item in annotation
+        )
+    if not _contains_revision_forward_ref(annotation):
+        return annotation
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return annotation
+    if origin is Annotated:
+        resolved = _resolve_revision_type_position(
+            args[0],
+            namespace,
+            _seen_forward_refs=_seen_forward_refs,
+        )
+        return Annotated[(resolved, *args[1:])]
+
+    resolved_args = tuple(
+        _resolve_revision_type_position(
+            item,
+            namespace,
+            _seen_forward_refs=_seen_forward_refs,
+        )
+        for item in args
+    )
+    union_type = getattr(types, "UnionType", None)
+    if origin is Union or (union_type is not None and origin is union_type):
+        return Union[resolved_args]
+    copy_with = getattr(annotation, "copy_with", None)
+    if callable(copy_with):
+        return copy_with(resolved_args)
+    if origin is not None:
+        argument = resolved_args[0] if len(resolved_args) == 1 else resolved_args
+        return origin[argument]
+    raise TypeError("unsupported revision annotation with nested forward reference")
 
 
 def _eval_revision_fallback_annotation(
@@ -596,11 +668,10 @@ def _eval_revision_fallback_annotation(
     if isinstance(node, ast.Name):
         if node.id in namespace:
             value = namespace[node.id]
-            if resolve_forward_ref and isinstance(value, (str, ForwardRef)):
-                return _resolve_revision_fallback_annotation(
+            if resolve_forward_ref:
+                return _resolve_revision_type_position(
                     value,
                     namespace,
-                    {},
                     _seen_forward_refs=_seen_forward_refs,
                 )
             return value
@@ -619,11 +690,10 @@ def _eval_revision_fallback_annotation(
             ),
             node.attr,
         )
-        if resolve_forward_ref and isinstance(value, (str, ForwardRef)):
-            return _resolve_revision_fallback_annotation(
+        if resolve_forward_ref:
+            return _resolve_revision_type_position(
                 value,
                 namespace,
-                {},
                 _seen_forward_refs=_seen_forward_refs,
             )
         return value
