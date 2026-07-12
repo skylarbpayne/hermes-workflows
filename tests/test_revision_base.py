@@ -511,6 +511,18 @@ def test_late_edit_is_rejected_after_descendant_base_selection(tmp_path):
     assert restarted.select_next_base("wf_revision", 2, value_type=Draft) == selected
 
 
+def test_descendant_base_in_another_workflow_does_not_block_edit(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    ledger.record_output("wf_a", 1, Draft("A", 1), value_type=Draft)
+    ledger.select_next_base("wf_a", 2, value_type=Draft)
+    output_b = ledger.record_output("wf_b", 1, Draft("B", 1), value_type=Draft)
+
+    edit_b = ledger.record_edit("wf_b", 1, Draft("B edited", 2), value_type=Draft)
+
+    assert edit_b.parent_revision_id == output_b.revision_id
+    assert RevisionLedger(ledger.path).revisions("wf_b") == (output_b, edit_b)
+
+
 def test_preselection_edit_replay_remains_idempotent_after_descendant_base(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     output = ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)

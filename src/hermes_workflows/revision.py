@@ -736,7 +736,8 @@ def _validate_lineage(records: list[RevisionRecordV1]) -> None:
                     raise RevisionError("later-attempt output must descend from that attempt's selected base")
         elif record.kind == "edit":
             if any(
-                descendant.kind == "base"
+                descendant.workflow_id == record.workflow_id
+                and descendant.kind == "base"
                 and descendant.attempt_number == record.attempt_number + 1
                 for descendant in seen.values()
             ):
