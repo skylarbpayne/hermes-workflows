@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"name": "approve_without_feedback", "payload": {"action": "approve"}, "valid": true, "normalized_payload_hash": "e6da024cee8b4629224ef2741daf85eae714c5a4ecdf032c9da2260c14743598"},
+    {"name": "feedback_only", "payload": {"action": "request_changes", "feedback": " Tighten the opening. "}, "valid": true, "normalized_payload_hash": "90593522570b5bcc408e7ab935c92119a70f50929d891e3e5ffd425dceca2772"},
+    {"name": "edit_only", "payload": {"action": "request_changes", "edited_output": {"title": "A better opening"}}, "valid": true, "normalized_payload_hash": "7b12684fedf56631d0db7aa8fea8fb0ebadfcf67dace47390e7952adab864cc8"},
+    {"name": "feedback_and_edit", "payload": {"action": "request_changes", "feedback": "Use this version", "edited_output": ["revised", 2]}, "valid": true, "normalized_payload_hash": "e3db737607d5550df0d8c68b8a548bafde0ab702bbdd311f54e974f225e17dfa"},
+    {"name": "missing_actionable_input", "payload": {"action": "request_changes"}, "valid": false, "error_fields": ["feedback", "edited_output"]},
+    {"name": "blank_feedback", "payload": {"action": "request_changes", "feedback": "   "}, "valid": false, "error_fields": ["feedback", "edited_output"]},
+    {"name": "unicode_whitespace_feedback", "payload": {"action": "request_changes", "feedback": "\u2003\u00a0"}, "valid": false, "error_fields": ["feedback", "edited_output"]},
+    {"name": "blank_string_edit", "payload": {"action": "request_changes", "edited_output": " \n\t"}, "valid": false, "error_fields": ["feedback", "edited_output"]},
+    {"name": "unicode_whitespace_string_edit", "payload": {"action": "request_changes", "edited_output": "\u2003\u00a0"}, "valid": false, "error_fields": ["feedback", "edited_output"]}
+  ]
+}
