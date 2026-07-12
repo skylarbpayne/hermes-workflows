@@ -94,6 +94,11 @@ class PostponedFallbackLiteralDraft:
     note: str | None = None
 
 
+@dataclass(frozen=True)
+class PostponedPep604LiteralDraft:
+    choice: Literal[1] | None
+
+
 def _test_stable_id(prefix, payload):
     encoded = json.dumps(
         payload,
@@ -306,6 +311,38 @@ def test_postponed_literal_identity_survives_pep604_type_hint_fallback(tmp_path)
 
     assert ledger.revisions("wf_postponed_literal_revision") == ()
     assert not (tmp_path / "revisions.json").exists()
+
+
+def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_postponed_pep604_literal_revision",
+            1,
+            {"choice": True},
+            value_type=PostponedPep604LiteralDraft,
+        )
+
+    assert ledger.revisions("wf_postponed_pep604_literal_revision") == ()
+    assert not (tmp_path / "revisions.json").exists()
+
+    literal = ledger.record_output(
+        "wf_valid_postponed_pep604_literal_revision",
+        1,
+        {"choice": 1},
+        value_type=PostponedPep604LiteralDraft,
+    )
+    optional = ledger.record_output(
+        "wf_valid_postponed_pep604_optional_revision",
+        1,
+        {"choice": None},
+        value_type=PostponedPep604LiteralDraft,
+    )
+
+    assert literal.value == PostponedPep604LiteralDraft(1)
+    assert type(literal.value.choice) is int
+    assert optional.value == PostponedPep604LiteralDraft(None)
 
 
 def test_persistence_failure_is_not_retained_as_an_idempotent_replay(

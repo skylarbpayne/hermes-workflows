@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import fcntl
 import hashlib
 import json
@@ -552,7 +553,26 @@ def _resolve_revision_fallback_annotation(
     try:
         return eval(annotation, globalns, localns)
     except Exception:
-        return annotation
+        try:
+            expression = ast.parse(annotation, mode="eval").body
+            return _eval_revision_fallback_annotation(
+                expression, {**globalns, **localns}
+            )
+        except Exception:
+            return annotation
+
+
+def _eval_revision_fallback_annotation(node: ast.expr, namespace: dict[str, Any]) -> Any:
+    expression = ast.fix_missing_locations(ast.Expression(body=node))
+    try:
+        return eval(compile(expression, "<revision-annotation>", "eval"), namespace)
+    except TypeError:
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.BitOr):
+            raise
+        return Union[
+            _eval_revision_fallback_annotation(node.left, namespace),
+            _eval_revision_fallback_annotation(node.right, namespace),
+        ]
 
 
 def _is_revision_typed_dict_type(value_type: Any) -> bool:
