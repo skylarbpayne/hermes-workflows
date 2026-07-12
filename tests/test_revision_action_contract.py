@@ -54,6 +54,16 @@ class HostileWhitespace(str):
         return "looks-actionable"
 
 
+class LyingString(str):
+    def __str__(self) -> str:
+        return "looks-actionable"
+
+
+class RaisingString(str):
+    def __str__(self) -> str:
+        raise RuntimeError("hostile __str__ must not run")
+
+
 def _cyclic_list() -> list[object]:
     value: list[object] = []
     value.append(value)
@@ -201,6 +211,47 @@ def test_direct_operator_service_path_uses_the_same_validator():
     with pytest.raises(RevisionActionValidationError) as caught:
         resolved.validate({"action": "request_changes", "edited_output": _cyclic_list()})
     assert caught.value.field_errors[0].field == "edited_output"
+
+
+def test_string_subclass_overrides_cannot_change_actionability_or_escape_validation():
+    for field in ("feedback", "edited_output"):
+        with pytest.raises(RevisionActionValidationError, match=ACTIONABLE_MESSAGE):
+            validate_revision_action(
+                {"action": "request_changes", field: LyingString("\u2003")}
+            )
+
+    action = validate_revision_action(
+        {"action": RaisingString("request_changes"), "feedback": RaisingString("Revise it")}
+    )
+    assert action.normalized_payload == {
+        "action": "request_changes",
+        "feedback": "Revise it",
+    }
+    assert type(action.action) is str
+    assert type(action.normalized_payload["feedback"]) is str
+
+    lying = validate_revision_action(
+        {"action": LyingString("request_changes"), "feedback": LyingString("Revise it")}
+    )
+    assert lying.normalized_payload == action.normalized_payload
+    assert lying.idempotency_key == action.idempotency_key
+
+
+def test_normalized_json_object_keys_are_exact_builtin_strings():
+    key = RaisingString("body")
+    result = validate_revision_action(
+        {"action": "request_changes", "edited_output": {key: "revised"}}
+    )
+
+    normalized_edit = result.normalized_payload["edited_output"]
+    assert isinstance(normalized_edit, Mapping)
+    normalized_key = next(iter(normalized_edit))
+    assert normalized_key == "body"
+    assert type(normalized_key) is str
+    plain = validate_revision_action(
+        {"action": "request_changes", "edited_output": {"body": "revised"}}
+    )
+    assert result.idempotency_key == plain.idempotency_key
 
 
 def test_idempotency_hash_does_not_collapse_distinct_decisions():

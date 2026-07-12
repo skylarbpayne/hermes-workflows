@@ -8,6 +8,7 @@
     {"name": "missing_actionable_input", "payload": {"action": "request_changes"}, "valid": false, "error_fields": ["feedback", "edited_output"]},
     {"name": "blank_feedback", "payload": {"action": "request_changes", "feedback": "   "}, "valid": false, "error_fields": ["feedback", "edited_output"]},
     {"name": "unicode_whitespace_feedback", "payload": {"action": "request_changes", "feedback": "\u2003\u00a0"}, "valid": false, "error_fields": ["feedback", "edited_output"]},
-    {"name": "blank_string_edit", "payload": {"action": "request_changes", "edited_output": " \n\t"}, "valid": false, "error_fields": ["feedback", "edited_output"]}
+    {"name": "blank_string_edit", "payload": {"action": "request_changes", "edited_output": " \n\t"}, "valid": false, "error_fields": ["feedback", "edited_output"]},
+    {"name": "unicode_whitespace_string_edit", "payload": {"action": "request_changes", "edited_output": "\u2003\u00a0"}, "valid": false, "error_fields": ["feedback", "edited_output"]}
   ]
 }

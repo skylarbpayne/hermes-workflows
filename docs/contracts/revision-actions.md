@@ -25,7 +25,9 @@ on `approve` are rejected.
 
 The validator snapshots every mapping before reading fields. Custom mapping iteration
 and `items()` must expose the same unique string keys; an overridable `get()` is never
-trusted. Edited JSON rejects cycles, nesting beyond 64 levels, more than 10,000 values,
+trusted. Accepted string values and mapping keys are copied to exact built-in strings
+without invoking subclass overrides before whitespace checks or persistence. Edited JSON
+rejects cycles, nesting beyond 64 levels, more than 10,000 values,
 strings or canonical payloads beyond 1,000,000 UTF-8 bytes, integers beyond 4,096
 decimal digits, and invalid Unicode scalar values. Every such failure is returned as a
 `RevisionActionValidationError`, never as a raw encoder or recursion exception.

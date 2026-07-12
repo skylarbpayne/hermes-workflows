@@ -96,7 +96,7 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
     action_value = snapshot.get("action", _MISSING)
     if not isinstance(action_value, str):
         _raise_invalid(_field_error("action", "type", "action must be a string"))
-    action = str(action_value).strip()
+    action = _trusted_string(action_value).strip()
     if action not in {"approve", "request_changes"}:
         _raise_invalid(
             _field_error("action", "choice", "action must be approve or request_changes")
@@ -126,7 +126,7 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
             _raise_invalid(
                 _field_error("feedback", "type", "feedback must be a string when provided")
             )
-        feedback = str(feedback_value).strip()
+        feedback = _trusted_string(feedback_value).strip()
         try:
             _validate_json_string(feedback)
         except ValueError as exc:
@@ -198,7 +198,7 @@ def _normalize_json_value(
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, str):
-        normalized_string = str(value)
+        normalized_string = _trusted_string(value)
         _validate_json_string(normalized_string)
         return normalized_string
     if isinstance(value, int):
@@ -291,11 +291,21 @@ def _snapshot_mapping(
     item_keys = [key for key, _ in item_entries]
     if not all(isinstance(key, str) for key in item_keys):
         raise TypeError(f"{context} keys must be strings")
-    if len(iteration_keys) != len(set(iteration_keys)) or len(item_keys) != len(set(item_keys)):
+    trusted_iteration_keys = [_trusted_string(key) for key in iteration_keys]
+    trusted_item_keys = [_trusted_string(key) for key in item_keys]
+    if len(trusted_iteration_keys) != len(set(trusted_iteration_keys)) or len(
+        trusted_item_keys
+    ) != len(set(trusted_item_keys)):
         raise ValueError(f"{context} must not contain duplicate keys")
-    if set(iteration_keys) != set(item_keys):
+    if set(trusted_iteration_keys) != set(trusted_item_keys):
         raise ValueError(f"{context} iteration and items must expose the same keys")
-    return {key: item for key, item in item_entries if isinstance(key, str)}
+    return {key: item for key, (_, item) in zip(trusted_item_keys, item_entries)}
+
+
+def _trusted_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("value must be a string")
+    return str.__str__(value)
 
 
 def _validate_json_string(value: str) -> None:
