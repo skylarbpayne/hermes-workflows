@@ -123,6 +123,30 @@ class PostponedQuotedPep604LiteralTypedDraft(TypedDict):
     choice: "Literal[1] | None"
 
 
+PostponedPep604LiteralAlias = "Literal[1] | None"
+
+
+@dataclass(frozen=True)
+class PostponedAliasPep604LiteralDraft:
+    choice: object
+
+
+PostponedAliasPep604LiteralDraft.__annotations__["choice"] = (
+    "PostponedPep604LiteralAlias"
+)
+
+
+CyclicRevisionAlias = "CyclicRevisionAlias"
+
+
+@dataclass(frozen=True)
+class PostponedCyclicAliasDraft:
+    choice: object
+
+
+PostponedCyclicAliasDraft.__annotations__["choice"] = "CyclicRevisionAlias"
+
+
 @dataclass(frozen=True)
 class PostponedBitwiseLiteralDraft:
     choice: object
@@ -405,6 +429,7 @@ def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path)
         ({"choice": True}, PostponedQuotedPep604LiteralDraft),
         ({"choices": [True]}, PostponedNestedQuotedPep604LiteralDraft),
         ({"choice": True}, PostponedQuotedPep604LiteralTypedDraft),
+        ({"choice": True}, PostponedAliasPep604LiteralDraft),
     ],
 )
 def test_nested_postponed_pep604_literal_unions_preserve_identity_on_python39(
@@ -441,6 +466,21 @@ def test_unsupported_postponed_annotation_fails_closed_without_repeated_evaluati
 
     assert _side_effect_annotation_calls <= 3
     assert ledger.revisions("wf_side_effect_annotation_revision") == ()
+    assert not (tmp_path / "revisions.json").exists()
+
+
+def test_cyclic_postponed_alias_fails_closed_without_persistence(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_cyclic_annotation_revision",
+            1,
+            {"choice": True},
+            value_type=PostponedCyclicAliasDraft,
+        )
+
+    assert ledger.revisions("wf_cyclic_annotation_revision") == ()
     assert not (tmp_path / "revisions.json").exists()
 
 

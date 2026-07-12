@@ -563,17 +563,25 @@ def _contains_revision_forward_ref(annotation: Any) -> bool:
 
 
 def _resolve_revision_fallback_annotation(
-    annotation: Any, globalns: dict[str, Any], localns: dict[str, Any]
+    annotation: Any,
+    globalns: dict[str, Any],
+    localns: dict[str, Any],
+    *,
+    _seen_forward_refs: frozenset[str] = frozenset(),
 ) -> Any:
     if isinstance(annotation, ForwardRef):
         annotation = annotation.__forward_arg__
     if not isinstance(annotation, str):
         return annotation
+    if annotation in _seen_forward_refs:
+        raise TypeError("cyclic revision forward reference")
+    seen_forward_refs = _seen_forward_refs | {annotation}
     expression = ast.parse(annotation, mode="eval").body
     return _eval_revision_fallback_annotation(
         expression,
         {**globalns, **localns},
         resolve_forward_ref=True,
+        _seen_forward_refs=seen_forward_refs,
     )
 
 
@@ -583,10 +591,19 @@ def _eval_revision_fallback_annotation(
     *,
     allow_union: bool = True,
     resolve_forward_ref: bool = False,
+    _seen_forward_refs: frozenset[str] = frozenset(),
 ) -> Any:
     if isinstance(node, ast.Name):
         if node.id in namespace:
-            return namespace[node.id]
+            value = namespace[node.id]
+            if resolve_forward_ref and isinstance(value, (str, ForwardRef)):
+                return _resolve_revision_fallback_annotation(
+                    value,
+                    namespace,
+                    {},
+                    _seen_forward_refs=_seen_forward_refs,
+                )
+            return value
         if hasattr(builtins, node.id):
             return getattr(builtins, node.id)
         raise NameError(node.id)
@@ -595,16 +612,21 @@ def _eval_revision_fallback_annotation(
         if node.attr.startswith("_"):
             raise TypeError("private annotation attributes are not supported")
         return getattr(
-            _eval_revision_fallback_annotation(node.value, namespace), node.attr
+            _eval_revision_fallback_annotation(
+                node.value,
+                namespace,
+                _seen_forward_refs=_seen_forward_refs,
+            ),
+            node.attr,
         )
 
     if isinstance(node, ast.Constant):
         if resolve_forward_ref and isinstance(node.value, str):
-            expression = ast.parse(node.value, mode="eval").body
-            return _eval_revision_fallback_annotation(
-                expression,
+            return _resolve_revision_fallback_annotation(
+                node.value,
                 namespace,
-                resolve_forward_ref=True,
+                {},
+                _seen_forward_refs=_seen_forward_refs,
             )
         return node.value
 
@@ -615,6 +637,7 @@ def _eval_revision_fallback_annotation(
                 namespace,
                 allow_union=allow_union,
                 resolve_forward_ref=resolve_forward_ref,
+                _seen_forward_refs=_seen_forward_refs,
             )
             for item in node.elts
         )
@@ -626,20 +649,28 @@ def _eval_revision_fallback_annotation(
                 namespace,
                 allow_union=allow_union,
                 resolve_forward_ref=resolve_forward_ref,
+                _seen_forward_refs=_seen_forward_refs,
             )
             for item in node.elts
         ]
 
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         operand = _eval_revision_fallback_annotation(
-            node.operand, namespace, allow_union=False
+            node.operand,
+            namespace,
+            allow_union=False,
+            _seen_forward_refs=_seen_forward_refs,
         )
         if type(operand) not in (int, float, complex):
             raise TypeError("unsupported unary annotation operand")
         return +operand if isinstance(node.op, ast.UAdd) else -operand
 
     if isinstance(node, ast.Subscript):
-        target = _eval_revision_fallback_annotation(node.value, namespace)
+        target = _eval_revision_fallback_annotation(
+            node.value,
+            namespace,
+            _seen_forward_refs=_seen_forward_refs,
+        )
         slice_node = node.slice
         if type(slice_node).__name__ == "Index":
             slice_node = getattr(slice_node, "value")
@@ -649,6 +680,7 @@ def _eval_revision_fallback_annotation(
                     item,
                     namespace,
                     resolve_forward_ref=index == 0,
+                    _seen_forward_refs=_seen_forward_refs,
                 )
                 for index, item in enumerate(slice_node.elts)
             )
@@ -658,6 +690,7 @@ def _eval_revision_fallback_annotation(
                 namespace,
                 allow_union=target is not Literal,
                 resolve_forward_ref=target is not Literal,
+                _seen_forward_refs=_seen_forward_refs,
             )
         return target[argument]
 
@@ -667,12 +700,14 @@ def _eval_revision_fallback_annotation(
             namespace,
             allow_union=allow_union,
             resolve_forward_ref=allow_union,
+            _seen_forward_refs=_seen_forward_refs,
         )
         right = _eval_revision_fallback_annotation(
             node.right,
             namespace,
             allow_union=allow_union,
             resolve_forward_ref=allow_union,
+            _seen_forward_refs=_seen_forward_refs,
         )
         if not allow_union:
             if type(left) is not int or type(right) is not int:
