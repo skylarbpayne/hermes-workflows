@@ -195,6 +195,24 @@ def test_stale_writer_cannot_overwrite_a_conflicting_durable_slot(tmp_path):
     assert stale.revisions("wf_revision") == (durable,)
 
 
+def test_dependent_operations_reload_lineage_under_lock(tmp_path):
+    path = tmp_path / "revisions.json"
+    first = RevisionLedger(path)
+    second = RevisionLedger(path)
+
+    output = first.record_output(
+        "wf_revision", 1, Draft("First attempt", 1), value_type=Draft
+    )
+    selected = second.select_next_base("wf_revision", 2, value_type=Draft)
+    edited = first.record_edit(
+        "wf_revision", 2, Draft("Second attempt edit", 2), value_type=Draft
+    )
+
+    assert selected.parent_revision_id == output.revision_id
+    assert edited.parent_revision_id == selected.revision_id
+    assert RevisionLedger(path).revisions("wf_revision") == (output, selected, edited)
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -331,6 +349,18 @@ def test_ambiguous_or_invalid_dataclass_unions_fail_deterministically(tmp_path, 
     assert messages[0] == messages[1]
     assert len(messages[0].encode("utf-8")) <= 256
     assert "SECRET" not in messages[0]
+
+
+def test_ambiguous_scalar_unions_fail_independently_of_argument_order(tmp_path):
+    messages = []
+    for index, value_type in enumerate((Union[int, str], Union[str, int])):
+        ledger = RevisionLedger(tmp_path / f"scalar-union-{index}.json")
+        with pytest.raises(RevisionValueError) as caught:
+            ledger.record_output("wf_scalar_union", 1, "1", value_type=value_type)
+        messages.append(str(caught.value))
+        assert ledger.revisions("wf_scalar_union") == ()
+
+    assert messages[0] == messages[1]
 
 
 def test_hostile_revision_mappings_fail_with_bounded_nonleaking_errors(tmp_path):

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import (
     Annotated,
     Any,
+    Callable,
     Literal,
     Protocol,
     Union,
@@ -137,19 +138,24 @@ class RevisionLedger:
         workflow_id = validate_workflow_id(workflow_id)
         attempt_number = _validate_attempt_number(attempt_number)
         normalized = _coerce_value(value, value_type)
-        parent = self._latest(workflow_id, attempt_number, kinds=("base",))
-        if attempt_number > 1 and parent is None:
-            raise RevisionError("a selected base must exist before a later-attempt output")
-        record = _make_record(
-            workflow_id=workflow_id,
-            attempt_number=attempt_number,
-            kind="output",
-            value=normalized,
-            parent_revision_id=parent.revision_id if parent is not None else None,
-            base_revision_id=parent.revision_id if parent is not None else None,
-            diff=None,
-        )
-        return self._append_or_existing(record)
+
+        def build_record() -> RevisionRecordV1:
+            parent = self._latest(workflow_id, attempt_number, kinds=("base",))
+            if attempt_number > 1 and parent is None:
+                raise RevisionError(
+                    "a selected base must exist before a later-attempt output"
+                )
+            return _make_record(
+                workflow_id=workflow_id,
+                attempt_number=attempt_number,
+                kind="output",
+                value=normalized,
+                parent_revision_id=parent.revision_id if parent is not None else None,
+                base_revision_id=parent.revision_id if parent is not None else None,
+                diff=None,
+            )
+
+        return self._append_or_existing(build_record)
 
     def record_edit(
         self,
@@ -161,32 +167,39 @@ class RevisionLedger:
     ) -> RevisionRecordV1:
         workflow_id = validate_workflow_id(workflow_id)
         attempt_number = _validate_attempt_number(attempt_number)
-        existing_edit = self._latest(workflow_id, attempt_number, kinds=("edit",))
-        descendant_base = self._latest(workflow_id, attempt_number + 1, kinds=("base",))
-        if descendant_base is not None and existing_edit is None:
-            raise RevisionConflictError(
-                f"edit for attempt {attempt_number} cannot be recorded after descendant base selection"
-            )
-        parent = self._latest(workflow_id, attempt_number, kinds=("output", "base"))
-        if parent is None:
-            raise RevisionError("an output or selected base must exist before an edit")
         normalized = _coerce_value(value, value_type)
-        diff = RevisionDiffV1(
-            before_sha256=parent.value_sha256,
-            after_sha256=canonical_value_hash(normalized),
-            changed_leaf_count=_changed_leaf_count(parent.value, normalized),
-        )
-        _validate_diff_descriptor(diff)
-        record = _make_record(
-            workflow_id=workflow_id,
-            attempt_number=attempt_number,
-            kind="edit",
-            value=normalized,
-            parent_revision_id=parent.revision_id,
-            base_revision_id=parent.base_revision_id,
-            diff=diff,
-        )
-        return self._append_or_existing(record)
+
+        def build_record() -> RevisionRecordV1:
+            existing_edit = self._latest(workflow_id, attempt_number, kinds=("edit",))
+            descendant_base = self._latest(
+                workflow_id, attempt_number + 1, kinds=("base",)
+            )
+            if descendant_base is not None and existing_edit is None:
+                raise RevisionConflictError(
+                    f"edit for attempt {attempt_number} cannot be recorded after descendant base selection"
+                )
+            parent = self._latest(
+                workflow_id, attempt_number, kinds=("output", "base")
+            )
+            if parent is None:
+                raise RevisionError("an output or selected base must exist before an edit")
+            diff = RevisionDiffV1(
+                before_sha256=parent.value_sha256,
+                after_sha256=canonical_value_hash(normalized),
+                changed_leaf_count=_changed_leaf_count(parent.value, normalized),
+            )
+            _validate_diff_descriptor(diff)
+            return _make_record(
+                workflow_id=workflow_id,
+                attempt_number=attempt_number,
+                kind="edit",
+                value=normalized,
+                parent_revision_id=parent.revision_id,
+                base_revision_id=parent.base_revision_id,
+                diff=diff,
+            )
+
+        return self._append_or_existing(build_record)
 
     def select_next_base(
         self,
@@ -197,43 +210,48 @@ class RevisionLedger:
     ) -> RevisionRecordV1:
         workflow_id = validate_workflow_id(workflow_id)
         attempt_number = _validate_attempt_number(attempt_number)
-        existing = self._latest(workflow_id, attempt_number, kinds=("base",))
-        if existing is not None:
-            return replace(
-                existing,
-                value=_coerce_exact_value(
-                    existing.value,
-                    value_type,
-                    expected_sha256=existing.value_sha256,
-                ),
+
+        def build_record() -> RevisionRecordV1:
+            existing = self._latest(workflow_id, attempt_number, kinds=("base",))
+            if existing is not None:
+                return replace(
+                    existing,
+                    value=_coerce_exact_value(
+                        existing.value,
+                        value_type,
+                        expected_sha256=existing.value_sha256,
+                    ),
+                )
+
+            previous_attempt = attempt_number - 1
+            if previous_attempt < 1:
+                raise RevisionError("the first attempt has no prior revision base")
+            chosen = self._latest(workflow_id, previous_attempt, kinds=("edit",))
+            if chosen is None:
+                chosen = self._latest(
+                    workflow_id, previous_attempt, kinds=("output",)
+                )
+            if chosen is None:
+                raise RevisionError(
+                    "a prior attempt output or edit must exist before selecting the next base"
+                )
+
+            typed_value = _coerce_exact_value(
+                chosen.value,
+                value_type,
+                expected_sha256=chosen.value_sha256,
+            )
+            return _make_record(
+                workflow_id=workflow_id,
+                attempt_number=attempt_number,
+                kind="base",
+                value=typed_value,
+                parent_revision_id=chosen.revision_id,
+                base_revision_id=chosen.revision_id,
+                diff=None,
             )
 
-        previous_attempt = attempt_number - 1
-        if previous_attempt < 1:
-            raise RevisionError("the first attempt has no prior revision base")
-        chosen = self._latest(workflow_id, previous_attempt, kinds=("edit",))
-        if chosen is None:
-            chosen = self._latest(workflow_id, previous_attempt, kinds=("output",))
-        if chosen is None:
-            raise RevisionError(
-                "a prior attempt output or edit must exist before selecting the next base"
-            )
-
-        typed_value = _coerce_exact_value(
-            chosen.value,
-            value_type,
-            expected_sha256=chosen.value_sha256,
-        )
-        record = _make_record(
-            workflow_id=workflow_id,
-            attempt_number=attempt_number,
-            kind="base",
-            value=typed_value,
-            parent_revision_id=chosen.revision_id,
-            base_revision_id=chosen.revision_id,
-            diff=None,
-        )
-        return self._append_or_existing(record)
+        return self._append_or_existing(build_record)
 
     def revisions(self, workflow_id: str) -> tuple[RevisionRecordV1, ...]:
         workflow_id = validate_workflow_id(workflow_id)
@@ -275,7 +293,9 @@ class RevisionLedger:
         ]
         return matches[-1] if matches else None
 
-    def _append_or_existing(self, record: RevisionRecordV1) -> RevisionRecordV1:
+    def _append_or_existing(
+        self, build_record: Callable[[], RevisionRecordV1]
+    ) -> RevisionRecordV1:
         lock_path = self.path.with_name(f".{self.path.name}.lock")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,6 +305,7 @@ class RevisionLedger:
                 durable_records = self._load()
                 self._records = durable_records
                 records_after = durable_records
+                record = build_record()
                 for existing in durable_records:
                     same_slot = (
                         existing.workflow_id == record.workflow_id
@@ -427,8 +448,8 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
             if validation_error is not None:
                 raise validation_error
             raise TypeError("revision value does not match any declared union branch")
-        if len(matches) > 1 and all(_is_dataclass_schema(option) for option, _ in matches):
-            raise TypeError("revision value matches multiple declared dataclass union branches")
+        if len(matches) > 1:
+            raise TypeError("revision value matches multiple declared union branches")
         return matches[0][1]
 
     _reject_unknown_dataclass_fields(value, value_type)
@@ -481,12 +502,6 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
         return coerce_workflow_input(prepared_mapping, value_type)
 
     return coerce_workflow_input(value, value_type)
-
-
-def _is_dataclass_schema(value_type: Any) -> bool:
-    while get_origin(value_type) is Annotated:
-        value_type = get_args(value_type)[0]
-    return is_dataclass(value_type) and isinstance(value_type, type)
 
 
 def _safe_revision_type_hints(value_type: type[Any]) -> dict[str, Any]:
