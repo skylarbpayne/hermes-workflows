@@ -102,6 +102,10 @@ class UnsupportedWrapperDraft:
     score: Final[int]
 
 
+class UnsupportedRevisionClass:
+    pass
+
+
 @dataclass(frozen=True)
 class LiteralDraft:
     choice: Literal[1, "one"]
@@ -439,6 +443,32 @@ def test_unsupported_or_malformed_generic_schema_fails_closed_without_persistenc
         )
 
     assert ledger.revisions("wf_unsupported_generic_revision") == ()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "value_type",
+    [
+        bytes,
+        UnsupportedRevisionClass,
+        Union[UnsupportedRevisionClass, int],
+    ],
+)
+def test_unsupported_declared_schema_fails_closed_without_persistence(
+    tmp_path, value_type
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_unsupported_declared_schema",
+            1,
+            {"unexpected": "mapping"},
+            value_type=value_type,
+        )
+
+    assert ledger.revisions("wf_unsupported_declared_schema") == ()
     assert not path.exists()
 
 

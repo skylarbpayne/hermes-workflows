@@ -554,7 +554,12 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
 
     if origin is not None:
         raise TypeError("unsupported revision generic schema")
-    return coerce_workflow_input(value, value_type)
+    if any(
+        value_type is supported_type
+        for supported_type in (Any, object, str, int, float, bool, dict, list, tuple)
+    ):
+        return coerce_workflow_input(value, value_type)
+    raise TypeError("unsupported revision schema")
 
 
 def _revision_presence_wrapper_kind(origin: Any) -> str | None:
