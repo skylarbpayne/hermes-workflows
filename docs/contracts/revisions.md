@@ -10,7 +10,7 @@ Attempt IDs are derived from canonical JSON containing only workflow ID and posi
 
 ## Durable lineage
 
-The file-backed v1 ledger is canonical UTF-8 JSON written through flush, `fsync`, and atomic replacement. It requires the exact built-in integer schema version `1` at the ledger, revision-entry, and diff levels; booleans, floats, strings, and other versions fail closed. It verifies all value hashes and stable IDs when opened. Lineage rules are strict:
+The file-backed v1 ledger is canonical UTF-8 JSON written through flush, `fsync`, and atomic replacement. It requires the exact built-in integer schema version `1` at the ledger, revision-entry, and diff levels; booleans, floats, strings, and other versions fail closed. It verifies all value hashes and stable IDs when opened. Malformed persisted identifiers and non-finite persisted values fail closed as deterministic `RevisionError` values rather than leaking parser or canonical-JSON errors. Lineage rules are strict:
 
 - first-attempt outputs have no parent;
 - a selected base points to the chosen revision from the immediately preceding attempt and preserves its exact value hash; reopening rejects a base that skips an earlier edit in favor of generated output;

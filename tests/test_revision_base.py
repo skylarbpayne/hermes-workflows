@@ -293,6 +293,47 @@ def test_restart_requires_exact_builtin_schema_version_at_every_level(
         RevisionLedger(path)
 
 
+@pytest.mark.parametrize("workflow_id", ["", " ", "\t"])
+def test_restart_normalizes_blank_persisted_workflow_id_to_revision_error(
+    tmp_path, workflow_id
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output("wf_revision", 1, Draft("before", 1), value_type=Draft)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["revisions"][0]["workflow_id"] = workflow_id
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RevisionError) as caught:
+        RevisionLedger(path)
+
+    assert str(caught.value) == "revision ledger contains invalid persisted revision data"
+
+
+@pytest.mark.parametrize(
+    "persisted_value",
+    [
+        float("nan"),
+        {"nested": float("inf")},
+        [float("-inf")],
+    ],
+)
+def test_restart_normalizes_nonfinite_persisted_values_to_revision_error(
+    tmp_path, persisted_value
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output("wf_revision", 1, Draft("before", 1), value_type=Draft)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["revisions"][0]["value"] = persisted_value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RevisionError) as caught:
+        RevisionLedger(path)
+
+    assert str(caught.value) == "revision ledger contains invalid persisted revision data"
+
+
 def test_restart_rejects_duplicate_workflow_attempt_kind_slot(tmp_path):
     path = tmp_path / "revisions.json"
     first = RevisionLedger(path)

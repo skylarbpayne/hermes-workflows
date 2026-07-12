@@ -291,8 +291,15 @@ class RevisionLedger:
         _validate_schema_version(payload["schema_version"], level="ledger")
         if not isinstance(payload["revisions"], list):
             raise RevisionError("revision ledger revisions must be a JSON array")
-        records = [_record_from_dict(item) for item in payload["revisions"]]
-        _validate_lineage(records)
+        try:
+            records = [_record_from_dict(item) for item in payload["revisions"]]
+            _validate_lineage(records)
+        except RevisionError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise RevisionError(
+                "revision ledger contains invalid persisted revision data"
+            ) from exc
         return records
 
     def _persist(self) -> None:
