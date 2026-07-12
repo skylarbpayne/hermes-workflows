@@ -136,6 +136,20 @@ PostponedAliasPep604LiteralDraft.__annotations__["choice"] = (
 )
 
 
+class PostponedPep604LiteralAliasHolder:
+    Choice = "Literal[1] | None"
+
+
+@dataclass(frozen=True)
+class PostponedAttributeAliasPep604LiteralDraft:
+    choice: object
+
+
+PostponedAttributeAliasPep604LiteralDraft.__annotations__["choice"] = (
+    "PostponedPep604LiteralAliasHolder.Choice"
+)
+
+
 CyclicRevisionAlias = "CyclicRevisionAlias"
 
 
@@ -430,6 +444,7 @@ def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path)
         ({"choices": [True]}, PostponedNestedQuotedPep604LiteralDraft),
         ({"choice": True}, PostponedQuotedPep604LiteralTypedDraft),
         ({"choice": True}, PostponedAliasPep604LiteralDraft),
+        ({"choice": True}, PostponedAttributeAliasPep604LiteralDraft),
     ],
 )
 def test_nested_postponed_pep604_literal_unions_preserve_identity_on_python39(

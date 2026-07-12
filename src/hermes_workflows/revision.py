@@ -611,7 +611,7 @@ def _eval_revision_fallback_annotation(
     if isinstance(node, ast.Attribute):
         if node.attr.startswith("_"):
             raise TypeError("private annotation attributes are not supported")
-        return getattr(
+        value = getattr(
             _eval_revision_fallback_annotation(
                 node.value,
                 namespace,
@@ -619,6 +619,14 @@ def _eval_revision_fallback_annotation(
             ),
             node.attr,
         )
+        if resolve_forward_ref and isinstance(value, (str, ForwardRef)):
+            return _resolve_revision_fallback_annotation(
+                value,
+                namespace,
+                {},
+                _seen_forward_refs=_seen_forward_refs,
+            )
+        return value
 
     if isinstance(node, ast.Constant):
         if resolve_forward_ref and isinstance(node.value, str):
