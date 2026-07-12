@@ -18,7 +18,12 @@ from urllib.parse import quote
 from .approvals import ApprovalDecision, ApprovalDecisionInput, ApprovalReceipt, ApprovalView, OperatorResponseReceipt
 from .domain import CommandType, WorkflowStatus, decode_command_row, decode_event_row, make_command, make_event
 from .input_parsing import coerce_workflow_input
-from .runtime_services import EmptyRuntimeServicesV1, RuntimeOnlyServiceRegistry, RuntimeServiceRegistry
+from .runtime_services import (
+    EmptyRuntimeServicesV1,
+    RuntimeOnlyServiceRegistry,
+    RuntimeServiceRegistry,
+    validate_runtime_service_resolution,
+)
 from .status_projection import StatusProjection
 from .types import to_json_value
 from .workflow_values import Workflow
@@ -127,6 +132,7 @@ class WorkflowEngine:
             self._init_db()
 
     def resolve_runtime_service(self, service_id: str, contract_version: int) -> object | None:
+        validate_runtime_service_resolution(service_id, contract_version)
         return self.runtime_services.resolve(service_id, contract_version)
 
     def _ensure_writable(self, operation: str) -> None:
