@@ -4,10 +4,21 @@ import hashlib
 import json
 import math
 import os
+import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing import (
+    Any,
+    Literal,
+    Protocol,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+    runtime_checkable,
+)
 
 from .input_parsing import coerce_workflow_input
 from .operator_services import OperatorServiceRegistry
@@ -200,9 +211,11 @@ class RevisionLedger:
             raise RevisionError("the first attempt has no prior revision base")
         chosen = self._latest(workflow_id, previous_attempt, kinds=("edit",))
         if chosen is None:
-            chosen = self._latest(workflow_id, previous_attempt, kinds=("output", "base"))
+            chosen = self._latest(workflow_id, previous_attempt, kinds=("output",))
         if chosen is None:
-            raise RevisionError("no prior output is available as the next revision base")
+            raise RevisionError(
+                "a prior attempt output or edit must exist before selecting the next base"
+            )
 
         typed_value = _coerce_exact_value(
             chosen.value,
@@ -349,10 +362,7 @@ def resolve_revision_service(registry: OperatorServiceRegistry) -> RevisionServi
 
 def _coerce_value(value: object, value_type: Any) -> Any:
     try:
-        declared_fields = getattr(value_type, "__dataclass_fields__", None)
-        if declared_fields is not None and isinstance(value, Mapping):
-            if any(key not in declared_fields for key in value):
-                raise RevisionValueError("invalid revision value: unknown revision fields")
+        _reject_unknown_dataclass_fields(value, value_type)
         coerced = coerce_workflow_input(value, value_type)
         json_value = _revision_json_value(coerced)
     except RevisionValueError:
@@ -363,6 +373,70 @@ def _coerce_value(value: object, value_type: Any) -> Any:
         ) from exc
     _validate_finite_json_numbers(json_value)
     return coerced
+
+
+def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
+    origin = get_origin(value_type)
+    args = get_args(value_type)
+    union_type = getattr(types, "UnionType", None)
+
+    if origin is Union or (union_type is not None and origin is union_type):
+        if value is None and type(None) in args:
+            return
+        for option in args:
+            if option is type(None):
+                continue
+            try:
+                coerce_workflow_input(value, option)
+            except Exception:
+                continue
+            _reject_unknown_dataclass_fields(value, option)
+            return
+        return
+
+    if is_dataclass(value_type) and isinstance(value_type, type):
+        declared = {item.name: item for item in fields(value_type)}
+        if isinstance(value, Mapping):
+            if any(key not in declared for key in value):
+                raise RevisionValueError("invalid revision value: unknown revision fields")
+            source = value
+        elif isinstance(value, value_type):
+            source = {name: getattr(value, name) for name in declared}
+        else:
+            return
+        try:
+            type_hints = get_type_hints(value_type, include_extras=True)
+        except Exception:
+            type_hints = dict(getattr(value_type, "__annotations__", {}) or {})
+        for name, item in declared.items():
+            if name in source:
+                _reject_unknown_dataclass_fields(source[name], type_hints.get(name, item.type))
+        return
+
+    if origin in (list, Sequence):
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            item_type = args[0] if args else Any
+            for item in value:
+                _reject_unknown_dataclass_fields(item, item_type)
+        return
+
+    if origin is tuple:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            if len(args) == 2 and args[1] is Ellipsis:
+                item_types = (args[0],) * len(value)
+            else:
+                item_types = args
+            for index, item in enumerate(value):
+                if index < len(item_types):
+                    _reject_unknown_dataclass_fields(item, item_types[index])
+        return
+
+    if origin in (dict, Mapping) and isinstance(value, Mapping):
+        key_type = args[0] if args else Any
+        item_type = args[1] if len(args) > 1 else Any
+        for key, item in value.items():
+            _reject_unknown_dataclass_fields(key, key_type)
+            _reject_unknown_dataclass_fields(item, item_type)
 
 
 def _coerce_exact_value(value: object, value_type: Any, *, expected_sha256: str) -> Any:
@@ -552,11 +626,14 @@ def _validate_lineage(records: list[RevisionRecordV1]) -> None:
             if (
                 parent is None
                 or parent.attempt_number != record.attempt_number - 1
+                or parent.kind not in ("output", "edit")
                 or record.base_revision_id != parent.revision_id
                 or record.value_sha256 != parent.value_sha256
                 or record.diff is not None
             ):
-                raise RevisionError("selected base must exactly preserve the prior attempt's chosen value")
+                raise RevisionError(
+                    "selected base must exactly preserve a prior attempt output or edit"
+                )
         seen[record.revision_id] = record
         seen_slots.add(slot)
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -39,6 +41,26 @@ class DriftedDraft:
 @dataclass(frozen=True)
 class FloatDraft:
     score: float
+
+
+@dataclass(frozen=True)
+class NestedDraft:
+    primary: Draft
+    alternatives: list[Draft]
+    archived: tuple[Draft, ...]
+    by_name: dict[str, Draft]
+    fallback: Optional[Draft]
+
+
+def _test_stable_id(prefix, payload):
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return f"{prefix}_{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:32]}"
 
 
 class BrokenMapping(Mapping):
@@ -103,6 +125,80 @@ def test_invalid_edit_is_rejected_without_mutating_lineage(tmp_path):
     assert ledger.revisions("wf_revision") == (original,)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        {
+            "primary": {"title": "Primary", "score": 1, "unknown": True},
+            "alternatives": [],
+            "archived": (),
+            "by_name": {},
+            "fallback": None,
+        },
+        {
+            "primary": {"title": "Primary", "score": 1},
+            "alternatives": [{"title": "Alternative", "score": 2, "unknown": True}],
+            "archived": (),
+            "by_name": {},
+            "fallback": None,
+        },
+        {
+            "primary": {"title": "Primary", "score": 1},
+            "alternatives": [],
+            "archived": ({"title": "Archived", "score": 3, "unknown": True},),
+            "by_name": {},
+            "fallback": None,
+        },
+        {
+            "primary": {"title": "Primary", "score": 1},
+            "alternatives": [],
+            "archived": (),
+            "by_name": {"named": {"title": "Named", "score": 3, "unknown": True}},
+            "fallback": None,
+        },
+        {
+            "primary": {"title": "Primary", "score": 1},
+            "alternatives": [],
+            "archived": (),
+            "by_name": {},
+            "fallback": {"title": "Fallback", "score": 4, "unknown": True},
+        },
+    ],
+)
+def test_nested_unknown_dataclass_fields_are_rejected_without_mutating_lineage(
+    tmp_path, value
+):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError, match="unknown revision fields"):
+        ledger.record_output("wf_nested_revision", 1, value, value_type=NestedDraft)
+
+    assert ledger.revisions("wf_nested_revision") == ()
+
+
+def test_valid_nested_dataclass_fields_remain_schema_coerced(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    value = {
+        "primary": {"title": "Primary", "score": "1"},
+        "alternatives": [{"title": "Alternative", "score": "2"}],
+        "archived": ({"title": "Archived", "score": "3"},),
+        "by_name": {"named": {"title": "Named", "score": "4"}},
+        "fallback": {"title": "Fallback", "score": "5"},
+    }
+
+    record = ledger.record_output(
+        "wf_nested_revision", 1, value, value_type=NestedDraft
+    )
+
+    assert record.value == NestedDraft(
+        primary=Draft("Primary", 1),
+        alternatives=[Draft("Alternative", 2)],
+        archived=(Draft("Archived", 3),),
+        by_name={"named": Draft("Named", 4)},
+        fallback=Draft("Fallback", 5),
+    )
+
+
 def test_hostile_revision_mappings_fail_with_bounded_nonleaking_errors(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     secret = "SECRET_" + "x" * 10_000
@@ -161,6 +257,62 @@ def test_without_edit_the_generated_output_is_the_next_base(tmp_path):
     assert selected.value == Draft("Draft", 1)
     assert selected.base_revision_id == output.revision_id
     assert selected.parent_revision_id == output.revision_id
+
+
+def test_next_base_cannot_skip_a_later_attempt_output(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    ledger.record_output("wf_revision", 1, Draft("First", 1), value_type=Draft)
+    ledger.select_next_base("wf_revision", 2, value_type=Draft)
+
+    with pytest.raises(RevisionError, match="prior attempt output or edit"):
+        ledger.select_next_base("wf_revision", 3, value_type=Draft)
+
+    output_v2 = ledger.record_output(
+        "wf_revision", 2, Draft("Second", 2), value_type=Draft
+    )
+    selected_v3 = ledger.select_next_base("wf_revision", 3, value_type=Draft)
+    assert selected_v3.parent_revision_id == output_v2.revision_id
+    assert selected_v3.base_revision_id == output_v2.revision_id
+
+
+def test_restart_rejects_descendant_base_derived_from_an_unfinalized_base(tmp_path):
+    path = tmp_path / "stale-descendant-base.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output("wf_revision", 1, Draft("First", 1), value_type=Draft)
+    selected_v2 = ledger.select_next_base("wf_revision", 2, value_type=Draft)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    attempt_id = _test_stable_id(
+        "att", {"workflow_id": "wf_revision", "attempt_number": 3}
+    )
+    stale_v3 = {
+        "schema_version": 1,
+        "workflow_id": "wf_revision",
+        "attempt_number": 3,
+        "attempt_id": attempt_id,
+        "kind": "base",
+        "value_sha256": selected_v2.value_sha256,
+        "parent_revision_id": selected_v2.revision_id,
+        "base_revision_id": selected_v2.revision_id,
+        "diff": None,
+        "value": {"title": "First", "score": 1},
+    }
+    stale_v3["revision_id"] = _test_stable_id(
+        "rev",
+        {
+            "workflow_id": "wf_revision",
+            "attempt_id": attempt_id,
+            "kind": "base",
+            "value_sha256": selected_v2.value_sha256,
+            "parent_revision_id": selected_v2.revision_id,
+            "base_revision_id": selected_v2.revision_id,
+        },
+    )
+    payload["revisions"].append(stale_v3)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RevisionError, match="prior attempt output or edit"):
+        RevisionLedger(path)
 
 
 def test_late_edit_is_rejected_after_descendant_base_selection(tmp_path):

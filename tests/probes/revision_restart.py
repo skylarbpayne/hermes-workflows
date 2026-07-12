@@ -156,6 +156,71 @@ def _verify_duplicate_slot_is_rejected(directory: Path) -> str:
     raise RuntimeError("restart accepted a duplicate workflow/attempt/kind slot")
 
 
+def _stable_id(prefix: str, payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return f"{prefix}_{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _verify_unfinalized_base_is_rejected(directory: Path) -> dict[str, str]:
+    path = directory / "unfinalized-base.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output("wf_revision_order", 1, Draft("First", 1), value_type=Draft)
+    selected_v2 = ledger.select_next_base("wf_revision_order", 2, value_type=Draft)
+    expected = "a prior attempt output or edit must exist before selecting the next base"
+    try:
+        ledger.select_next_base("wf_revision_order", 3, value_type=Draft)
+    except RevisionError as exc:
+        if str(exc) != expected:
+            raise RuntimeError(f"unexpected output-order rejection: {exc}") from exc
+        public_rejection = str(exc)
+    else:
+        raise RuntimeError("public selection propagated an unfinalized base")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    attempt_id = _stable_id(
+        "att", {"workflow_id": "wf_revision_order", "attempt_number": 3}
+    )
+    stale_v3 = {
+        "schema_version": 1,
+        "workflow_id": "wf_revision_order",
+        "attempt_number": 3,
+        "attempt_id": attempt_id,
+        "kind": "base",
+        "value_sha256": selected_v2.value_sha256,
+        "parent_revision_id": selected_v2.revision_id,
+        "base_revision_id": selected_v2.revision_id,
+        "diff": None,
+        "value": {"title": "First", "score": 1},
+    }
+    stale_v3["revision_id"] = _stable_id(
+        "rev",
+        {
+            "workflow_id": "wf_revision_order",
+            "attempt_id": attempt_id,
+            "kind": "base",
+            "value_sha256": selected_v2.value_sha256,
+            "parent_revision_id": selected_v2.revision_id,
+            "base_revision_id": selected_v2.revision_id,
+        },
+    )
+    payload["revisions"].append(stale_v3)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        RevisionLedger(path)
+    except RevisionError as exc:
+        restart_expected = "selected base must exactly preserve a prior attempt output or edit"
+        if str(exc) != restart_expected:
+            raise RuntimeError(f"unexpected stale-base restart rejection: {exc}") from exc
+        return {"public": public_rejection, "restart": str(exc)}
+    raise RuntimeError("restart accepted a descendant base derived from an unfinalized base")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -183,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         adversarial_rejection = _verify_adversarial_skip_is_rejected(Path(temporary))
         schema_rejections = _verify_invalid_schema_versions_are_rejected(Path(temporary))
         duplicate_slot_rejection = _verify_duplicate_slot_is_rejected(Path(temporary))
+        unfinalized_base_rejections = _verify_unfinalized_base_is_rejected(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -202,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         "adversarial_rejection": adversarial_rejection,
         "schema_rejections": schema_rejections,
         "duplicate_slot_rejection": duplicate_slot_rejection,
+        "unfinalized_base_rejections": unfinalized_base_rejections,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
