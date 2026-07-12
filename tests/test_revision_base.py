@@ -279,6 +279,29 @@ class BrokenMapping(Mapping):
         return 1
 
 
+class ConflictingDraftMapping(Mapping):
+    def __init__(self):
+        self._score_reads = 0
+
+    def __getitem__(self, key):
+        if key == "title":
+            return "Draft"
+        if key == "score":
+            self._score_reads += 1
+            return self._score_reads
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(("title", "score", "score"))
+
+    def __len__(self):
+        return 3
+
+
+class DraftDict(dict):
+    pass
+
+
 class HostileInt(int):
     def __lt__(self, other):
         raise RuntimeError("SECRET_NUMERIC_COMPARATOR")
@@ -959,6 +982,33 @@ def test_hostile_revision_mappings_fail_with_bounded_nonleaking_errors(tmp_path)
         assert "SECRET" not in message
 
     assert ledger.revisions("wf_revision") == ()
+
+
+@pytest.mark.parametrize("value_type", (Draft, TypedDraft))
+@pytest.mark.parametrize(
+    "value",
+    (ConflictingDraftMapping(), DraftDict(title="Draft", score=1)),
+    ids=("custom-mapping", "dict-subclass"),
+)
+def test_revision_object_inputs_require_concrete_dicts_before_materialization(
+    tmp_path, value_type, value
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_revision_custom_mapping",
+            1,
+            value,
+            value_type=value_type,
+        )
+
+    message = str(caught.value)
+    assert message.startswith("invalid revision value for ")
+    assert len(message.encode("utf-8")) <= 256
+    assert ledger.revisions("wf_revision_custom_mapping") == ()
+    assert not path.exists()
 
 
 def test_revision_values_reject_keys_that_collide_in_canonical_json(tmp_path):

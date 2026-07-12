@@ -430,6 +430,9 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
+    if isinstance(value, Mapping) and type(value) is not dict:
+        raise TypeError("revision object inputs must be concrete dicts")
+
     if _revision_presence_wrapper_kind(origin) is not None:
         raise TypeError("revision presence wrappers are only valid on TypedDict fields")
 
@@ -470,7 +473,7 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
 
     if is_dataclass(value_type) and isinstance(value_type, type):
         type_hints = _safe_revision_type_hints(value_type)
-        if isinstance(value, Mapping):
+        if type(value) is dict:
             prepared = dict(value)
         elif isinstance(value, value_type):
             prepared = {item.name: getattr(value, item.name) for item in fields(value_type)}
@@ -484,7 +487,7 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
         return coerce_workflow_input(prepared, value_type)
 
     if _is_revision_typed_dict_type(value_type):
-        if not isinstance(value, Mapping):
+        if type(value) is not dict:
             return coerce_workflow_input(value, value_type)
         type_hints = _safe_revision_type_hints(value_type)
         prepared = dict(value)
@@ -542,7 +545,7 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     if origin in (dict, Mapping):
         if len(args) != 2:
             raise TypeError("malformed revision mapping schema")
-        if not isinstance(value, Mapping):
+        if type(value) is not dict:
             return coerce_workflow_input(value, value_type)
         key_type, item_type = args
         prepared_mapping = {}
@@ -887,7 +890,7 @@ def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
 
     if is_dataclass(value_type) and isinstance(value_type, type):
         declared = {item.name: item for item in fields(value_type)}
-        if isinstance(value, Mapping):
+        if type(value) is dict:
             if any(key not in declared for key in value):
                 raise RevisionValueError("invalid revision value: unknown revision fields")
             source = value
@@ -922,7 +925,7 @@ def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
                     _reject_unknown_dataclass_fields(item, item_types[index])
         return
 
-    if origin in (dict, Mapping) and isinstance(value, Mapping):
+    if origin in (dict, Mapping) and type(value) is dict:
         key_type = args[0] if args else Any
         item_type = args[1] if len(args) > 1 else Any
         for key, item in value.items():
@@ -1197,7 +1200,9 @@ def _normalize_revision_json_value(
     if depth > _MAX_PERSISTED_JSON_DEPTH:
         raise RevisionValueError("revision value exceeds the supported JSON depth limit")
     is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
-    is_mapping = isinstance(value, Mapping)
+    if isinstance(value, Mapping) and type(value) is not dict:
+        raise RevisionValueError("revision JSON objects must be concrete dicts")
+    is_mapping = type(value) is dict
     is_sequence = isinstance(value, Sequence) and not isinstance(
         value, (str, bytes, bytearray)
     )

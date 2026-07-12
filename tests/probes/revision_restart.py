@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -48,6 +49,25 @@ class MisplacedRequiredDraft:
 @dataclass(frozen=True)
 class MisplacedNotRequiredDraft:
     score: NotRequired[int]
+
+
+class ConflictingDraftMapping(Mapping):
+    def __init__(self):
+        self._score_reads = 0
+
+    def __getitem__(self, key):
+        if key == "title":
+            return "Draft"
+        if key == "score":
+            self._score_reads += 1
+            return self._score_reads
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(("title", "score", "score"))
+
+    def __len__(self):
+        return 3
 
 
 def _fixture() -> tuple[Path, dict[str, object]]:
@@ -306,6 +326,32 @@ def _verify_typed_schema_validation(directory: Path) -> dict[str, object]:
     ):
         raise RuntimeError("misplaced presence wrapper appended revision lineage")
 
+    custom_mapping_path = directory / "custom-mapping.json"
+    custom_mapping_ledger = RevisionLedger(custom_mapping_path)
+    custom_mapping_rejections = []
+    for value_type in (Draft, TypedDraft):
+        try:
+            custom_mapping_ledger.record_output(
+                "wf_revision_custom_mapping",
+                1,
+                ConflictingDraftMapping(),
+                value_type=value_type,
+            )
+        except RevisionError as exc:
+            message = str(exc)
+            if not message.startswith("invalid revision value for ") or len(
+                message.encode("utf-8")
+            ) > 256:
+                raise RuntimeError(f"unexpected custom mapping rejection: {message}") from exc
+            custom_mapping_rejections.append(message)
+            continue
+        raise RuntimeError("typed revision accepted a custom Mapping input")
+    if (
+        custom_mapping_ledger.revisions("wf_revision_custom_mapping")
+        or custom_mapping_path.exists()
+    ):
+        raise RuntimeError("custom Mapping input appended revision lineage")
+
     valid_path = directory / "valid-typed-dict.json"
     valid = RevisionLedger(valid_path)
     valid.record_output(
@@ -342,6 +388,7 @@ def _verify_typed_schema_validation(directory: Path) -> dict[str, object]:
         "dataclass_rejection": dataclass_rejection,
         "typed_dict_rejections": typed_dict_rejections,
         "misplaced_presence_wrapper_rejections": misplaced_rejections,
+        "custom_mapping_rejections": custom_mapping_rejections,
         "typed_dict_edited_hash": edited.value_sha256,
         "typed_dict_base_hash": selected.value_sha256,
     }
