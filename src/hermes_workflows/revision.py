@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import (
+    Annotated,
     Any,
     Literal,
     Protocol,
@@ -362,8 +363,7 @@ def resolve_revision_service(registry: OperatorServiceRegistry) -> RevisionServi
 
 def _coerce_value(value: object, value_type: Any) -> Any:
     try:
-        _reject_unknown_dataclass_fields(value, value_type)
-        coerced = coerce_workflow_input(value, value_type)
+        coerced = _coerce_revision_value(value, value_type)
         json_value = _revision_json_value(coerced)
     except RevisionValueError:
         raise
@@ -375,23 +375,125 @@ def _coerce_value(value: object, value_type: Any) -> Any:
     return coerced
 
 
+def _coerce_revision_value(value: object, value_type: Any) -> Any:
+    origin = get_origin(value_type)
+    args = get_args(value_type)
+    union_type = getattr(types, "UnionType", None)
+
+    if origin is Annotated:
+        return _coerce_revision_value(value, args[0])
+
+    if origin is Union or (union_type is not None and origin is union_type):
+        if value is None and type(None) in args:
+            return None
+        matches: list[tuple[Any, Any]] = []
+        validation_error: RevisionValueError | None = None
+        for option in args:
+            if option is type(None):
+                continue
+            try:
+                matches.append((option, _coerce_revision_value(value, option)))
+            except RevisionValueError as exc:
+                if validation_error is None:
+                    validation_error = exc
+            except Exception:
+                continue
+        if not matches:
+            if validation_error is not None:
+                raise validation_error
+            raise TypeError("revision value does not match any declared union branch")
+        if len(matches) > 1 and all(_is_dataclass_schema(option) for option, _ in matches):
+            raise TypeError("revision value matches multiple declared dataclass union branches")
+        return matches[0][1]
+
+    _reject_unknown_dataclass_fields(value, value_type)
+
+    if is_dataclass(value_type) and isinstance(value_type, type) and isinstance(value, Mapping):
+        type_hints = _safe_revision_type_hints(value_type)
+        prepared = dict(value)
+        for item in fields(value_type):
+            if item.name in prepared:
+                prepared[item.name] = _coerce_revision_value(
+                    prepared[item.name], type_hints.get(item.name, item.type)
+                )
+        return coerce_workflow_input(prepared, value_type)
+
+    if origin in (list, Sequence) and isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        item_type = args[0] if args else Any
+        prepared_items = [
+            _coerce_revision_value(item, item_type)
+            for item in cast(Sequence[object], value)
+        ]
+        return coerce_workflow_input(prepared_items, value_type)
+
+    if origin is tuple and isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        sequence = cast(Sequence[object], value)
+        if len(args) == 2 and args[1] is Ellipsis:
+            item_types = (args[0],) * len(sequence)
+        else:
+            item_types = args
+        prepared_items = tuple(
+            _coerce_revision_value(item, item_types[index] if index < len(item_types) else Any)
+            for index, item in enumerate(sequence)
+        )
+        return coerce_workflow_input(prepared_items, value_type)
+
+    if origin in (dict, Mapping) and isinstance(value, Mapping):
+        key_type = args[0] if args else Any
+        item_type = args[1] if len(args) > 1 else Any
+        prepared_mapping = {
+            _coerce_revision_value(key, key_type): _coerce_revision_value(item, item_type)
+            for key, item in value.items()
+        }
+        return coerce_workflow_input(prepared_mapping, value_type)
+
+    return coerce_workflow_input(value, value_type)
+
+
+def _is_dataclass_schema(value_type: Any) -> bool:
+    while get_origin(value_type) is Annotated:
+        value_type = get_args(value_type)[0]
+    return is_dataclass(value_type) and isinstance(value_type, type)
+
+
+def _safe_revision_type_hints(value_type: type[Any]) -> dict[str, Any]:
+    try:
+        return get_type_hints(value_type, include_extras=True)
+    except Exception:
+        return dict(getattr(value_type, "__annotations__", {}) or {})
+
+
 def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
     origin = get_origin(value_type)
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
+    if origin is Annotated:
+        _reject_unknown_dataclass_fields(value, args[0])
+        return
+
     if origin is Union or (union_type is not None and origin is union_type):
         if value is None and type(None) in args:
             return
+        validation_error: RevisionValueError | None = None
         for option in args:
             if option is type(None):
                 continue
             try:
-                coerce_workflow_input(value, option)
+                _reject_unknown_dataclass_fields(value, option)
+                _coerce_revision_value(value, option)
+            except RevisionValueError as exc:
+                if validation_error is None:
+                    validation_error = exc
             except Exception:
                 continue
-            _reject_unknown_dataclass_fields(value, option)
             return
+        if validation_error is not None:
+            raise validation_error
         return
 
     if is_dataclass(value_type) and isinstance(value_type, type):

@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional, Union
 
 import pytest
 
@@ -50,6 +50,22 @@ class NestedDraft:
     archived: tuple[Draft, ...]
     by_name: dict[str, Draft]
     fallback: Optional[Draft]
+
+
+@dataclass(frozen=True)
+class AnnotatedDraft:
+    child: Annotated[Draft, "revision child"]
+
+
+@dataclass(frozen=True)
+class NarrowDraft:
+    title: str
+
+
+@dataclass(frozen=True)
+class ExpandedDraft:
+    title: str
+    score: int = 0
 
 
 def _test_stable_id(prefix, payload):
@@ -197,6 +213,70 @@ def test_valid_nested_dataclass_fields_remain_schema_coerced(tmp_path):
         by_name={"named": Draft("Named", 4)},
         fallback=Draft("Fallback", 5),
     )
+
+
+def test_annotated_nested_dataclass_is_coerced_and_rejects_unknown_fields(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    record = ledger.record_output(
+        "wf_annotated_revision",
+        1,
+        {"child": {"title": "Annotated", "score": "2"}},
+        value_type=AnnotatedDraft,
+    )
+
+    assert record.value == AnnotatedDraft(Draft("Annotated", 2))
+
+    attacker_value = {
+        "child": {"title": "Bad", "score": 3, "SECRET_ANNOTATED_FIELD": True}
+    }
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_annotated_revision", 2, attacker_value, value_type=AnnotatedDraft
+        )
+
+    assert str(caught.value) == "invalid revision value: unknown revision fields"
+    assert "SECRET" not in str(caught.value)
+    assert ledger.revisions("wf_annotated_revision") == (record,)
+
+
+def test_overlapping_dataclass_union_selects_only_compatible_branch(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    record = ledger.record_output(
+        "wf_union_revision",
+        1,
+        {"title": "Expanded", "score": "4"},
+        value_type=Union[NarrowDraft, ExpandedDraft],
+    )
+
+    assert record.value == ExpandedDraft("Expanded", 4)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"title": "Ambiguous"},
+        {"title": "Invalid", "SECRET_UNION_FIELD": True},
+    ],
+)
+def test_ambiguous_or_invalid_dataclass_unions_fail_deterministically(tmp_path, value):
+    messages = []
+    for index in range(2):
+        ledger = RevisionLedger(tmp_path / f"revisions-{index}.json")
+        with pytest.raises(RevisionValueError) as caught:
+            ledger.record_output(
+                "wf_union_revision",
+                1,
+                value,
+                value_type=Union[NarrowDraft, ExpandedDraft],
+            )
+        messages.append(str(caught.value))
+        assert ledger.revisions("wf_union_revision") == ()
+
+    assert messages[0] == messages[1]
+    assert len(messages[0].encode("utf-8")) <= 256
+    assert "SECRET" not in messages[0]
 
 
 def test_hostile_revision_mappings_fail_with_bounded_nonleaking_errors(tmp_path):
