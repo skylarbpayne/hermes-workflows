@@ -97,16 +97,9 @@ class RaisingIterationList(list[object]):
         raise self._error_type()
 
 
-class RaisingAbsoluteInteger(int):
-    error_type: type[RuntimeError]
-
-    def __new__(cls, error_type: type[RuntimeError]):
-        value = super().__new__(cls, 7)
-        value.error_type = error_type
-        return value
-
+class LyingAbsoluteInteger(int):
     def __abs__(self) -> int:
-        raise self.error_type()
+        return 0
 
 
 class StatefulInteger(int):
@@ -249,6 +242,22 @@ def test_malformed_edited_output_fails_as_validation_error(edited_output: object
     assert caught.value.field_errors[0].field == "edited_output"
 
 
+def test_integer_subclass_cannot_bypass_the_digit_limit_with_hostile_abs():
+    oversized = 10**4096
+    expected_error = {
+        "field": "edited_output",
+        "code": "json",
+        "message": "edited_output must be a valid bounded JSON value",
+    }
+
+    for value in (oversized, LyingAbsoluteInteger(oversized)):
+        with pytest.raises(RevisionActionValidationError) as caught:
+            validate_revision_action(
+                {"action": "request_changes", "edited_output": value}
+            )
+        assert [error.to_dict() for error in caught.value.field_errors] == [expected_error]
+
+
 def test_direct_operator_service_path_uses_the_same_validator():
     validator = RevisionActionValidatorV1()
     registry = OperatorServicesV1(services={REVISION_ACTION_SERVICE_ID: validator})
@@ -320,16 +329,6 @@ def test_string_subclass_overrides_cannot_change_actionability_or_escape_validat
             "json",
             "edited_output must be a valid bounded JSON value",
             id="edited-list-subclass",
-        ),
-        pytest.param(
-            lambda error_type: {
-                "action": "request_changes",
-                "edited_output": RaisingAbsoluteInteger(error_type),
-            },
-            "edited_output",
-            "json",
-            "edited_output must be a valid bounded JSON value",
-            id="edited-integer-subclass",
         ),
     ],
 )

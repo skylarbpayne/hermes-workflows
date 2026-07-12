@@ -205,12 +205,13 @@ def _normalize_json_value(
         _validate_json_string(normalized_string)
         return normalized_string
     if isinstance(value, int):
-        if abs(value).bit_length() > _MAX_INTEGER_BITS:
+        normalized_integer = int.__int__(value)
+        if abs(normalized_integer).bit_length() > _MAX_INTEGER_BITS:
             raise ValueError(
                 f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
             )
         try:
-            digits = len(str(abs(value)))
+            digits = len(str(abs(normalized_integer)))
         except ValueError as exc:
             raise ValueError(
                 f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
@@ -219,7 +220,7 @@ def _normalize_json_value(
             raise ValueError(
                 f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
             )
-        return int.__int__(value)
+        return normalized_integer
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("edited_output JSON numbers must be finite")
