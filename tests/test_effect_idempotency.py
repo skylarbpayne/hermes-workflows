@@ -297,6 +297,43 @@ def test_reclaim_gets_fresh_ownership_when_token_generator_repeats(tmp_path, mon
     assert completed.receipt.payload == {"receipt": "current"}
 
 
+def test_reclaim_never_reuses_earlier_claim_token_after_aba_input(tmp_path, monkeypatch):
+    from hermes_workflows import effects
+    from hermes_workflows.effects import EffectPolicy, SQLiteEffectStore, operation_identity
+
+    generated_tokens = iter(("token-a", "token-b", "token-a", "token-c"))
+    monkeypatch.setattr(effects.secrets, "token_urlsafe", lambda _size: next(generated_tokens))
+
+    store = SQLiteEffectStore(tmp_path / "effects.sqlite")
+    identity = operation_identity(
+        workflow_id="wf-aba-claim-token",
+        effect_key="write",
+        adapter_id="test.file.v1",
+        input_value={"value": 1},
+    )
+    store.ensure_intent(identity, EffectPolicy.IDEMPOTENT, {"value": 1}, now=10.0)
+
+    claim_a = store.claim(identity.operation_id, now=10.0, ttl_seconds=1.0)
+    claim_b = store.claim(identity.operation_id, now=11.0, ttl_seconds=1.0)
+    claim_c = store.claim(identity.operation_id, now=12.0, ttl_seconds=5.0)
+
+    assert (claim_a.token, claim_b.token, claim_c.token) == ("token-a", "token-b", "token-c")
+    with sqlite3.connect(tmp_path / "effects.sqlite") as conn:
+        issued_tokens = conn.execute(
+            "SELECT claim_token FROM effect_claim_tokens ORDER BY issued_at"
+        ).fetchall()
+    assert issued_tokens == [("token-a",), ("token-b",), ("token-c",)]
+    with pytest.raises(RuntimeError, match="stale claim token"):
+        store.complete(identity.operation_id, claim_a.token, {"receipt": "stale-a"}, now=13.0)
+
+    completed = store.complete(
+        identity.operation_id, claim_c.token, {"receipt": "current-c"}, now=13.0
+    )
+    assert completed.attempts == 3
+    assert completed.receipt is not None
+    assert completed.receipt.payload == {"receipt": "current-c"}
+
+
 @pytest.mark.parametrize("source", ["lookup", "perform"])
 def test_coordinator_rejects_conflicting_adapter_receipt_operation_id(tmp_path, source):
     from hermes_workflows.effects import EffectCoordinator, EffectPolicy, SQLiteEffectStore

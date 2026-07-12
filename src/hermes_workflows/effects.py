@@ -268,15 +268,24 @@ class SQLiteEffectStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT claim_token FROM effect_intents WHERE operation_id = ?", (operation_id,)
+                "SELECT 1 FROM effect_intents WHERE operation_id = ?", (operation_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown operation_id: {operation_id}")
-            active_token = row[0]
             claim_token = ""
             for _ in range(8):
                 candidate = secrets.token_urlsafe(24)
-                if isinstance(candidate, str) and candidate and candidate != active_token:
+                if not isinstance(candidate, str) or not candidate:
+                    continue
+                issued = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO effect_claim_tokens (
+                        claim_token, operation_id, issued_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (candidate, operation_id, timestamp),
+                )
+                if issued.rowcount == 1:
                     claim_token = candidate
                     break
             if not claim_token:
@@ -469,6 +478,15 @@ class SQLiteEffectStore:
                     completed_at REAL NOT NULL,
                     claim_token TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS effect_claim_tokens (
+                    claim_token TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL REFERENCES effect_intents(operation_id),
+                    issued_at REAL NOT NULL
+                );
+                INSERT OR IGNORE INTO effect_claim_tokens (claim_token, operation_id, issued_at)
+                    SELECT claim_token, operation_id, updated_at
+                    FROM effect_intents
+                    WHERE claim_token IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS effect_intents_claimable
                     ON effect_intents(state, claim_expires_at);
                 """
