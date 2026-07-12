@@ -366,6 +366,23 @@ def test_revision_values_reject_keys_that_collide_in_canonical_json(tmp_path):
     assert ledger.revisions("wf_revision") == ()
 
 
+def test_declared_mapping_rejects_keys_that_collide_during_coercion(tmp_path):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_revision",
+            1,
+            {1: "first", "1": "second"},
+            value_type=dict[str, str],
+        )
+
+    assert str(caught.value) == "revision value contains duplicate canonical object keys"
+    assert ledger.revisions("wf_revision") == ()
+    assert not path.exists()
+
+
 def test_attempt_number_rejects_hostile_int_subclasses_without_comparison(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
 

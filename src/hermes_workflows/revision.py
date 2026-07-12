@@ -470,10 +470,14 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     if origin in (dict, Mapping) and isinstance(value, Mapping):
         key_type = args[0] if args else Any
         item_type = args[1] if len(args) > 1 else Any
-        prepared_mapping = {
-            _coerce_revision_value(key, key_type): _coerce_revision_value(item, item_type)
-            for key, item in value.items()
-        }
+        prepared_mapping = {}
+        for key, item in value.items():
+            prepared_key = _coerce_revision_value(key, key_type)
+            if prepared_key in prepared_mapping:
+                raise RevisionValueError(
+                    "revision value contains duplicate canonical object keys"
+                )
+            prepared_mapping[prepared_key] = _coerce_revision_value(item, item_type)
         return coerce_workflow_input(prepared_mapping, value_type)
 
     return coerce_workflow_input(value, value_type)
