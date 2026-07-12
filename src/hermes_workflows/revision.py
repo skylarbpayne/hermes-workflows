@@ -431,9 +431,7 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     union_type = getattr(types, "UnionType", None)
 
     if _revision_presence_wrapper_kind(origin) is not None:
-        if len(args) != 1:
-            raise TypeError("malformed revision presence wrapper")
-        return _coerce_revision_value(value, args[0])
+        raise TypeError("revision presence wrappers are only valid on TypedDict fields")
 
     if origin is Annotated:
         if not args:
@@ -499,6 +497,11 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
                 required_keys.add(key)
             elif wrapper_kind == "NotRequired":
                 required_keys.discard(key)
+            if wrapper_kind is not None:
+                wrapper_args = get_args(annotation)
+                if len(wrapper_args) != 1:
+                    raise TypeError("malformed revision presence wrapper")
+                type_hints[key] = wrapper_args[0]
         if required_keys - set(prepared):
             raise TypeError("revision value is missing required fields")
         return {

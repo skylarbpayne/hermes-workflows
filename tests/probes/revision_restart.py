@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+try:
+    from typing import NotRequired, Required
+except ImportError:  # pragma: no cover - exercised by the Python 3.9 probe.
+    from typing_extensions import NotRequired, Required
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
@@ -28,6 +33,21 @@ class Draft:
 class TypedDraft(TypedDict):
     title: str
     score: int
+
+
+class WrappedTypedDraft(TypedDict):
+    title: Required[str]
+    score: NotRequired[int]
+
+
+@dataclass(frozen=True)
+class MisplacedRequiredDraft:
+    score: Required[int]
+
+
+@dataclass(frozen=True)
+class MisplacedNotRequiredDraft:
+    score: NotRequired[int]
 
 
 def _fixture() -> tuple[Path, dict[str, object]]:
@@ -260,6 +280,32 @@ def _verify_typed_schema_validation(directory: Path) -> dict[str, object]:
     if typed_dict_ledger.revisions("wf_revision_invalid_typed_dict") or typed_dict_path.exists():
         raise RuntimeError("invalid TypedDict value appended revision lineage")
 
+    misplaced_path = directory / "misplaced-presence-wrapper.json"
+    misplaced_ledger = RevisionLedger(misplaced_path)
+    misplaced_rejections = []
+    for value, value_type in (
+        (1, Required[int]),
+        (1, NotRequired[int]),
+        ({"score": 1}, MisplacedRequiredDraft),
+        ({"score": 1}, MisplacedNotRequiredDraft),
+    ):
+        try:
+            misplaced_ledger.record_output(
+                "wf_revision_misplaced_presence_wrapper",
+                1,
+                value,
+                value_type=value_type,
+            )
+        except RevisionError as exc:
+            misplaced_rejections.append(str(exc))
+            continue
+        raise RuntimeError("typed revision accepted a misplaced presence wrapper")
+    if (
+        misplaced_ledger.revisions("wf_revision_misplaced_presence_wrapper")
+        or misplaced_path.exists()
+    ):
+        raise RuntimeError("misplaced presence wrapper appended revision lineage")
+
     valid_path = directory / "valid-typed-dict.json"
     valid = RevisionLedger(valid_path)
     valid.record_output(
@@ -283,9 +329,19 @@ def _verify_typed_schema_validation(directory: Path) -> dict[str, object]:
     if selected.value_sha256 != edited.value_sha256:
         raise RuntimeError("valid TypedDict restart did not preserve the exact edited hash")
 
+    wrapped = valid.record_output(
+        "wf_revision_valid_wrapped_typed_dict",
+        1,
+        {"title": "Draft"},
+        value_type=WrappedTypedDraft,
+    )
+    if wrapped.value != {"title": "Draft"}:
+        raise RuntimeError("valid TypedDict presence wrappers lost key semantics")
+
     return {
         "dataclass_rejection": dataclass_rejection,
         "typed_dict_rejections": typed_dict_rejections,
+        "misplaced_presence_wrapper_rejections": misplaced_rejections,
         "typed_dict_edited_hash": edited.value_sha256,
         "typed_dict_base_hash": selected.value_sha256,
     }

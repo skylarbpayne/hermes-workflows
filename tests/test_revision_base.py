@@ -85,6 +85,16 @@ class WrappedTypedDraft(TypedDict):
 
 
 @dataclass(frozen=True)
+class MisplacedRequiredDraft:
+    score: Required[int]
+
+
+@dataclass(frozen=True)
+class MisplacedNotRequiredDraft:
+    score: NotRequired[int]
+
+
+@dataclass(frozen=True)
 class SetDraft:
     tags: set[int]
 
@@ -421,6 +431,30 @@ def test_required_and_not_required_typed_dict_keys_preserve_key_semantics(tmp_pa
             {"score": 1},
             value_type=WrappedTypedDraft,
         )
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type"),
+    [
+        (1, Required[int]),
+        (1, NotRequired[int]),
+        ({"score": 1}, MisplacedRequiredDraft),
+        ({"score": 1}, MisplacedNotRequiredDraft),
+    ],
+)
+def test_required_and_not_required_outside_typed_dict_fail_closed_without_persistence(
+    tmp_path, value, value_type
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_misplaced_presence_wrapper", 1, value, value_type=value_type
+        )
+
+    assert ledger.revisions("wf_misplaced_presence_wrapper") == ()
+    assert not path.exists()
 
 
 @pytest.mark.parametrize(
