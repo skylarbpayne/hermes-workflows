@@ -96,6 +96,66 @@ def _verify_adversarial_skip_is_rejected(directory: Path) -> str:
     raise RuntimeError("restart accepted a descendant base that skipped a prior edit")
 
 
+def _verify_invalid_schema_versions_are_rejected(directory: Path) -> list[str]:
+    cases = (("ledger", True), ("entry", True), ("diff", 2))
+    rejections = []
+    for level, invalid_version in cases:
+        path = directory / f"invalid-{level}-schema.json"
+        ledger = RevisionLedger(path)
+        ledger.record_output("wf_revision_schema", 1, Draft("before", 1), value_type=Draft)
+        ledger.record_edit("wf_revision_schema", 1, Draft("after", 2), value_type=Draft)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if level == "ledger":
+            payload["schema_version"] = invalid_version
+        elif level == "entry":
+            payload["revisions"][0]["schema_version"] = invalid_version
+        else:
+            payload["revisions"][1]["diff"]["schema_version"] = invalid_version
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        try:
+            RevisionLedger(path)
+        except RevisionError as exc:
+            message = str(exc)
+            expected = f"{level} schema_version must be the integer 1"
+            if message != expected:
+                raise RuntimeError(f"unexpected schema rejection: {message}") from exc
+            rejections.append(message)
+            continue
+        raise RuntimeError(f"restart accepted invalid {level} schema_version")
+    return rejections
+
+
+def _verify_duplicate_slot_is_rejected(directory: Path) -> str:
+    path = directory / "duplicate-slot.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output("wf_revision_duplicate", 1, Draft("first", 1), value_type=Draft)
+
+    conflicting_path = directory / "duplicate-slot-conflict.json"
+    conflicting = RevisionLedger(conflicting_path)
+    conflicting.record_output(
+        "wf_revision_duplicate", 1, Draft("second", 2), value_type=Draft
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    conflicting_payload = json.loads(conflicting_path.read_text(encoding="utf-8"))
+    payload["revisions"].append(conflicting_payload["revisions"][0])
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    try:
+        RevisionLedger(path)
+    except RevisionError as exc:
+        message = str(exc)
+        expected = (
+            "duplicate revision slot: "
+            "workflow=wf_revision_duplicate attempt=1 kind=output"
+        )
+        if message != expected:
+            raise RuntimeError(f"unexpected duplicate-slot rejection: {message}") from exc
+        return message
+    raise RuntimeError("restart accepted a duplicate workflow/attempt/kind slot")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -121,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
             ).stdout
         )
         adversarial_rejection = _verify_adversarial_skip_is_rejected(Path(temporary))
+        schema_rejections = _verify_invalid_schema_versions_are_rejected(Path(temporary))
+        duplicate_slot_rejection = _verify_duplicate_slot_is_rejected(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -138,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         "lineage": restarted["lineage"],
         "restart_processes": 2,
         "adversarial_rejection": adversarial_rejection,
+        "schema_rejections": schema_rejections,
+        "duplicate_slot_rejection": duplicate_slot_rejection,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

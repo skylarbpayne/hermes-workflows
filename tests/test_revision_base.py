@@ -260,6 +260,60 @@ def test_restart_rejects_tampered_diff_count(tmp_path):
         RevisionLedger(path)
 
 
+@pytest.mark.parametrize(
+    ("level", "invalid_version"),
+    [
+        ("ledger", True),
+        ("ledger", 1.0),
+        ("entry", True),
+        ("entry", 1.0),
+        ("diff", True),
+        ("diff", 1.0),
+        ("diff", 2),
+    ],
+)
+def test_restart_requires_exact_builtin_schema_version_at_every_level(
+    tmp_path, level, invalid_version
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    ledger.record_output("wf_revision", 1, Draft("before", 1), value_type=Draft)
+    ledger.record_edit("wf_revision", 1, Draft("after", 2), value_type=Draft)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    if level == "ledger":
+        payload["schema_version"] = invalid_version
+    elif level == "entry":
+        payload["revisions"][0]["schema_version"] = invalid_version
+    else:
+        payload["revisions"][1]["diff"]["schema_version"] = invalid_version
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RevisionError, match=f"{level} schema_version must be the integer 1"):
+        RevisionLedger(path)
+
+
+def test_restart_rejects_duplicate_workflow_attempt_kind_slot(tmp_path):
+    path = tmp_path / "revisions.json"
+    first = RevisionLedger(path)
+    first.record_output("wf_revision", 1, Draft("first", 1), value_type=Draft)
+
+    second_path = tmp_path / "second.json"
+    second = RevisionLedger(second_path)
+    second.record_output("wf_revision", 1, Draft("second", 2), value_type=Draft)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    second_payload = json.loads(second_path.read_text(encoding="utf-8"))
+    payload["revisions"].append(second_payload["revisions"][0])
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        RevisionError,
+        match="duplicate revision slot: workflow=wf_revision attempt=1 kind=output",
+    ):
+        RevisionLedger(path)
+
+
 def test_revision_projection_is_bounded_and_nonleaking(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     ledger.record_output("wf_revision", 1, Draft("secret original", 1), value_type=Draft)

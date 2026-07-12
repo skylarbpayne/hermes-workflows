@@ -288,8 +288,9 @@ class RevisionLedger:
             raise RevisionError("revision ledger must contain valid UTF-8 JSON") from exc
         if not isinstance(payload, dict) or set(payload) != {"schema_version", "revisions"}:
             raise RevisionError("revision ledger has an invalid top-level shape")
-        if payload["schema_version"] != SCHEMA_VERSION or not isinstance(payload["revisions"], list):
-            raise RevisionError("revision ledger schema_version must equal 1")
+        _validate_schema_version(payload["schema_version"], level="ledger")
+        if not isinstance(payload["revisions"], list):
+            raise RevisionError("revision ledger revisions must be a JSON array")
         records = [_record_from_dict(item) for item in payload["revisions"]]
         _validate_lineage(records)
         return records
@@ -403,8 +404,9 @@ def _record_from_dict(value: object) -> RevisionRecordV1:
         "diff",
         "value",
     }
-    if set(value) != expected or value["schema_version"] != SCHEMA_VERSION:
+    if set(value) != expected:
         raise RevisionError("revision entry has unknown, missing, or invalid fields")
+    _validate_schema_version(value["schema_version"], level="entry")
     kind = value["kind"]
     if kind not in ("output", "edit", "base"):
         raise RevisionError("revision kind must be output, edit, or base")
@@ -418,6 +420,7 @@ def _record_from_dict(value: object) -> RevisionRecordV1:
             "changed_leaf_count",
         }:
             raise RevisionError("revision diff has an invalid shape")
+        _validate_schema_version(diff_value["schema_version"], level="diff")
         diff = RevisionDiffV1(
             before_sha256=_validate_hash(diff_value["before_sha256"]),
             after_sha256=_validate_hash(diff_value["after_sha256"]),
@@ -454,7 +457,14 @@ def _record_from_dict(value: object) -> RevisionRecordV1:
 
 def _validate_lineage(records: list[RevisionRecordV1]) -> None:
     seen: dict[str, RevisionRecordV1] = {}
+    seen_slots: set[tuple[str, int, str]] = set()
     for record in records:
+        slot = (record.workflow_id, record.attempt_number, record.kind)
+        if slot in seen_slots:
+            raise RevisionError(
+                "duplicate revision slot: "
+                f"workflow={record.workflow_id} attempt={record.attempt_number} kind={record.kind}"
+            )
         if record.revision_id in seen:
             raise RevisionError(f"duplicate revision_id: {record.revision_id}")
         if record.parent_revision_id is not None:
@@ -527,6 +537,7 @@ def _validate_lineage(records: list[RevisionRecordV1]) -> None:
             ):
                 raise RevisionError("selected base must exactly preserve the prior attempt's chosen value")
         seen[record.revision_id] = record
+        seen_slots.add(slot)
 
 
 def _changed_leaf_count(before: object, after: object) -> int:
@@ -579,6 +590,12 @@ def _canonical_json(value: object) -> str:
 def _validate_attempt_number(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise RevisionError("attempt_number must be a positive integer")
+    return value
+
+
+def _validate_schema_version(value: object, *, level: str) -> int:
+    if type(value) is not int or value != SCHEMA_VERSION:
+        raise RevisionError(f"{level} schema_version must be the integer 1")
     return value
 
 
