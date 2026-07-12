@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,48 @@ from hermes_workflows.revision_validation import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "revision_actions_v1.json"
 ACTIONABLE_MESSAGE = "request_changes requires nonblank feedback or valid edited_output"
+
+
+class HostileRevisionMapping(Mapping[str, object]):
+    def __init__(self, action: str, field: str, value: object) -> None:
+        self._data = {"action": action, field: value}
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __getitem__(self, key: str) -> object:
+        return self._data[key]
+
+    def get(self, key: str, default: object = None) -> object:
+        if key in {"feedback", "edited_output"}:
+            return default
+        return self._data.get(key, default)
+
+
+class InconsistentItemsMapping(HostileRevisionMapping):
+    def items(self):  # type: ignore[override]
+        return [("action", self._data["action"])]
+
+
+class DuplicateItemsMapping(HostileRevisionMapping):
+    def items(self):  # type: ignore[override]
+        return [("action", self._data["action"]), ("action", "request_changes")]
+
+
+def _cyclic_list() -> list[object]:
+    value: list[object] = []
+    value.append(value)
+    return value
+
+
+def _nested_list(depth: int) -> object:
+    value: object = 0
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 def test_fixture_covers_actionable_request_changes_contract():
@@ -86,6 +129,48 @@ def test_approve_rejects_revision_fields_instead_of_hiding_data():
         assert caught.value.field_errors[0].field == field
 
 
+def test_custom_mapping_get_cannot_hide_revision_fields():
+    for field in ("feedback", "edited_output"):
+        with pytest.raises(RevisionActionValidationError) as caught:
+            validate_revision_action(HostileRevisionMapping("approve", field, "visible"))
+        assert caught.value.field_errors[0].field == field
+
+    with pytest.raises(RevisionActionValidationError, match=ACTIONABLE_MESSAGE):
+        validate_revision_action(
+            HostileRevisionMapping("request_changes", "feedback", "")
+        )
+
+
+def test_custom_mapping_views_must_agree_and_must_not_repeat_keys():
+    for payload in (
+        InconsistentItemsMapping("approve", "feedback", "visible"),
+        DuplicateItemsMapping("approve", "feedback", "visible"),
+    ):
+        with pytest.raises(RevisionActionValidationError) as caught:
+            validate_revision_action(payload)
+        assert caught.value.field_errors[0].field == "payload"
+
+
+@pytest.mark.parametrize(
+    "edited_output",
+    [
+        pytest.param(_cyclic_list(), id="cycle"),
+        pytest.param(_nested_list(65), id="excessive-depth"),
+        pytest.param([0] * 10_001, id="excessive-size"),
+        pytest.param("x" * 1_000_001, id="oversized-string"),
+        pytest.param(10**5000, id="oversized-integer"),
+        pytest.param("\ud800", id="lone-surrogate"),
+        pytest.param({"\ud800": "value"}, id="lone-surrogate-key"),
+    ],
+)
+def test_malformed_edited_output_fails_as_validation_error(edited_output: object):
+    with pytest.raises(RevisionActionValidationError) as caught:
+        validate_revision_action(
+            {"action": "request_changes", "edited_output": edited_output}
+        )
+    assert caught.value.field_errors[0].field == "edited_output"
+
+
 def test_direct_operator_service_path_uses_the_same_validator():
     validator = RevisionActionValidatorV1()
     registry = OperatorServicesV1(services={REVISION_ACTION_SERVICE_ID: validator})
@@ -100,6 +185,9 @@ def test_direct_operator_service_path_uses_the_same_validator():
     }
     with pytest.raises(RevisionActionValidationError, match=ACTIONABLE_MESSAGE):
         resolved.validate({"action": "request_changes", "feedback": "\u2003"})
+    with pytest.raises(RevisionActionValidationError) as caught:
+        resolved.validate({"action": "request_changes", "edited_output": _cyclic_list()})
+    assert caught.value.field_errors[0].field == "edited_output"
 
 
 def test_idempotency_hash_does_not_collapse_distinct_decisions():

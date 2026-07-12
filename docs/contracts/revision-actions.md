@@ -23,6 +23,13 @@ surrounding whitespace normalized. Values are never type-coerced. Unknown fields
 non-finite numbers, non-string JSON object keys, non-JSON values, and revision fields
 on `approve` are rejected.
 
+The validator snapshots every mapping before reading fields. Custom mapping iteration
+and `items()` must expose the same unique string keys; an overridable `get()` is never
+trusted. Edited JSON rejects cycles, nesting beyond 64 levels, more than 10,000 values,
+strings or canonical payloads beyond 1,000,000 UTF-8 bytes, integers beyond 4,096
+decimal digits, and invalid Unicode scalar values. Every such failure is returned as a
+`RevisionActionValidationError`, never as a raw encoder or recursion exception.
+
 The empty request-changes error message is exactly:
 
 `request_changes requires nonblank feedback or valid edited_output`

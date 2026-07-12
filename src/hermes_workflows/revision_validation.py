@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 
 
 REVISION_ACTION_SERVICE_ID = "revision.action.validator"
@@ -14,6 +14,12 @@ REVISION_ACTION_CONTRACT_VERSION = 1
 _ACTIONABLE_MESSAGE = "request_changes requires nonblank feedback or valid edited_output"
 _ALLOWED_FIELDS = frozenset({"action", "feedback", "edited_output"})
 _MISSING = object()
+_MAX_JSON_DEPTH = 64
+_MAX_JSON_NODES = 10_000
+_MAX_JSON_BYTES = 1_000_000
+_MAX_INTEGER_DIGITS = 4_096
+_MAX_INTEGER_BITS = 13_607
+_MAX_PAYLOAD_ENTRIES = 100
 
 
 @dataclass(frozen=True)
@@ -66,8 +72,17 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
     if not isinstance(payload, Mapping):
         _raise_invalid(_field_error("payload", "type", "payload must be an object"))
 
+    try:
+        snapshot = _snapshot_mapping(
+            payload,
+            context="payload",
+            max_entries=_MAX_PAYLOAD_ENTRIES,
+        )
+    except Exception as exc:
+        _raise_invalid(_field_error("payload", "mapping", str(exc)))
+
     unknown = sorted(
-        (field for field in payload if field not in _ALLOWED_FIELDS),
+        (field for field in snapshot if field not in _ALLOWED_FIELDS),
         key=lambda field: (type(field).__name__, repr(field)),
     )
     if unknown:
@@ -78,7 +93,7 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
             )
         )
 
-    action_value = payload.get("action", _MISSING)
+    action_value = snapshot.get("action", _MISSING)
     if not isinstance(action_value, str):
         _raise_invalid(_field_error("action", "type", "action must be a string"))
     action = str(action_value).strip()
@@ -87,8 +102,8 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
             _field_error("action", "choice", "action must be approve or request_changes")
         )
 
-    feedback_value = payload.get("feedback", _MISSING)
-    edited_value = payload.get("edited_output", _MISSING)
+    feedback_value = snapshot.get("feedback", _MISSING)
+    edited_value = snapshot.get("edited_output", _MISSING)
 
     if action == "approve":
         forbidden = []
@@ -112,6 +127,10 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
                 _field_error("feedback", "type", "feedback must be a string when provided")
             )
         feedback = str(feedback_value).strip()
+        try:
+            _validate_json_string(feedback)
+        except ValueError as exc:
+            _raise_invalid(_field_error("feedback", "json", str(exc)))
         feedback_blank = not feedback
 
     edited_output: object = _MISSING
@@ -123,7 +142,8 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
             )
         try:
             edited_output = _normalize_json_value(edited_value)
-        except (TypeError, ValueError) as exc:
+            _canonical_json_bytes(edited_output)
+        except Exception as exc:
             _raise_invalid(_field_error("edited_output", "json", str(exc)))
         edited_blank = isinstance(edited_output, str) and not edited_output.strip()
 
@@ -145,14 +165,11 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
 
 
 def _validated(normalized: dict[str, object]) -> ValidatedRevisionActionV1:
-    canonical = json.dumps(
-        normalized,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    payload_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    try:
+        canonical = _canonical_json_bytes(normalized)
+    except Exception as exc:
+        _raise_invalid(_field_error("payload", "json", str(exc)))
+    payload_hash = hashlib.sha256(canonical).hexdigest()
     return ValidatedRevisionActionV1(
         action=str(normalized["action"]),
         normalized_payload=_freeze_json_object(normalized),
@@ -161,23 +178,145 @@ def _validated(normalized: dict[str, object]) -> ValidatedRevisionActionV1:
     )
 
 
-def _normalize_json_value(value: object) -> object:
-    if value is None or isinstance(value, (str, bool, int)):
+def _normalize_json_value(
+    value: object,
+    *,
+    depth: int = 0,
+    seen: set[int] | None = None,
+    budget: list[int] | None = None,
+) -> object:
+    if depth > _MAX_JSON_DEPTH:
+        raise ValueError(f"edited_output exceeds maximum JSON depth of {_MAX_JSON_DEPTH}")
+    if seen is None:
+        seen = set()
+    if budget is None:
+        budget = [0]
+    budget[0] += 1
+    if budget[0] > _MAX_JSON_NODES:
+        raise ValueError(f"edited_output exceeds maximum JSON size of {_MAX_JSON_NODES} values")
+
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        _validate_json_string(value)
+        return value
+    if isinstance(value, int):
+        if abs(value).bit_length() > _MAX_INTEGER_BITS:
+            raise ValueError(
+                f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
+            )
+        try:
+            digits = len(str(abs(value)))
+        except ValueError as exc:
+            raise ValueError(
+                f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
+            ) from exc
+        if digits > _MAX_INTEGER_DIGITS:
+            raise ValueError(
+                f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
+            )
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("edited_output JSON numbers must be finite")
         return value
     if isinstance(value, Mapping):
-        normalized: dict[str, object] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("edited_output JSON object keys must be strings")
-            normalized[key] = _normalize_json_value(item)
-        return normalized
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("edited_output JSON values must not contain cycles")
+        seen.add(identity)
+        try:
+            snapshot = _snapshot_mapping(
+                value,
+                context="edited_output JSON object",
+                max_entries=_MAX_JSON_NODES,
+            )
+            normalized: dict[str, object] = {}
+            for key, item in snapshot.items():
+                if not isinstance(key, str):
+                    raise TypeError("edited_output JSON object keys must be strings")
+                _validate_json_string(key)
+                normalized[key] = _normalize_json_value(
+                    item,
+                    depth=depth + 1,
+                    seen=seen,
+                    budget=budget,
+                )
+            return normalized
+        finally:
+            seen.remove(identity)
     if isinstance(value, list):
-        return [_normalize_json_value(item) for item in value]
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("edited_output JSON values must not contain cycles")
+        seen.add(identity)
+        try:
+            normalized_list = []
+            for item in value:
+                normalized_list.append(
+                    _normalize_json_value(
+                        item,
+                        depth=depth + 1,
+                        seen=seen,
+                        budget=budget,
+                    )
+                )
+            return normalized_list
+        finally:
+            seen.remove(identity)
     raise TypeError(f"edited_output value of type {type(value).__name__} is not JSON-compatible")
+
+
+def _snapshot_mapping(
+    value: Mapping[Any, Any],
+    *,
+    context: str,
+    max_entries: int,
+) -> dict[str, object]:
+    iteration_keys: list[object] = []
+    for key in value:
+        iteration_keys.append(key)
+        if len(iteration_keys) > max_entries:
+            raise ValueError(f"{context} contains too many entries")
+
+    item_entries: list[tuple[object, object]] = []
+    for key, item in value.items():
+        item_entries.append((key, item))
+        if len(item_entries) > max_entries:
+            raise ValueError(f"{context} contains too many entries")
+
+    if not all(isinstance(key, str) for key in iteration_keys):
+        raise TypeError(f"{context} keys must be strings")
+    item_keys = [key for key, _ in item_entries]
+    if not all(isinstance(key, str) for key in item_keys):
+        raise TypeError(f"{context} keys must be strings")
+    if len(iteration_keys) != len(set(iteration_keys)) or len(item_keys) != len(set(item_keys)):
+        raise ValueError(f"{context} must not contain duplicate keys")
+    if set(iteration_keys) != set(item_keys):
+        raise ValueError(f"{context} iteration and items must expose the same keys")
+    return {key: item for key, item in item_entries if isinstance(key, str)}
+
+
+def _validate_json_string(value: str) -> None:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("JSON strings must contain valid Unicode scalar values") from exc
+    if len(encoded) > _MAX_JSON_BYTES:
+        raise ValueError(f"JSON strings must contain at most {_MAX_JSON_BYTES} UTF-8 bytes")
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(canonical) > _MAX_JSON_BYTES:
+        raise ValueError(f"canonical JSON must contain at most {_MAX_JSON_BYTES} UTF-8 bytes")
+    return canonical
 
 
 def _freeze_json_object(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -196,5 +335,5 @@ def _field_error(field: str, code: str, message: str) -> RevisionActionFieldErro
     return RevisionActionFieldError(field=field, code=code, message=message)
 
 
-def _raise_invalid(*field_errors: RevisionActionFieldError) -> None:
+def _raise_invalid(*field_errors: RevisionActionFieldError) -> NoReturn:
     raise RevisionActionValidationError("invalid revision action", tuple(field_errors))
