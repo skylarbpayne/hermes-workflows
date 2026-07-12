@@ -12,6 +12,9 @@ from typing import Any, NoReturn
 REVISION_ACTION_SERVICE_ID = "revision.action.validator"
 REVISION_ACTION_CONTRACT_VERSION = 1
 _ACTIONABLE_MESSAGE = "request_changes requires nonblank feedback or valid edited_output"
+_MAPPING_ERROR_MESSAGE = "payload could not be read safely"
+_EDITED_JSON_ERROR_MESSAGE = "edited_output must be a valid bounded JSON value"
+_PAYLOAD_JSON_ERROR_MESSAGE = "normalized revision action exceeds JSON limits"
 _ALLOWED_FIELDS = frozenset({"action", "feedback", "edited_output"})
 _MISSING = object()
 _MAX_JSON_DEPTH = 64
@@ -78,8 +81,8 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
             context="payload",
             max_entries=_MAX_PAYLOAD_ENTRIES,
         )
-    except Exception as exc:
-        _raise_invalid(_field_error("payload", "mapping", str(exc)))
+    except Exception:
+        _raise_invalid(_field_error("payload", "mapping", _MAPPING_ERROR_MESSAGE))
 
     unknown = sorted(
         (field for field in snapshot if field not in _ALLOWED_FIELDS),
@@ -143,8 +146,8 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
         try:
             edited_output = _normalize_json_value(edited_value)
             _canonical_json_bytes(edited_output)
-        except Exception as exc:
-            _raise_invalid(_field_error("edited_output", "json", str(exc)))
+        except Exception:
+            _raise_invalid(_field_error("edited_output", "json", _EDITED_JSON_ERROR_MESSAGE))
         edited_blank = isinstance(edited_output, str) and not edited_output.strip()
 
     if feedback_blank and edited_blank:
@@ -167,8 +170,8 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
 def _validated(normalized: dict[str, object]) -> ValidatedRevisionActionV1:
     try:
         canonical = _canonical_json_bytes(normalized)
-    except Exception as exc:
-        _raise_invalid(_field_error("payload", "json", str(exc)))
+    except Exception:
+        _raise_invalid(_field_error("payload", "json", _PAYLOAD_JSON_ERROR_MESSAGE))
     payload_hash = hashlib.sha256(canonical).hexdigest()
     return ValidatedRevisionActionV1(
         action=str(normalized["action"]),

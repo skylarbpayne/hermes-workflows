@@ -30,7 +30,9 @@ without invoking subclass overrides before whitespace checks or persistence. Edi
 rejects cycles, nesting beyond 64 levels, more than 10,000 values,
 strings or canonical payloads beyond 1,000,000 UTF-8 bytes, integers beyond 4,096
 decimal digits, and invalid Unicode scalar values. Every such failure is returned as a
-`RevisionActionValidationError`, never as a raw encoder or recursion exception.
+`RevisionActionValidationError`, never as a raw encoder or recursion exception. Errors
+raised while reading hostile containers or values are replaced with deterministic field
+messages; exception text is never invoked or exposed.
 
 The empty request-changes error message is exactly:
 

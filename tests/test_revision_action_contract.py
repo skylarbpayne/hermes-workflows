@@ -64,6 +64,51 @@ class RaisingString(str):
         raise RuntimeError("hostile __str__ must not run")
 
 
+class LyingValidationError(RuntimeError):
+    def __str__(self) -> str:
+        return "attacker-controlled validation detail"
+
+
+class RaisingValidationError(RuntimeError):
+    def __str__(self) -> str:
+        raise RuntimeError("hostile exception __str__ must not run")
+
+
+class RaisingIterationMapping(Mapping[str, object]):
+    def __init__(self, error_type: type[RuntimeError]) -> None:
+        self._error_type = error_type
+
+    def __iter__(self) -> Iterator[str]:
+        raise self._error_type()
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+
+class RaisingIterationList(list[object]):
+    def __init__(self, error_type: type[RuntimeError]) -> None:
+        super().__init__(["revised"])
+        self._error_type = error_type
+
+    def __iter__(self) -> Iterator[object]:
+        raise self._error_type()
+
+
+class RaisingAbsoluteInteger(int):
+    error_type: type[RuntimeError]
+
+    def __new__(cls, error_type: type[RuntimeError]):
+        value = super().__new__(cls, 7)
+        value.error_type = error_type
+        return value
+
+    def __abs__(self) -> int:
+        raise self.error_type()
+
+
 def _cyclic_list() -> list[object]:
     value: list[object] = []
     value.append(value)
@@ -235,6 +280,80 @@ def test_string_subclass_overrides_cannot_change_actionability_or_escape_validat
     )
     assert lying.normalized_payload == action.normalized_payload
     assert lying.idempotency_key == action.idempotency_key
+
+
+@pytest.mark.parametrize("error_type", [LyingValidationError, RaisingValidationError])
+@pytest.mark.parametrize(
+    ("payload", "expected_field", "expected_code", "expected_message"),
+    [
+        pytest.param(
+            lambda error_type: RaisingIterationMapping(error_type),
+            "payload",
+            "mapping",
+            "payload could not be read safely",
+            id="top-level-custom-mapping",
+        ),
+        pytest.param(
+            lambda error_type: {
+                "action": "request_changes",
+                "edited_output": RaisingIterationList(error_type),
+            },
+            "edited_output",
+            "json",
+            "edited_output must be a valid bounded JSON value",
+            id="edited-list-subclass",
+        ),
+        pytest.param(
+            lambda error_type: {
+                "action": "request_changes",
+                "edited_output": RaisingAbsoluteInteger(error_type),
+            },
+            "edited_output",
+            "json",
+            "edited_output must be a valid bounded JSON value",
+            id="edited-integer-subclass",
+        ),
+    ],
+)
+def test_hostile_exception_stringification_is_contained_and_non_leaking(
+    error_type,
+    payload,
+    expected_field: str,
+    expected_code: str,
+    expected_message: str,
+):
+    with pytest.raises(RevisionActionValidationError) as caught:
+        validate_revision_action(payload(error_type))
+
+    assert [error.to_dict() for error in caught.value.field_errors] == [
+        {
+            "field": expected_field,
+            "code": expected_code,
+            "message": expected_message,
+        }
+    ]
+    serialized_error = repr(caught.value.to_dict())
+    assert "attacker-controlled" not in serialized_error
+    assert "hostile exception" not in serialized_error
+
+
+def test_combined_canonical_payload_limit_has_a_deterministic_non_leaking_error():
+    with pytest.raises(RevisionActionValidationError) as caught:
+        validate_revision_action(
+            {
+                "action": "request_changes",
+                "feedback": "f" * 600_000,
+                "edited_output": "e" * 600_000,
+            }
+        )
+
+    assert [error.to_dict() for error in caught.value.field_errors] == [
+        {
+            "field": "payload",
+            "code": "json",
+            "message": "normalized revision action exceeds JSON limits",
+        }
+    ]
 
 
 def test_normalized_json_object_keys_are_exact_builtin_strings():
