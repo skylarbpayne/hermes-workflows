@@ -13,7 +13,7 @@ Attempt IDs are derived from canonical JSON containing only workflow ID and posi
 The file-backed v1 ledger is canonical UTF-8 JSON written through flush, `fsync`, and atomic replacement. It verifies all value hashes and stable IDs when opened. Lineage rules are strict:
 
 - first-attempt outputs have no parent;
-- a selected base points to the chosen revision from the immediately preceding attempt and preserves its exact value hash;
+- a selected base points to the chosen revision from the immediately preceding attempt and preserves its exact value hash; reopening rejects a base that skips an earlier edit in favor of generated output;
 - later-attempt outputs descend from that attempt's selected base;
 - edits descend from an output or selected base in the same attempt;
 - parents and bases must already exist in the same workflow.

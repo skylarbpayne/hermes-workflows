@@ -137,6 +137,26 @@ def test_restart_rejects_ledger_with_edit_after_descendant_base(tmp_path):
         RevisionLedger(stale_path)
 
 
+def test_restart_rejects_descendant_base_that_skips_prior_edit(tmp_path):
+    edited_path = tmp_path / "edited.json"
+    edited = RevisionLedger(edited_path)
+    edited.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    edited.record_edit("wf_revision", 1, Draft("Human edit", 2), value_type=Draft)
+
+    generated_path = tmp_path / "generated.json"
+    generated = RevisionLedger(generated_path)
+    generated.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)
+    generated.select_next_base("wf_revision", 2, value_type=Draft)
+
+    edited_payload = json.loads(edited_path.read_text(encoding="utf-8"))
+    generated_payload = json.loads(generated_path.read_text(encoding="utf-8"))
+    edited_payload["revisions"].append(generated_payload["revisions"][-1])
+    edited_path.write_text(json.dumps(edited_payload), encoding="utf-8")
+
+    with pytest.raises(RevisionError, match="prior attempt's edited revision"):
+        RevisionLedger(edited_path)
+
+
 def test_stable_attempt_slots_reject_conflicting_output_or_edit(tmp_path):
     ledger = RevisionLedger(tmp_path / "revisions.json")
     ledger.record_output("wf_revision", 1, Draft("Draft", 1), value_type=Draft)

@@ -507,6 +507,17 @@ def _validate_lineage(records: list[RevisionRecordV1]) -> None:
                 raise RevisionError("revision diff changed-leaf count does not match durable values")
         else:
             parent = seen.get(record.parent_revision_id or "")
+            prior_edits = [
+                earlier
+                for earlier in seen.values()
+                if earlier.workflow_id == record.workflow_id
+                and earlier.attempt_number == record.attempt_number - 1
+                and earlier.kind == "edit"
+            ]
+            if prior_edits and parent != prior_edits[-1]:
+                raise RevisionError(
+                    "selected base must preserve the prior attempt's edited revision"
+                )
             if (
                 parent is None
                 or parent.attempt_number != record.attempt_number - 1

@@ -15,7 +15,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from hermes_workflows.revision import RevisionLedger  # noqa: E402
+from hermes_workflows.revision import RevisionError, RevisionLedger  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,32 @@ def _select(path: Path) -> int:
     return 0
 
 
+def _verify_adversarial_skip_is_rejected(directory: Path) -> str:
+    edited_path = directory / "edited.json"
+    edited = RevisionLedger(edited_path)
+    edited.record_output("wf_revision_adversarial", 1, Draft("Draft", 1), value_type=Draft)
+    edited.record_edit("wf_revision_adversarial", 1, Draft("Human edit", 2), value_type=Draft)
+
+    generated_path = directory / "generated.json"
+    generated = RevisionLedger(generated_path)
+    generated.record_output("wf_revision_adversarial", 1, Draft("Draft", 1), value_type=Draft)
+    generated.select_next_base("wf_revision_adversarial", 2, value_type=Draft)
+
+    edited_payload = json.loads(edited_path.read_text(encoding="utf-8"))
+    generated_payload = json.loads(generated_path.read_text(encoding="utf-8"))
+    edited_payload["revisions"].append(generated_payload["revisions"][-1])
+    edited_path.write_text(json.dumps(edited_payload), encoding="utf-8")
+
+    try:
+        RevisionLedger(edited_path)
+    except RevisionError as exc:
+        message = str(exc)
+        if "prior attempt's edited revision" not in message:
+            raise RuntimeError(f"unexpected adversarial rejection: {message}") from exc
+        return message
+    raise RuntimeError("restart accepted a descendant base that skipped a prior edit")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -94,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 [*command, "--phase", "select"], check=True, capture_output=True, text=True
             ).stdout
         )
+        adversarial_rejection = _verify_adversarial_skip_is_rejected(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -110,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         "diff": written["diff"],
         "lineage": restarted["lineage"],
         "restart_processes": 2,
+        "adversarial_rejection": adversarial_rejection,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
