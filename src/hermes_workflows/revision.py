@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import fcntl
 import hashlib
 import json
@@ -550,29 +551,83 @@ def _resolve_revision_fallback_annotation(
 ) -> Any:
     if not isinstance(annotation, str):
         return annotation
-    try:
-        return eval(annotation, globalns, localns)
-    except Exception:
-        try:
-            expression = ast.parse(annotation, mode="eval").body
-            return _eval_revision_fallback_annotation(
-                expression, {**globalns, **localns}
+    expression = ast.parse(annotation, mode="eval").body
+    return _eval_revision_fallback_annotation(expression, {**globalns, **localns})
+
+
+def _eval_revision_fallback_annotation(
+    node: ast.expr, namespace: dict[str, Any], *, allow_union: bool = True
+) -> Any:
+    if isinstance(node, ast.Name):
+        if node.id in namespace:
+            return namespace[node.id]
+        if hasattr(builtins, node.id):
+            return getattr(builtins, node.id)
+        raise NameError(node.id)
+
+    if isinstance(node, ast.Attribute):
+        if node.attr.startswith("_"):
+            raise TypeError("private annotation attributes are not supported")
+        return getattr(
+            _eval_revision_fallback_annotation(node.value, namespace), node.attr
+        )
+
+    if isinstance(node, ast.Constant):
+        return node.value
+
+    if isinstance(node, ast.Tuple):
+        return tuple(
+            _eval_revision_fallback_annotation(
+                item, namespace, allow_union=allow_union
             )
-        except Exception:
-            return annotation
+            for item in node.elts
+        )
 
-
-def _eval_revision_fallback_annotation(node: ast.expr, namespace: dict[str, Any]) -> Any:
-    expression = ast.fix_missing_locations(ast.Expression(body=node))
-    try:
-        return eval(compile(expression, "<revision-annotation>", "eval"), namespace)
-    except TypeError:
-        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.BitOr):
-            raise
-        return Union[
-            _eval_revision_fallback_annotation(node.left, namespace),
-            _eval_revision_fallback_annotation(node.right, namespace),
+    if isinstance(node, ast.List):
+        return [
+            _eval_revision_fallback_annotation(
+                item, namespace, allow_union=allow_union
+            )
+            for item in node.elts
         ]
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = _eval_revision_fallback_annotation(
+            node.operand, namespace, allow_union=False
+        )
+        if type(operand) not in (int, float, complex):
+            raise TypeError("unsupported unary annotation operand")
+        return +operand if isinstance(node.op, ast.UAdd) else -operand
+
+    if isinstance(node, ast.Subscript):
+        target = _eval_revision_fallback_annotation(node.value, namespace)
+        slice_node = node.slice
+        if type(slice_node).__name__ == "Index":
+            slice_node = getattr(slice_node, "value")
+        argument = _eval_revision_fallback_annotation(
+            slice_node,
+            namespace,
+            allow_union=target is not Literal,
+        )
+        return target[argument]
+
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _eval_revision_fallback_annotation(
+            node.left, namespace, allow_union=allow_union
+        )
+        right = _eval_revision_fallback_annotation(
+            node.right, namespace, allow_union=allow_union
+        )
+        if not allow_union:
+            if type(left) is not int or type(right) is not int:
+                raise TypeError("unsupported bitwise annotation operands")
+            return left | right
+        return Union[
+            left,
+            right,
+        ]
+
+    raise TypeError(f"unsupported annotation expression: {type(node).__name__}")
 
 
 def _is_revision_typed_dict_type(value_type: Any) -> bool:

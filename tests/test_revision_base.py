@@ -99,6 +99,44 @@ class PostponedPep604LiteralDraft:
     choice: Literal[1] | None
 
 
+@dataclass(frozen=True)
+class PostponedNestedPep604LiteralDraft:
+    choices: list[Literal[1] | None]
+
+
+@dataclass(frozen=True)
+class PostponedAnnotatedPep604LiteralDraft:
+    choice: Annotated[Literal[1] | None, "revision choice"]
+
+
+@dataclass(frozen=True)
+class PostponedBitwiseLiteralDraft:
+    choice: object
+    note: str | None = None
+
+
+PostponedBitwiseLiteralDraft.__annotations__["choice"] = "Literal[1 | 2]"
+
+
+_side_effect_annotation_calls = 0
+
+
+def _side_effect_literal_annotation():
+    global _side_effect_annotation_calls
+    _side_effect_annotation_calls += 1
+    return Literal[1]
+
+
+@dataclass(frozen=True)
+class PostponedSideEffectAnnotationDraft:
+    choice: object
+
+
+PostponedSideEffectAnnotationDraft.__annotations__["choice"] = (
+    "_side_effect_literal_annotation() | None"
+)
+
+
 def _test_stable_id(prefix, payload):
     encoded = json.dumps(
         payload,
@@ -343,6 +381,72 @@ def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path)
     assert literal.value == PostponedPep604LiteralDraft(1)
     assert type(literal.value.choice) is int
     assert optional.value == PostponedPep604LiteralDraft(None)
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type"),
+    [
+        ({"choices": [True]}, PostponedNestedPep604LiteralDraft),
+        ({"choice": True}, PostponedAnnotatedPep604LiteralDraft),
+    ],
+)
+def test_nested_postponed_pep604_literal_unions_preserve_identity_on_python39(
+    tmp_path, value, value_type
+):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_nested_postponed_pep604_literal_revision",
+            1,
+            value,
+            value_type=value_type,
+        )
+
+    assert ledger.revisions("wf_nested_postponed_pep604_literal_revision") == ()
+    assert not (tmp_path / "revisions.json").exists()
+
+
+def test_unsupported_postponed_annotation_fails_closed_without_repeated_evaluation(
+    tmp_path,
+):
+    global _side_effect_annotation_calls
+    _side_effect_annotation_calls = 0
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_side_effect_annotation_revision",
+            1,
+            {"choice": True},
+            value_type=PostponedSideEffectAnnotationDraft,
+        )
+
+    assert _side_effect_annotation_calls <= 3
+    assert ledger.revisions("wf_side_effect_annotation_revision") == ()
+    assert not (tmp_path / "revisions.json").exists()
+
+
+def test_postponed_literal_inner_bitwise_expression_is_not_rewritten_as_union(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_bitwise_literal_revision",
+            1,
+            {"choice": True, "note": None},
+            value_type=PostponedBitwiseLiteralDraft,
+        )
+
+    record = ledger.record_output(
+        "wf_bitwise_literal_revision",
+        1,
+        {"choice": 3, "note": None},
+        value_type=PostponedBitwiseLiteralDraft,
+    )
+
+    assert record.value == PostponedBitwiseLiteralDraft(3)
+    assert type(record.value.choice) is int
 
 
 def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
