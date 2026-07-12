@@ -84,15 +84,12 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
     except Exception:
         _raise_invalid(_field_error("payload", "mapping", _MAPPING_ERROR_MESSAGE))
 
-    unknown = sorted(
-        (field for field in snapshot if field not in _ALLOWED_FIELDS),
-        key=lambda field: (type(field).__name__, repr(field)),
-    )
-    if unknown:
+    if any(field not in _ALLOWED_FIELDS for field in snapshot):
         _raise_invalid(
-            *(
-                _field_error(str(field), "unknown", f"unknown revision action field: {field}")
-                for field in unknown
+            _field_error(
+                "payload",
+                "unknown",
+                "payload contains unknown revision action fields",
             )
         )
 

@@ -193,6 +193,30 @@ def test_validation_rejects_type_coercion_unknown_fields_and_invalid_json():
     assert caught.value.field_errors[0].field == "payload"
 
 
+@pytest.mark.parametrize(
+    "unknown_field",
+    [
+        pytest.param("x" * 1_000_001, id="oversized"),
+        pytest.param("\ud800", id="lone-surrogate"),
+    ],
+)
+def test_unknown_fields_have_a_bounded_non_leaking_utf8_safe_error(unknown_field: str):
+    with pytest.raises(RevisionActionValidationError) as caught:
+        validate_revision_action({"action": "approve", unknown_field: "attacker-controlled"})
+
+    error = caught.value.to_dict()
+    assert error["field_errors"] == [
+        {
+            "field": "payload",
+            "code": "unknown",
+            "message": "payload contains unknown revision action fields",
+        }
+    ]
+    serialized = json.dumps(error, ensure_ascii=False).encode("utf-8")
+    assert len(serialized) < 512
+    assert unknown_field not in serialized.decode("utf-8")
+
+
 def test_approve_rejects_revision_fields_instead_of_hiding_data():
     for field in ("feedback", "edited_output"):
         with pytest.raises(RevisionActionValidationError) as caught:
