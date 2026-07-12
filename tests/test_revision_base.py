@@ -6,7 +6,12 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, Optional, TypedDict, Union
+from typing import Annotated, Final, Literal, Optional, TypedDict, Union
+
+try:
+    from typing import NotRequired, Required
+except ImportError:  # pragma: no cover - exercised by the Python 3.9 test job.
+    from typing_extensions import NotRequired, Required
 
 import pytest
 
@@ -72,6 +77,29 @@ class ExpandedDraft:
 class TypedDraft(TypedDict):
     title: str
     score: int
+
+
+class WrappedTypedDraft(TypedDict):
+    title: Required[str]
+    score: NotRequired[int]
+
+
+@dataclass(frozen=True)
+class SetDraft:
+    tags: set[int]
+
+
+@dataclass(frozen=True)
+class MalformedListDraft:
+    tags: object
+
+
+MalformedListDraft.__annotations__["tags"] = list.__class_getitem__((int, str))
+
+
+@dataclass(frozen=True)
+class UnsupportedWrapperDraft:
+    score: Final[int]
 
 
 @dataclass(frozen=True)
@@ -353,6 +381,65 @@ def test_valid_typed_dict_edit_restarts_into_exact_selected_base(tmp_path):
     assert selected.value == {"title": "Human edit", "score": 2}
     assert selected.value_sha256 == edited.value_sha256
     assert selected.base_revision_id == edited.revision_id
+
+
+def test_not_required_typed_dict_value_is_strictly_coerced_before_persistence(tmp_path):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_wrapped_typed_dict_revision",
+            1,
+            {"title": "Draft", "score": "not-an-int"},
+            value_type=WrappedTypedDraft,
+        )
+
+    assert ledger.revisions("wf_wrapped_typed_dict_revision") == ()
+    assert not path.exists()
+
+
+def test_required_and_not_required_typed_dict_keys_preserve_key_semantics(tmp_path):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+
+    record = ledger.record_output(
+        "wf_wrapped_typed_dict_revision",
+        1,
+        {"title": "Draft"},
+        value_type=WrappedTypedDraft,
+    )
+
+    assert record.value == {"title": "Draft"}
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_missing_required_typed_dict_revision",
+            1,
+            {"score": 1},
+            value_type=WrappedTypedDraft,
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type"),
+    [
+        ({"tags": [1, 2]}, SetDraft),
+        ({"tags": [1, 2]}, MalformedListDraft),
+        ({"score": 1}, UnsupportedWrapperDraft),
+    ],
+)
+def test_unsupported_or_malformed_generic_schema_fails_closed_without_persistence(
+    tmp_path, value, value_type
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_output(
+            "wf_unsupported_generic_revision", 1, value, value_type=value_type
+        )
+
+    assert ledger.revisions("wf_unsupported_generic_revision") == ()
+    assert not path.exists()
 
 
 @pytest.mark.parametrize(

@@ -430,7 +430,14 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
+    if _revision_presence_wrapper_kind(origin) is not None:
+        if len(args) != 1:
+            raise TypeError("malformed revision presence wrapper")
+        return _coerce_revision_value(value, args[0])
+
     if origin is Annotated:
+        if not args:
+            raise TypeError("malformed revision annotated schema")
         return _coerce_revision_value(value, args[0])
 
     if origin is Literal:
@@ -485,7 +492,13 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
         prepared = dict(value)
         if any(key not in type_hints for key in prepared):
             raise RevisionValueError("invalid revision value: unknown revision fields")
-        required_keys = set(getattr(value_type, "__required_keys__", ()))
+        required_keys: set[str] = set(getattr(value_type, "__required_keys__", ()))
+        for key, annotation in type_hints.items():
+            wrapper_kind = _revision_presence_wrapper_kind(get_origin(annotation))
+            if wrapper_kind == "Required":
+                required_keys.add(key)
+            elif wrapper_kind == "NotRequired":
+                required_keys.discard(key)
         if required_keys - set(prepared):
             raise TypeError("revision value is missing required fields")
         return {
@@ -493,33 +506,42 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
             for key, item in prepared.items()
         }
 
-    if origin in (list, Sequence) and isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
-        item_type = args[0] if args else Any
+    if origin in (list, Sequence):
+        if len(args) != 1:
+            raise TypeError("malformed revision sequence schema")
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return coerce_workflow_input(value, value_type)
+        item_type = args[0]
         prepared_items = [
             _coerce_revision_value(item, item_type)
             for item in cast(Sequence[object], value)
         ]
         return coerce_workflow_input(prepared_items, value_type)
 
-    if origin is tuple and isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if origin is tuple:
+        if Ellipsis in args and not (len(args) == 2 and args[1] is Ellipsis):
+            raise TypeError("malformed revision tuple schema")
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return coerce_workflow_input(value, value_type)
         sequence = cast(Sequence[object], value)
         if len(args) == 2 and args[1] is Ellipsis:
             item_types = (args[0],) * len(sequence)
         else:
             item_types = args
+            if len(sequence) != len(item_types):
+                raise TypeError("revision tuple value has the wrong length")
         prepared_items = tuple(
-            _coerce_revision_value(item, item_types[index] if index < len(item_types) else Any)
+            _coerce_revision_value(item, item_types[index])
             for index, item in enumerate(sequence)
         )
         return coerce_workflow_input(prepared_items, value_type)
 
-    if origin in (dict, Mapping) and isinstance(value, Mapping):
-        key_type = args[0] if args else Any
-        item_type = args[1] if len(args) > 1 else Any
+    if origin in (dict, Mapping):
+        if len(args) != 2:
+            raise TypeError("malformed revision mapping schema")
+        if not isinstance(value, Mapping):
+            return coerce_workflow_input(value, value_type)
+        key_type, item_type = args
         prepared_mapping = {}
         for key, item in value.items():
             prepared_key = _coerce_revision_value(key, key_type)
@@ -530,7 +552,20 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
             prepared_mapping[prepared_key] = _coerce_revision_value(item, item_type)
         return coerce_workflow_input(prepared_mapping, value_type)
 
+    if origin is not None:
+        raise TypeError("unsupported revision generic schema")
     return coerce_workflow_input(value, value_type)
+
+
+def _revision_presence_wrapper_kind(origin: Any) -> str | None:
+    module = getattr(origin, "__module__", None)
+    name = getattr(origin, "_name", None)
+    if module in {"typing", "typing_extensions"} and name in {
+        "Required",
+        "NotRequired",
+    }:
+        return cast(str, name)
+    return None
 
 
 def _safe_revision_type_hints(value_type: Any) -> dict[str, Any]:
@@ -811,6 +846,12 @@ def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
     origin = get_origin(value_type)
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
+
+    if _revision_presence_wrapper_kind(origin) is not None:
+        if len(args) != 1:
+            raise TypeError("malformed revision presence wrapper")
+        _reject_unknown_dataclass_fields(value, args[0])
+        return
 
     if origin is Annotated:
         _reject_unknown_dataclass_fields(value, args[0])
