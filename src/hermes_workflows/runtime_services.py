@@ -44,7 +44,7 @@ class RuntimeServicesV1(RuntimeOnlyServiceRegistry):
         object.__setattr__(self, "services", MappingProxyType(validated))
 
     def resolve(self, service_id: str, contract_version: int) -> object | None:
-        _validate_resolution(service_id, contract_version)
+        validate_runtime_service_resolution(service_id, contract_version)
         return self.services.get(service_id)
 
     def __reduce_ex__(self, protocol: SupportsIndex):
@@ -55,7 +55,7 @@ class RuntimeServicesV1(RuntimeOnlyServiceRegistry):
 class EmptyRuntimeServicesV1(RuntimeOnlyServiceRegistry):
 
     def resolve(self, service_id: str, contract_version: int) -> object | None:
-        _validate_resolution(service_id, contract_version)
+        validate_runtime_service_resolution(service_id, contract_version)
         return None
 
     def __reduce_ex__(self, protocol: SupportsIndex):
@@ -67,7 +67,7 @@ def _validate_service_id(service_id: object) -> None:
         raise ValueError("service_id must match ^[a-z][a-z0-9_.-]{0,63}$")
 
 
-def _validate_resolution(service_id: object, contract_version: object) -> None:
+def validate_runtime_service_resolution(service_id: object, contract_version: object) -> None:
     _validate_service_id(service_id)
     if type(contract_version) is not int or contract_version < 1:
         raise ValueError("contract_version must be an integer >= 1")

@@ -348,6 +348,18 @@ def test_engine_preserves_marked_registry_identity_without_mutation_or_wrapping(
     assert engine.resolve_runtime_service("integration.any", 1) is None
 
 
+@pytest.mark.parametrize(
+    ("service_id", "contract_version"),
+    [("", 1), ("Upper", 1), ("valid.service", 0), ("valid.service", True)],
+)
+def test_engine_validates_resolution_for_integration_owned_registry(tmp_path, service_id, contract_version):
+    registry = IntegrationOwnedRuntimeServices(marker="accepted-integration-registry")
+    engine = WorkflowEngine(tmp_path / "workflow.sqlite", runtime_services=registry)
+
+    with pytest.raises(ValueError):
+        engine.resolve_runtime_service(service_id, contract_version)
+
+
 def test_engine_rejects_unmarked_structural_registry(tmp_path):
     registry = UnmarkedStructuralRuntimeServices()
 
