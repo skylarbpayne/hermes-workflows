@@ -49,6 +49,11 @@ class DuplicateItemsMapping(HostileRevisionMapping):
         return [("action", self._data["action"]), ("action", "request_changes")]
 
 
+class HostileWhitespace(str):
+    def strip(self, chars=None):  # type: ignore[override]
+        return "looks-actionable"
+
+
 def _cyclic_list() -> list[object]:
     value: list[object] = []
     value.append(value)
@@ -185,6 +190,14 @@ def test_direct_operator_service_path_uses_the_same_validator():
     }
     with pytest.raises(RevisionActionValidationError, match=ACTIONABLE_MESSAGE):
         resolved.validate({"action": "request_changes", "feedback": "\u2003"})
+    with pytest.raises(RevisionActionValidationError, match=ACTIONABLE_MESSAGE):
+        resolved.validate(
+            {"action": "request_changes", "edited_output": HostileWhitespace("\u2003")}
+        )
+    hostile_valid = resolved.validate(
+        {"action": "request_changes", "edited_output": HostileWhitespace("revised")}
+    )
+    assert type(hostile_valid.normalized_payload["edited_output"]) is str
     with pytest.raises(RevisionActionValidationError) as caught:
         resolved.validate({"action": "request_changes", "edited_output": _cyclic_list()})
     assert caught.value.field_errors[0].field == "edited_output"

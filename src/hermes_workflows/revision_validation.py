@@ -198,8 +198,9 @@ def _normalize_json_value(
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, str):
-        _validate_json_string(value)
-        return value
+        normalized_string = str(value)
+        _validate_json_string(normalized_string)
+        return normalized_string
     if isinstance(value, int):
         if abs(value).bit_length() > _MAX_INTEGER_BITS:
             raise ValueError(
