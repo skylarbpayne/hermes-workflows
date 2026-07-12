@@ -1,0 +1,33 @@
+# Revision base contract v1
+
+Hermes Workflows stores each generated output, human edit, and selected next-attempt base as a durable revision. A later attempt must begin from the exact human-edited value when an edit exists; without an edit it begins from the generated output. “Branch” is not a separate semantic operation.
+
+## Typed values and selection
+
+`RevisionLedger.record_output()` and `record_edit()` coerce values through the declared workflow value type before hashing or persistence. Missing, invalid, and unknown dataclass fields are rejected without appending lineage. `select_next_base()` chooses the latest edit from the immediately preceding attempt, otherwise that attempt's output/base, and schema-coerces the recovered value again after restart.
+
+Attempt IDs are derived from canonical JSON containing only workflow ID and positive attempt number. Revision IDs additionally bind kind, canonical value SHA-256, parent revision ID, and base revision ID. Calling the same operation again returns the existing record; the same stable identity cannot name different content.
+
+## Durable lineage
+
+The file-backed v1 ledger is canonical UTF-8 JSON written through flush, `fsync`, and atomic replacement. It verifies all value hashes and stable IDs when opened. Lineage rules are strict:
+
+- first-attempt outputs have no parent;
+- a selected base points to the chosen revision from the immediately preceding attempt and preserves its exact value hash;
+- later-attempt outputs descend from that attempt's selected base;
+- edits descend from an output or selected base in the same attempt;
+- parents and bases must already exist in the same workflow.
+
+The complete typed value is durable because it is required to continue after restart. It is not emitted in public descriptors.
+
+## Bounded, nonleaking descriptors
+
+An edit's public diff descriptor contains only schema version, before/after SHA-256 values, and a changed-leaf count. It contains no field names, paths, or values and is capped at 512 UTF-8 bytes. The `revision.summary` projection likewise contains only counts, kind, stable IDs, and the latest value hash; full values remain in the ledger.
+
+## Operator service boundary
+
+The process-local FND-OP registry exposes this contract at service ID `revision.service`, contract version `1`. `resolve_revision_service()` rejects a missing service or an object that does not implement `RevisionServiceV1`. `RevisionLedger` is also a `ProjectionContributorV1` and emits the bounded `revision.summary` section.
+
+## Restart evidence
+
+`python tests/probes/revision_restart.py` creates attempt-one output and edit in one process, reopens the ledger and selects attempt two's base in another process, and exits nonzero unless the v2 base hash equals the edited-v1 hash and its base revision ID equals the edited-v1 revision ID. The trace includes fixture SHA-256, lineage IDs, hashes, bounded diff, and process count; it never includes revision values.

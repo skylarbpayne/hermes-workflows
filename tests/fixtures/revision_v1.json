@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "workflow_id": "wf_revision_restart",
+  "output": {
+    "title": "Generated draft",
+    "score": 1
+  },
+  "edit": {
+    "title": "Human-edited draft",
+    "score": "2"
+  }
+}
