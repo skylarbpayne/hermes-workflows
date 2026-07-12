@@ -31,7 +31,9 @@ Accepted numeric subclasses are copied to detached exact built-in integers or fl
 without retaining subclass state in the normalized payload. Edited JSON
 rejects cycles, nesting beyond 64 levels, more than 10,000 values,
 strings or canonical payloads beyond 1,000,000 UTF-8 bytes, integers beyond 4,096
-decimal digits, and invalid Unicode scalar values. Every such failure is returned as a
+decimal digits, and invalid Unicode scalar values. The aggregate byte budget includes
+object keys, escaped string bytes, and JSON structural bytes and is enforced before the
+whole canonical payload is serialized. Every such failure is returned as a
 `RevisionActionValidationError`, never as a raw encoder or recursion exception. Errors
 raised while reading hostile containers or values are replaced with deterministic field
 messages; exception text is never invoked or exposed.

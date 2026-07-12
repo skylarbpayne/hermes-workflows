@@ -142,7 +142,6 @@ def validate_revision_action(payload: Mapping[str, object]) -> ValidatedRevision
             )
         try:
             edited_output = _normalize_json_value(edited_value)
-            _canonical_json_bytes(edited_output)
         except Exception:
             _raise_invalid(_field_error("edited_output", "json", _EDITED_JSON_ERROR_MESSAGE))
         edited_blank = isinstance(edited_output, str) and not edited_output.strip()
@@ -184,6 +183,7 @@ def _normalize_json_value(
     depth: int = 0,
     seen: set[int] | None = None,
     budget: list[int] | None = None,
+    byte_budget: list[int] | None = None,
 ) -> object:
     if depth > _MAX_JSON_DEPTH:
         raise ValueError(f"edited_output exceeds maximum JSON depth of {_MAX_JSON_DEPTH}")
@@ -191,15 +191,21 @@ def _normalize_json_value(
         seen = set()
     if budget is None:
         budget = [0]
+    if byte_budget is None:
+        byte_budget = [0]
     budget[0] += 1
     if budget[0] > _MAX_JSON_NODES:
         raise ValueError(f"edited_output exceeds maximum JSON size of {_MAX_JSON_NODES} values")
 
-    if value is None or isinstance(value, bool):
+    if value is None:
+        _consume_json_bytes(byte_budget, 4)
+        return value
+    if isinstance(value, bool):
+        _consume_json_bytes(byte_budget, 4 if value else 5)
         return value
     if isinstance(value, str):
         normalized_string = _trusted_string(value)
-        _validate_json_string(normalized_string)
+        _consume_json_bytes(byte_budget, _json_string_size(normalized_string))
         return normalized_string
     if isinstance(value, int):
         normalized_integer = int.__int__(value)
@@ -217,32 +223,39 @@ def _normalize_json_value(
             raise ValueError(
                 f"edited_output JSON integers must contain at most {_MAX_INTEGER_DIGITS} digits"
             )
+        _consume_json_bytes(byte_budget, digits + int(normalized_integer < 0))
         return normalized_integer
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("edited_output JSON numbers must be finite")
-        return float.__float__(value)
+        normalized_float = float.__float__(value)
+        _consume_json_bytes(byte_budget, len(repr(normalized_float)))
+        return normalized_float
     if isinstance(value, Mapping):
         identity = id(value)
         if identity in seen:
             raise ValueError("edited_output JSON values must not contain cycles")
         seen.add(identity)
         try:
+            _consume_json_bytes(byte_budget, 2)
             snapshot = _snapshot_mapping(
                 value,
                 context="edited_output JSON object",
                 max_entries=_MAX_JSON_NODES,
             )
             normalized: dict[str, object] = {}
-            for key, item in snapshot.items():
+            for index, (key, item) in enumerate(snapshot.items()):
                 if not isinstance(key, str):
                     raise TypeError("edited_output JSON object keys must be strings")
-                _validate_json_string(key)
+                if index:
+                    _consume_json_bytes(byte_budget, 1)
+                _consume_json_bytes(byte_budget, _json_string_size(key) + 1)
                 normalized[key] = _normalize_json_value(
                     item,
                     depth=depth + 1,
                     seen=seen,
                     budget=budget,
+                    byte_budget=byte_budget,
                 )
             return normalized
         finally:
@@ -253,14 +266,18 @@ def _normalize_json_value(
             raise ValueError("edited_output JSON values must not contain cycles")
         seen.add(identity)
         try:
+            _consume_json_bytes(byte_budget, 2)
             normalized_list = []
-            for item in value:
+            for index, item in enumerate(value):
+                if index:
+                    _consume_json_bytes(byte_budget, 1)
                 normalized_list.append(
                     _normalize_json_value(
                         item,
                         depth=depth + 1,
                         seen=seen,
                         budget=budget,
+                        byte_budget=byte_budget,
                     )
                 )
             return normalized_list
@@ -310,15 +327,74 @@ def _trusted_string(value: object) -> str:
 
 
 def _validate_json_string(value: str) -> None:
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError("JSON strings must contain valid Unicode scalar values") from exc
-    if len(encoded) > _MAX_JSON_BYTES:
-        raise ValueError(f"JSON strings must contain at most {_MAX_JSON_BYTES} UTF-8 bytes")
+    _json_string_size(value)
+
+
+def _json_string_size(value: str) -> int:
+    raw_bytes = 0
+    canonical_bytes = 2
+    for character in value:
+        code_point = ord(character)
+        if code_point <= 0x7F:
+            raw_bytes += 1
+            if code_point <= 0x1F:
+                canonical_bytes += 2 if code_point in {8, 9, 10, 12, 13} else 6
+            else:
+                canonical_bytes += 2 if character in {'"', "\\"} else 1
+        elif code_point <= 0x7FF:
+            raw_bytes += 2
+            canonical_bytes += 2
+        elif 0xD800 <= code_point <= 0xDFFF:
+            raise ValueError("JSON strings must contain valid Unicode scalar values")
+        elif code_point <= 0xFFFF:
+            raw_bytes += 3
+            canonical_bytes += 3
+        else:
+            raw_bytes += 4
+            canonical_bytes += 4
+        if raw_bytes > _MAX_JSON_BYTES:
+            raise ValueError(f"JSON strings must contain at most {_MAX_JSON_BYTES} UTF-8 bytes")
+    return canonical_bytes
+
+
+def _consume_json_bytes(budget: list[int], amount: int) -> None:
+    budget[0] += amount
+    if budget[0] > _MAX_JSON_BYTES:
+        raise ValueError(f"canonical JSON must contain at most {_MAX_JSON_BYTES} UTF-8 bytes")
+
+
+def _measure_json_value(value: object, budget: list[int]) -> None:
+    if value is None:
+        _consume_json_bytes(budget, 4)
+    elif isinstance(value, bool):
+        _consume_json_bytes(budget, 4 if value else 5)
+    elif isinstance(value, str):
+        _consume_json_bytes(budget, _json_string_size(value))
+    elif isinstance(value, int):
+        _consume_json_bytes(budget, len(str(value)))
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        _consume_json_bytes(budget, len(repr(value)))
+    elif isinstance(value, Mapping):
+        _consume_json_bytes(budget, 2)
+        for index, (key, item) in enumerate(value.items()):
+            if index:
+                _consume_json_bytes(budget, 1)
+            _consume_json_bytes(budget, _json_string_size(key) + 1)
+            _measure_json_value(item, budget)
+    elif isinstance(value, list):
+        _consume_json_bytes(budget, 2)
+        for index, item in enumerate(value):
+            if index:
+                _consume_json_bytes(budget, 1)
+            _measure_json_value(item, budget)
+    else:
+        raise TypeError("value is not JSON-compatible")
 
 
 def _canonical_json_bytes(value: object) -> bytes:
+    _measure_json_value(value, [0])
     canonical = json.dumps(
         value,
         sort_keys=True,

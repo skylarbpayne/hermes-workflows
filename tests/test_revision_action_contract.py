@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import hermes_workflows.revision_validation as revision_validation
+
 from hermes_workflows.operator_services import OperatorServicesV1
 from hermes_workflows.revision_validation import (
     REVISION_ACTION_CONTRACT_VERSION,
@@ -395,6 +397,38 @@ def test_combined_canonical_payload_limit_has_a_deterministic_non_leaking_error(
             "message": "normalized revision action exceeds JSON limits",
         }
     ]
+
+
+def test_aggregate_edited_output_budget_is_rejected_before_json_materialization(monkeypatch):
+    dumps_calls = 0
+    original_dumps = revision_validation.json.dumps
+
+    def recording_dumps(*args, **kwargs):
+        nonlocal dumps_calls
+        dumps_calls += 1
+        return original_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(revision_validation.json, "dumps", recording_dumps)
+    oversized_edits = (
+        ["x" * 200] * 5_000,
+        "\x00" * 166_667,
+        {f"{index:04d}{'k' * 196}": None for index in range(5_000)},
+    )
+
+    for edited_output in oversized_edits:
+        with pytest.raises(RevisionActionValidationError) as caught:
+            validate_revision_action(
+                {"action": "request_changes", "edited_output": edited_output}
+            )
+
+        assert [error.to_dict() for error in caught.value.field_errors] == [
+            {
+                "field": "edited_output",
+                "code": "json",
+                "message": "edited_output must be a valid bounded JSON value",
+            }
+        ]
+    assert dumps_calls == 0
 
 
 def test_normalized_json_object_keys_are_exact_builtin_strings():
