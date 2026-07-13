@@ -338,6 +338,25 @@ class StatefulSequence(Sequence[int]):
         return 1
 
 
+@dataclass
+class StatefulDataclass:
+    value: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "_reads", 0)
+
+    def __getattribute__(self, name):
+        if name == "value":
+            reads = object.__getattribute__(self, "_reads") + 1
+            object.__setattr__(self, "_reads", reads)
+            return object.__getattribute__(self, "value") + reads
+        return object.__getattribute__(self, name)
+
+    @property
+    def reads(self):
+        return object.__getattribute__(self, "_reads")
+
+
 class HostileSequence(StatefulSequence):
     def __iter__(self):
         raise RuntimeError("SECRET_SEQUENCE_ITERATION")
@@ -453,7 +472,7 @@ def test_valid_edit_is_schema_coerced_and_becomes_exact_next_base(tmp_path):
     )
     selected = ledger.select_next_base("wf_revision", 2, value_type=Draft)
 
-    assert selected.value == Draft("Human edit", 2)
+    assert selected.value == {"title": "Human edit", "score": 2}
     assert selected.value_sha256 == edited.value_sha256
     assert selected.value_sha256 == canonical_value_hash({"title": "Human edit", "score": 2})
     assert selected.base_revision_id == edited.revision_id
@@ -577,6 +596,60 @@ def test_stateful_sequence_is_snapshotted_once_for_hash_persistence_and_restart(
 
     assert restarted_record.value == persisted_value
     assert restarted_record.value_sha256 == record.value_sha256
+    assert selected.value == persisted_value
+    assert selected.value_sha256 == record.value_sha256
+    assert selected.base_revision_id == record.revision_id
+
+
+def test_stateful_declared_dataclass_is_frozen_before_hash_persistence_and_restart(
+    tmp_path,
+):
+    path = tmp_path / "revisions.json"
+    value = StatefulDataclass(0)
+
+    record = RevisionLedger(path).record_output(
+        "wf_stateful_dataclass", 1, value, value_type=StatefulDataclass
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    persisted_value = payload["revisions"][0]["value"]
+
+    assert value.reads == 1
+    assert record.value == persisted_value == {"value": 1}
+    assert canonical_value_hash(persisted_value) == record.value_sha256
+
+    restarted = RevisionLedger(path)
+    selected = restarted.select_next_base(
+        "wf_stateful_dataclass", 2, value_type=StatefulDataclass
+    )
+
+    assert selected.value == persisted_value
+    assert selected.value_sha256 == record.value_sha256
+    assert selected.base_revision_id == record.revision_id
+
+
+def test_shared_stateful_sequence_is_materialized_once_and_reused_for_aliases(tmp_path):
+    path = tmp_path / "revisions.json"
+    value = StatefulSequence()
+
+    record = RevisionLedger(path).record_output(
+        "wf_shared_stateful_sequence",
+        1,
+        {"left": value, "right": value},
+        value_type=object,
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    persisted_value = payload["revisions"][0]["value"]
+
+    assert value.iterations == 1
+    assert record.value == persisted_value == {"left": [1], "right": [1]}
+    assert record.value["left"] is record.value["right"]
+    assert canonical_value_hash(persisted_value) == record.value_sha256
+
+    restarted = RevisionLedger(path)
+    selected = restarted.select_next_base(
+        "wf_shared_stateful_sequence", 2, value_type=object
+    )
+
     assert selected.value == persisted_value
     assert selected.value_sha256 == record.value_sha256
     assert selected.base_revision_id == record.revision_id
@@ -770,8 +843,8 @@ def test_literal_bool_int_identity_collisions_are_rejected_without_persistence(
 @pytest.mark.parametrize(
     ("value", "value_type", "expected"),
     [
-        ({"choice": 1}, LiteralDraft, LiteralDraft(1)),
-        (LiteralDraft("one"), LiteralDraft, LiteralDraft("one")),
+        ({"choice": 1}, LiteralDraft, {"choice": 1}),
+        (LiteralDraft("one"), LiteralDraft, {"choice": "one"}),
         ({"choice": "one"}, LiteralTypedDraft, {"choice": "one"}),
     ],
 )
@@ -848,9 +921,9 @@ def test_postponed_pep604_literal_union_preserves_identity_on_python39(tmp_path)
         value_type=PostponedPep604LiteralDraft,
     )
 
-    assert literal.value == PostponedPep604LiteralDraft(1)
-    assert type(literal.value.choice) is int
-    assert optional.value == PostponedPep604LiteralDraft(None)
+    assert literal.value == {"choice": 1}
+    assert type(literal.value["choice"]) is int
+    assert optional.value == {"choice": None}
 
 
 @pytest.mark.parametrize(
@@ -900,10 +973,10 @@ def test_nested_alias_postponed_pep604_literal_unions_accept_exact_values(tmp_pa
         value_type=PostponedNestedListAliasPep604LiteralDraft,
     )
 
-    assert annotated.value == PostponedNestedAnnotatedAliasPep604LiteralDraft(1)
-    assert type(annotated.value.choice) is int
-    assert listed.value == PostponedNestedListAliasPep604LiteralDraft([1, None])
-    assert type(listed.value.choices[0]) is int
+    assert annotated.value == {"choice": 1}
+    assert type(annotated.value["choice"]) is int
+    assert listed.value == {"choices": [1, None]}
+    assert type(listed.value["choices"][0]) is int
 
 
 def test_unsupported_postponed_annotation_fails_closed_without_repeated_evaluation(
@@ -959,8 +1032,8 @@ def test_postponed_literal_inner_bitwise_expression_is_not_rewritten_as_union(tm
         value_type=PostponedBitwiseLiteralDraft,
     )
 
-    assert record.value == PostponedBitwiseLiteralDraft(3)
-    assert type(record.value.choice) is int
+    assert record.value == {"choice": 3, "note": None}
+    assert type(record.value["choice"]) is int
 
 
 def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
@@ -1374,13 +1447,13 @@ def test_valid_nested_dataclass_fields_remain_schema_coerced(tmp_path):
         "wf_nested_revision", 1, value, value_type=NestedDraft
     )
 
-    assert record.value == NestedDraft(
-        primary=Draft("Primary", 1),
-        alternatives=[Draft("Alternative", 2)],
-        archived=(Draft("Archived", 3),),
-        by_name={"named": Draft("Named", 4)},
-        fallback=Draft("Fallback", 5),
-    )
+    assert record.value == {
+        "primary": {"title": "Primary", "score": 1},
+        "alternatives": [{"title": "Alternative", "score": 2}],
+        "archived": [{"title": "Archived", "score": 3}],
+        "by_name": {"named": {"title": "Named", "score": 4}},
+        "fallback": {"title": "Fallback", "score": 5},
+    }
 
 
 def test_annotated_nested_dataclass_is_coerced_and_rejects_unknown_fields(tmp_path):
@@ -1393,7 +1466,7 @@ def test_annotated_nested_dataclass_is_coerced_and_rejects_unknown_fields(tmp_pa
         value_type=AnnotatedDraft,
     )
 
-    assert record.value == AnnotatedDraft(Draft("Annotated", 2))
+    assert record.value == {"child": {"title": "Annotated", "score": 2}}
 
     attacker_value = {
         "child": {"title": "Bad", "score": 3, "SECRET_ANNOTATED_FIELD": True}
@@ -1418,7 +1491,7 @@ def test_overlapping_dataclass_union_selects_only_compatible_branch(tmp_path):
         value_type=Union[NarrowDraft, ExpandedDraft],
     )
 
-    assert record.value == ExpandedDraft("Expanded", 4)
+    assert record.value == {"title": "Expanded", "score": 4}
 
 
 @pytest.mark.parametrize(
@@ -1880,7 +1953,7 @@ def test_without_edit_the_generated_output_is_the_next_base(tmp_path):
 
     selected = ledger.select_next_base("wf_revision", 2, value_type=Draft)
 
-    assert selected.value == Draft("Draft", 1)
+    assert selected.value == {"title": "Draft", "score": 1}
     assert selected.base_revision_id == output.revision_id
     assert selected.parent_revision_id == output.revision_id
 

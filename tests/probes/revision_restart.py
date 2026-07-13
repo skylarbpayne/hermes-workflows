@@ -126,6 +126,25 @@ class StatefulSequence(Sequence[int]):
         return 1
 
 
+@dataclass
+class StatefulDataclass:
+    value: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "_reads", 0)
+
+    def __getattribute__(self, name):
+        if name == "value":
+            reads = object.__getattribute__(self, "_reads") + 1
+            object.__setattr__(self, "_reads", reads)
+            return object.__getattribute__(self, "value") + reads
+        return object.__getattribute__(self, name)
+
+    @property
+    def reads(self):
+        return object.__getattribute__(self, "_reads")
+
+
 class HostileSequence(StatefulSequence):
     def __iter__(self):
         raise RuntimeError("SECRET_SEQUENCE_ITERATION")
@@ -549,6 +568,63 @@ def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
     ):
         raise RuntimeError("stateful sequence restart did not preserve exact base identity")
 
+    shared_path = directory / "shared-stateful-sequence.json"
+    shared_value = StatefulSequence()
+    shared_record = RevisionLedger(shared_path).record_output(
+        "wf_revision_shared_stateful_sequence",
+        1,
+        {"left": shared_value, "right": shared_value},
+        value_type=object,
+    )
+    shared_persisted = json.loads(shared_path.read_text(encoding="utf-8"))[
+        "revisions"
+    ][0]["value"]
+    if (
+        shared_value.iterations != 1
+        or shared_record.value != {"left": [1], "right": [1]}
+        or shared_persisted != shared_record.value
+        or shared_record.value["left"] is not shared_record.value["right"]
+        or canonical_value_hash(shared_persisted) != shared_record.value_sha256
+    ):
+        raise RuntimeError("shared stateful sequence was not reused from one snapshot")
+    shared_selected = RevisionLedger(shared_path).select_next_base(
+        "wf_revision_shared_stateful_sequence", 2, value_type=object
+    )
+    if (
+        shared_selected.value != shared_persisted
+        or shared_selected.value_sha256 != shared_record.value_sha256
+        or shared_selected.base_revision_id != shared_record.revision_id
+    ):
+        raise RuntimeError("shared stateful sequence did not preserve exact base identity")
+
+    dataclass_path = directory / "stateful-dataclass.json"
+    dataclass_value = StatefulDataclass(0)
+    dataclass_record = RevisionLedger(dataclass_path).record_output(
+        "wf_revision_stateful_dataclass",
+        1,
+        dataclass_value,
+        value_type=StatefulDataclass,
+    )
+    dataclass_persisted = json.loads(dataclass_path.read_text(encoding="utf-8"))[
+        "revisions"
+    ][0]["value"]
+    if (
+        dataclass_value.reads != 1
+        or dataclass_record.value != {"value": 1}
+        or dataclass_persisted != dataclass_record.value
+        or canonical_value_hash(dataclass_persisted) != dataclass_record.value_sha256
+    ):
+        raise RuntimeError("stateful dataclass was not frozen into one inert snapshot")
+    dataclass_selected = RevisionLedger(dataclass_path).select_next_base(
+        "wf_revision_stateful_dataclass", 2, value_type=StatefulDataclass
+    )
+    if (
+        dataclass_selected.value != dataclass_persisted
+        or dataclass_selected.value_sha256 != dataclass_record.value_sha256
+        or dataclass_selected.base_revision_id != dataclass_record.revision_id
+    ):
+        raise RuntimeError("stateful dataclass did not preserve exact base identity")
+
     rejected_path = directory / "rejected-sequence.json"
     rejected_workflow_id = "wf_revision_rejected_sequence"
     rejected = RevisionLedger(rejected_path)
@@ -592,6 +668,11 @@ def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
         "value_sha256": record.value_sha256,
         "persisted_hash_matches": True,
         "restart_base_matches": True,
+        "shared_alias_iterations": shared_value.iterations,
+        "shared_alias_reused": True,
+        "stateful_dataclass_reads": dataclass_value.reads,
+        "stateful_dataclass_hash_matches": True,
+        "stateful_dataclass_restart_base_matches": True,
         "rejections": rejections,
         "persisted_bytes_unchanged": True,
         "in_memory_lineage_unchanged": True,

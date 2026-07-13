@@ -11,7 +11,7 @@ import sys
 import tempfile
 import types
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import (
     Annotated,
@@ -440,17 +440,19 @@ def resolve_revision_service(registry: OperatorServiceRegistry) -> RevisionServi
 
 def _coerce_value(value: object, value_type: Any) -> Any:
     try:
-        snapshot = _snapshot_revision_containers(value, depth=0, active_ids=set())
+        snapshot = _snapshot_revision_containers(
+            value, depth=0, active_ids=set(), completed={}
+        )
         coerced = _coerce_revision_value(snapshot, value_type)
-        json_value = _revision_json_value(coerced)
+        accepted_snapshot = _revision_json_value(coerced)
     except RevisionValueError:
         raise
     except Exception as exc:
         raise RevisionValueError(
             f"invalid revision value for {_revision_value_type_label(value_type)}"
         ) from exc
-    _validate_finite_json_numbers(json_value)
-    return coerced
+    _validate_finite_json_numbers(accepted_snapshot)
+    return accepted_snapshot
 
 
 def _coerce_revision_value(value: object, value_type: Any) -> Any:
@@ -458,9 +460,7 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
-    if type(value) is dict:
-        _validate_revision_mapping_keys(cast(dict[object, object], value))
-    elif isinstance(value, Mapping):
+    if isinstance(value, Mapping) and type(value) is not dict:
         raise TypeError("revision object inputs must be concrete dicts")
 
     if _revision_presence_wrapper_kind(origin) is not None:
@@ -514,7 +514,17 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
                 prepared[item.name] = _coerce_revision_value(
                     prepared[item.name], type_hints.get(item.name, item.type)
                 )
-        return coerce_workflow_input(prepared, value_type)
+            elif item.default is not MISSING:
+                prepared[item.name] = _coerce_revision_value(
+                    item.default, type_hints.get(item.name, item.type)
+                )
+            elif item.default_factory is not MISSING:
+                prepared[item.name] = _coerce_revision_value(
+                    item.default_factory(), type_hints.get(item.name, item.type)
+                )
+            else:
+                raise TypeError("revision value is missing required fields")
+        return prepared
 
     if _is_revision_typed_dict_type(value_type):
         if type(value) is not dict:
@@ -889,9 +899,6 @@ def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
-    if type(value) is dict:
-        _validate_revision_mapping_keys(cast(dict[object, object], value))
-
     if _revision_presence_wrapper_kind(origin) is not None:
         if len(args) != 1:
             raise TypeError("malformed revision presence wrapper")
@@ -1218,7 +1225,9 @@ def _canonical_json(value: object) -> str:
 
 def _revision_json_value(value: object) -> JsonValue:
     try:
-        return _normalize_revision_json_value(value, depth=0, active_ids=set())
+        return _normalize_revision_json_value(
+            value, depth=0, active_ids=set(), completed={}
+        )
     except RevisionValueError:
         raise
     except Exception as exc:
@@ -1230,6 +1239,7 @@ def _normalize_revision_json_value(
     *,
     depth: int,
     active_ids: set[int],
+    completed: dict[int, JsonValue],
 ) -> JsonValue:
     if depth > _MAX_PERSISTED_JSON_DEPTH:
         raise RevisionValueError("revision value exceeds the supported JSON depth limit")
@@ -1248,44 +1258,53 @@ def _normalize_revision_json_value(
             normalized,
             depth=depth,
             active_ids=active_ids,
+            completed=completed,
         )
 
     value_id = id(value)
     if value_id in active_ids:
         raise RevisionValueError("revision value must be acyclic JSON")
+    if value_id in completed:
+        return completed[value_id]
     active_ids.add(value_id)
     try:
         if is_dataclass_value:
-            return {
+            result: JsonValue = {
                 item.name: _normalize_revision_json_value(
                     getattr(value, item.name),
                     depth=depth + 1,
                     active_ids=active_ids,
+                    completed=completed,
                 )
                 for item in fields(cast(Any, value))
             }
-        if is_mapping:
-            result: dict[str, JsonValue] = {}
+        elif is_mapping:
+            mapping_result: dict[str, JsonValue] = {}
             for key, item in cast(Mapping[object, object], value).items():
                 canonical_key = _canonical_revision_mapping_key(key)
-                if canonical_key in result:
+                if canonical_key in mapping_result:
                     raise RevisionValueError(
                         "revision value contains duplicate canonical object keys"
                     )
-                result[canonical_key] = _normalize_revision_json_value(
+                mapping_result[canonical_key] = _normalize_revision_json_value(
                     item,
                     depth=depth + 1,
                     active_ids=active_ids,
+                    completed=completed,
                 )
-            return result
-        return [
-            _normalize_revision_json_value(
-                item,
-                depth=depth + 1,
-                active_ids=active_ids,
-            )
-            for item in cast(Sequence[object], value)
-        ]
+            result = mapping_result
+        else:
+            result = [
+                _normalize_revision_json_value(
+                    item,
+                    depth=depth + 1,
+                    active_ids=active_ids,
+                    completed=completed,
+                )
+                for item in cast(Sequence[object], value)
+            ]
+        completed[value_id] = result
+        return result
     finally:
         active_ids.remove(value_id)
 
@@ -1303,6 +1322,7 @@ def _snapshot_revision_containers(
     *,
     depth: int,
     active_ids: set[int],
+    completed: dict[int, object],
 ) -> object:
     if depth > _MAX_PERSISTED_JSON_DEPTH:
         raise RevisionValueError("revision value exceeds the supported JSON depth limit")
@@ -1319,76 +1339,44 @@ def _snapshot_revision_containers(
     value_id = id(value)
     if value_id in active_ids:
         raise RevisionValueError("revision value must be acyclic JSON")
+    if value_id in completed:
+        return completed[value_id]
     active_ids.add(value_id)
     try:
         if is_dataclass_value:
-            return {
+            result: object = {
                 item.name: _snapshot_revision_containers(
                     getattr(value, item.name),
                     depth=depth + 1,
                     active_ids=active_ids,
+                    completed=completed,
                 )
                 for item in fields(cast(Any, value))
             }
-        if is_mapping:
+        elif is_mapping:
             mapping = cast(dict[object, object], value)
-            for key in mapping:
-                _canonical_revision_mapping_key(key)
-            return {
-                cast(str, key): _snapshot_revision_containers(
+            mapping_result: dict[str, object] = {}
+            for key, item in mapping.items():
+                canonical_key = _canonical_revision_mapping_key(key)
+                mapping_result[canonical_key] = _snapshot_revision_containers(
                     item,
                     depth=depth + 1,
                     active_ids=active_ids,
+                    completed=completed,
                 )
-                for key, item in mapping.items()
-            }
-        return [
-            _snapshot_revision_containers(
-                item,
-                depth=depth + 1,
-                active_ids=active_ids,
-            )
-            for item in cast(Sequence[object], value)
-        ]
-    finally:
-        active_ids.remove(value_id)
-
-
-def _validate_revision_mapping_keys(
-    value: object,
-    *,
-    active_ids: set[int] | None = None,
-) -> None:
-    if active_ids is None:
-        active_ids = set()
-    is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
-    is_mapping = type(value) is dict
-    is_sequence = isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    )
-    if not (is_dataclass_value or is_mapping or is_sequence):
-        return
-
-    value_id = id(value)
-    if value_id in active_ids:
-        return
-    active_ids.add(value_id)
-    try:
-        if is_mapping:
-            mapping = cast(dict[object, object], value)
-            for key in mapping:
-                _canonical_revision_mapping_key(key)
-            for nested in mapping.values():
-                _validate_revision_mapping_keys(nested, active_ids=active_ids)
-            return
-        if is_dataclass_value:
-            for item in fields(cast(Any, value)):
-                _validate_revision_mapping_keys(
-                    getattr(value, item.name), active_ids=active_ids
+            result = mapping_result
+        else:
+            result = [
+                _snapshot_revision_containers(
+                    item,
+                    depth=depth + 1,
+                    active_ids=active_ids,
+                    completed=completed,
                 )
-            return
-        for nested in cast(Sequence[object], value):
-            _validate_revision_mapping_keys(nested, active_ids=active_ids)
+                for item in cast(Sequence[object], value)
+            ]
+        completed[value_id] = result
+        return result
     finally:
         active_ids.remove(value_id)
 
