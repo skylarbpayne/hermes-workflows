@@ -6,10 +6,11 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import Sequence as TypingSequence
+from typing import TypedDict, Union, overload
 
 try:
     from typing import NotRequired, Required
@@ -22,7 +23,11 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from hermes_workflows.revision import RevisionError, RevisionLedger  # noqa: E402
+from hermes_workflows.revision import (  # noqa: E402
+    RevisionError,
+    RevisionLedger,
+    canonical_value_hash,
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,38 @@ class StatefulMappingKey:
     def __str__(self):
         self.string_reads += 1
         return f"SECRET_STATEFUL_KEY_{self.string_reads}"
+
+
+class StatefulSequence(Sequence[int]):
+    def __init__(self):
+        self.iterations = 0
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> TypingSequence[int]: ...
+
+    def __getitem__(
+        self, index: Union[int, slice]
+    ) -> Union[int, TypingSequence[int]]:
+        if isinstance(index, slice):
+            return [self.iterations][index]
+        if index == 0:
+            return self.iterations
+        raise IndexError(index)
+
+    def __iter__(self):
+        self.iterations += 1
+        return iter((self.iterations,))
+
+    def __len__(self):
+        return 1
+
+
+class HostileSequence(StatefulSequence):
+    def __iter__(self):
+        raise RuntimeError("SECRET_SEQUENCE_ITERATION")
 
 
 def _fixture() -> tuple[Path, dict[str, object]]:
@@ -489,6 +526,79 @@ def _verify_mapping_key_validation(directory: Path) -> dict[str, object]:
     }
 
 
+def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
+    path = directory / "stateful-sequence.json"
+    workflow_id = "wf_revision_stateful_sequence"
+    value = StatefulSequence()
+    record = RevisionLedger(path).record_output(
+        workflow_id, 1, value, value_type=object
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    persisted_value = payload["revisions"][0]["value"]
+    if value.iterations != 1 or record.value != [1] or persisted_value != record.value:
+        raise RuntimeError("stateful sequence was not materialized into one stable snapshot")
+    if canonical_value_hash(persisted_value) != record.value_sha256:
+        raise RuntimeError("stateful sequence record hash did not match persisted bytes")
+
+    restarted = RevisionLedger(path)
+    selected = restarted.select_next_base(workflow_id, 2, value_type=object)
+    if (
+        selected.value != persisted_value
+        or selected.value_sha256 != record.value_sha256
+        or selected.base_revision_id != record.revision_id
+    ):
+        raise RuntimeError("stateful sequence restart did not preserve exact base identity")
+
+    rejected_path = directory / "rejected-sequence.json"
+    rejected_workflow_id = "wf_revision_rejected_sequence"
+    rejected = RevisionLedger(rejected_path)
+    first = rejected.record_output(
+        rejected_workflow_id, 1, {"stable": 1}, value_type=object
+    )
+    persisted_bytes = rejected_path.read_bytes()
+    lineage = [first.to_dict(include_value=True)]
+    cyclic = []
+    cyclic.append(cyclic)
+    rejections = []
+    for candidate in (HostileSequence(), cyclic):
+        try:
+            rejected.record_edit(
+                rejected_workflow_id, 1, candidate, value_type=object
+            )
+        except RevisionError as exc:
+            message = str(exc)
+            if len(message.encode("utf-8")) > 256 or "SECRET" in message:
+                raise RuntimeError(
+                    "hostile sequence rejection was unbounded or leaked value data"
+                ) from exc
+            rejections.append(message)
+        else:
+            raise RuntimeError("revision accepted a hostile sequence container")
+        current = [
+            item.to_dict(include_value=True)
+            for item in rejected.revisions(rejected_workflow_id)
+        ]
+        if rejected_path.read_bytes() != persisted_bytes or current != lineage:
+            raise RuntimeError("rejected sequence changed persisted or in-memory lineage")
+    restarted_lineage = [
+        item.to_dict(include_value=True)
+        for item in RevisionLedger(rejected_path).revisions(rejected_workflow_id)
+    ]
+    if restarted_lineage != lineage:
+        raise RuntimeError("rejected sequence changed restart lineage")
+
+    return {
+        "iterations": value.iterations,
+        "value_sha256": record.value_sha256,
+        "persisted_hash_matches": True,
+        "restart_base_matches": True,
+        "rejections": rejections,
+        "persisted_bytes_unchanged": True,
+        "in_memory_lineage_unchanged": True,
+        "restart_lineage_unchanged": True,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -519,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
         unfinalized_base_rejections = _verify_unfinalized_base_is_rejected(Path(temporary))
         typed_schema_validation = _verify_typed_schema_validation(Path(temporary))
         mapping_key_validation = _verify_mapping_key_validation(Path(temporary))
+        sequence_snapshotting = _verify_sequence_snapshotting(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -541,6 +652,7 @@ def main(argv: list[str] | None = None) -> int:
         "unfinalized_base_rejections": unfinalized_base_rejections,
         "typed_schema_validation": typed_schema_validation,
         "mapping_key_validation": mapping_key_validation,
+        "sequence_snapshotting": sequence_snapshotting,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

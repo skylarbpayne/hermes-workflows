@@ -5,10 +5,10 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, Literal, Optional, TypedDict, Union
+from typing import Annotated, Final, Literal, Optional, TypedDict, Union, overload
 
 try:
     from typing import NotRequired, Required
@@ -311,6 +311,38 @@ class ConflictingDraftMapping(Mapping):
         return 3
 
 
+class StatefulSequence(Sequence[int]):
+    def __init__(self):
+        self.iterations = 0
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[int]: ...
+
+    def __getitem__(
+        self, index: Union[int, slice]
+    ) -> Union[int, Sequence[int]]:
+        if isinstance(index, slice):
+            return [self.iterations][index]
+        if index == 0:
+            return self.iterations
+        raise IndexError(index)
+
+    def __iter__(self):
+        self.iterations += 1
+        return iter((self.iterations,))
+
+    def __len__(self):
+        return 1
+
+
+class HostileSequence(StatefulSequence):
+    def __iter__(self):
+        raise RuntimeError("SECRET_SEQUENCE_ITERATION")
+
+
 class DraftDict(dict):
     pass
 
@@ -520,6 +552,90 @@ def test_valid_typed_dict_edit_restarts_into_exact_selected_base(tmp_path):
     assert selected.value == {"title": "Human edit", "score": 2}
     assert selected.value_sha256 == edited.value_sha256
     assert selected.base_revision_id == edited.revision_id
+
+
+def test_stateful_sequence_is_snapshotted_once_for_hash_persistence_and_restart(tmp_path):
+    path = tmp_path / "revisions.json"
+    value = StatefulSequence()
+
+    record = RevisionLedger(path).record_output(
+        "wf_stateful_sequence", 1, value, value_type=object
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    persisted_value = payload["revisions"][0]["value"]
+
+    assert value.iterations == 1
+    assert record.value == [1]
+    assert persisted_value == record.value
+    assert canonical_value_hash(persisted_value) == record.value_sha256
+
+    restarted = RevisionLedger(path)
+    restarted_record = restarted.revisions("wf_stateful_sequence")[0]
+    selected = restarted.select_next_base(
+        "wf_stateful_sequence", 2, value_type=object
+    )
+
+    assert restarted_record.value == persisted_value
+    assert restarted_record.value_sha256 == record.value_sha256
+    assert selected.value == persisted_value
+    assert selected.value_sha256 == record.value_sha256
+    assert selected.base_revision_id == record.revision_id
+
+
+def test_stateful_sequence_edit_diff_uses_the_same_stable_snapshot(tmp_path):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_stateful_sequence_edit"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output(workflow_id, 1, [0], value_type=object)
+    value = StatefulSequence()
+
+    edit = ledger.record_edit(workflow_id, 1, value, value_type=object)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    persisted_value = payload["revisions"][1]["value"]
+
+    assert value.iterations == 1
+    assert edit.value == persisted_value == [1]
+    assert canonical_value_hash(persisted_value) == edit.value_sha256
+    assert edit.diff == RevisionDiffV1(
+        before_sha256=output.value_sha256,
+        after_sha256=edit.value_sha256,
+        changed_leaf_count=1,
+    )
+
+
+def test_rejected_hostile_sequences_leave_durable_and_in_memory_lineage_unchanged(
+    tmp_path,
+):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_rejected_sequence"
+    ledger = RevisionLedger(path)
+    first = ledger.record_output(
+        workflow_id, 1, {"stable": 1}, value_type=object
+    )
+    persisted_bytes = path.read_bytes()
+    lineage = [
+        record.to_dict(include_value=True) for record in ledger.revisions(workflow_id)
+    ]
+    cyclic = []
+    cyclic.append(cyclic)
+
+    for value in (HostileSequence(), cyclic):
+        with pytest.raises(RevisionValueError) as caught:
+            ledger.record_edit(workflow_id, 1, value, value_type=object)
+
+        message = str(caught.value)
+        assert len(message.encode("utf-8")) <= 256
+        assert "SECRET" not in message
+        assert path.read_bytes() == persisted_bytes
+        assert [
+            record.to_dict(include_value=True)
+            for record in ledger.revisions(workflow_id)
+        ] == lineage == [first.to_dict(include_value=True)]
+
+    assert [
+        record.to_dict(include_value=True)
+        for record in RevisionLedger(path).revisions(workflow_id)
+    ] == lineage
 
 
 def test_not_required_typed_dict_value_is_strictly_coerced_before_persistence(tmp_path):

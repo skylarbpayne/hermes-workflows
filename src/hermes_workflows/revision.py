@@ -440,8 +440,8 @@ def resolve_revision_service(registry: OperatorServiceRegistry) -> RevisionServi
 
 def _coerce_value(value: object, value_type: Any) -> Any:
     try:
-        _validate_revision_mapping_keys(value)
-        coerced = _coerce_revision_value(value, value_type)
+        snapshot = _snapshot_revision_containers(value, depth=0, active_ids=set())
+        coerced = _coerce_revision_value(snapshot, value_type)
         json_value = _revision_json_value(coerced)
     except RevisionValueError:
         raise
@@ -1296,6 +1296,62 @@ def _canonical_revision_mapping_key(key: object) -> str:
             "revision JSON object keys must be exact built-in strings"
         )
     return cast(str, key)
+
+
+def _snapshot_revision_containers(
+    value: object,
+    *,
+    depth: int,
+    active_ids: set[int],
+) -> object:
+    if depth > _MAX_PERSISTED_JSON_DEPTH:
+        raise RevisionValueError("revision value exceeds the supported JSON depth limit")
+    is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
+    if isinstance(value, Mapping) and type(value) is not dict:
+        raise TypeError("revision JSON objects must be concrete dicts")
+    is_mapping = type(value) is dict
+    is_sequence = isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    )
+    if not (is_dataclass_value or is_mapping or is_sequence):
+        return value
+
+    value_id = id(value)
+    if value_id in active_ids:
+        raise RevisionValueError("revision value must be acyclic JSON")
+    active_ids.add(value_id)
+    try:
+        if is_dataclass_value:
+            return {
+                item.name: _snapshot_revision_containers(
+                    getattr(value, item.name),
+                    depth=depth + 1,
+                    active_ids=active_ids,
+                )
+                for item in fields(cast(Any, value))
+            }
+        if is_mapping:
+            mapping = cast(dict[object, object], value)
+            for key in mapping:
+                _canonical_revision_mapping_key(key)
+            return {
+                cast(str, key): _snapshot_revision_containers(
+                    item,
+                    depth=depth + 1,
+                    active_ids=active_ids,
+                )
+                for key, item in mapping.items()
+            }
+        return [
+            _snapshot_revision_containers(
+                item,
+                depth=depth + 1,
+                active_ids=active_ids,
+            )
+            for item in cast(Sequence[object], value)
+        ]
+    finally:
+        active_ids.remove(value_id)
 
 
 def _validate_revision_mapping_keys(
