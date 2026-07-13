@@ -329,6 +329,7 @@ class RevisionLedger:
                         raise RevisionConflictError(
                             f"revision_id {record.revision_id} already exists with different content"
                         )
+                    self._fsync_parent_directory()
                     result = replace(existing, value=record.value)
                     break
                 else:
@@ -376,6 +377,16 @@ class RevisionLedger:
             ) from exc
         return records
 
+    def _fsync_parent_directory(self) -> None:
+        directory_descriptor = os.open(
+            self.path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+
     def _persist(self, records: list[RevisionRecordV1]) -> None:
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -398,14 +409,7 @@ class RevisionLedger:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
-            directory_descriptor = os.open(
-                self.path.parent,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
+            self._fsync_parent_directory()
         except OSError as exc:
             raise RevisionError("revision ledger persistence failed") from exc
         finally:

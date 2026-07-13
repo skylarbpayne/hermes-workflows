@@ -923,7 +923,14 @@ def test_parent_directory_fsync_failure_retry_reloads_uncertain_commit(
     assert uncertain_records[0] == original
     assert replace_attempts == 1
 
-    monkeypatch.setattr("hermes_workflows.revision.os.fsync", real_fsync)
+    retry_events = []
+
+    def observe_retry_fsync(descriptor):
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        retry_events.append(f"fsync:{kind}")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("hermes_workflows.revision.os.fsync", observe_retry_fsync)
     retried = ledger.record_edit(
         "wf_directory_fsync", 1, Draft("edited", 2), value_type=Draft
     )
@@ -937,7 +944,93 @@ def test_parent_directory_fsync_failure_retry_reloads_uncertain_commit(
         record.to_dict(include_value=True)
         for record in RevisionLedger(path).revisions("wf_directory_fsync")
     ] == uncertain_snapshot
+    assert retry_events == ["fsync:directory"]
     assert replace_attempts == 1
+
+
+def test_uncertain_commit_replay_retries_directory_fsync_until_success(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    original = ledger.record_output(
+        "wf_directory_fsync_retry", 1, Draft("original", 1), value_type=Draft
+    )
+    real_fsync = os.fsync
+    real_replace = os.replace
+    replace_attempts = 0
+
+    def observe_replace(source, destination):
+        nonlocal replace_attempts
+        replace_attempts += 1
+        return real_replace(source, destination)
+
+    def fail_directory_fsync(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("SECRET_DIRECTORY_FSYNC_FAILURE")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("hermes_workflows.revision.os.replace", observe_replace)
+    monkeypatch.setattr("hermes_workflows.revision.os.fsync", fail_directory_fsync)
+
+    with pytest.raises(RevisionError, match="^revision ledger persistence failed$"):
+        ledger.record_edit(
+            "wf_directory_fsync_retry", 1, Draft("edited", 2), value_type=Draft
+        )
+
+    uncertain_records = RevisionLedger(path).revisions("wf_directory_fsync_retry")
+    uncertain_snapshot = [
+        record.to_dict(include_value=True) for record in uncertain_records
+    ]
+    assert [record.kind for record in uncertain_records] == ["output", "edit"]
+    assert uncertain_records[0] == original
+    assert replace_attempts == 1
+
+    replay_events = []
+
+    def fail_replay_directory_fsync(descriptor):
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        replay_events.append(f"fsync:{kind}")
+        raise OSError("SECRET_REPLAY_DIRECTORY_FSYNC_FAILURE")
+
+    monkeypatch.setattr(
+        "hermes_workflows.revision.os.fsync", fail_replay_directory_fsync
+    )
+    with pytest.raises(RevisionError) as caught:
+        ledger.record_edit(
+            "wf_directory_fsync_retry", 1, Draft("edited", 2), value_type=Draft
+        )
+
+    assert str(caught.value) == "revision ledger persistence failed"
+    assert "SECRET_REPLAY_DIRECTORY_FSYNC_FAILURE" not in str(caught.value)
+    assert replay_events == ["fsync:directory"]
+    assert replace_attempts == 1
+    assert [
+        record.to_dict(include_value=True)
+        for record in RevisionLedger(path).revisions("wf_directory_fsync_retry")
+    ] == uncertain_snapshot
+
+    successful_replay_events = []
+
+    def observe_successful_replay_fsync(descriptor):
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        successful_replay_events.append(f"fsync:{kind}")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(
+        "hermes_workflows.revision.os.fsync", observe_successful_replay_fsync
+    )
+    retried = ledger.record_edit(
+        "wf_directory_fsync_retry", 1, Draft("edited", 2), value_type=Draft
+    )
+
+    assert retried == uncertain_records[1]
+    assert successful_replay_events == ["fsync:directory"]
+    assert replace_attempts == 1
+    assert [
+        record.to_dict(include_value=True)
+        for record in RevisionLedger(path).revisions("wf_directory_fsync_retry")
+    ] == uncertain_snapshot
 
 
 @pytest.mark.parametrize("stage", ("write", "flush", "fsync", "replace"))
