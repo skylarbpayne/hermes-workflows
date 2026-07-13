@@ -855,6 +855,91 @@ def test_persistence_tempfile_collision_does_not_overwrite_existing_file(
     assert not (tmp_path / f".{path.name}.unique.tmp").exists()
 
 
+def test_persistence_fsyncs_file_before_replace_and_parent_directory_after(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "revisions.json"
+    events = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def observe_fsync(descriptor):
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(f"fsync:{kind}")
+        return real_fsync(descriptor)
+
+    def observe_replace(source, destination):
+        events.append("replace")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("hermes_workflows.revision.os.fsync", observe_fsync)
+    monkeypatch.setattr("hermes_workflows.revision.os.replace", observe_replace)
+
+    RevisionLedger(path).record_output(
+        "wf_fsync_order", 1, Draft("durable", 1), value_type=Draft
+    )
+
+    assert events == ["fsync:file", "replace", "fsync:directory"]
+
+
+def test_parent_directory_fsync_failure_retry_reloads_uncertain_commit(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    original = ledger.record_output(
+        "wf_directory_fsync", 1, Draft("original", 1), value_type=Draft
+    )
+    real_fsync = os.fsync
+    real_replace = os.replace
+    replace_attempts = 0
+
+    def fail_directory_fsync(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("SECRET_DIRECTORY_FSYNC_FAILURE")
+        return real_fsync(descriptor)
+
+    def observe_replace(source, destination):
+        nonlocal replace_attempts
+        replace_attempts += 1
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("hermes_workflows.revision.os.fsync", fail_directory_fsync)
+    monkeypatch.setattr("hermes_workflows.revision.os.replace", observe_replace)
+
+    with pytest.raises(RevisionError) as caught:
+        ledger.record_edit(
+            "wf_directory_fsync", 1, Draft("edited", 2), value_type=Draft
+        )
+
+    assert str(caught.value) == "revision ledger persistence failed"
+    assert "SECRET_DIRECTORY_FSYNC_FAILURE" not in str(caught.value)
+    assert ledger.revisions("wf_directory_fsync") == (original,)
+    uncertain_records = RevisionLedger(path).revisions("wf_directory_fsync")
+    uncertain_snapshot = [
+        record.to_dict(include_value=True) for record in uncertain_records
+    ]
+    assert [record.kind for record in uncertain_records] == ["output", "edit"]
+    assert uncertain_records[0] == original
+    assert replace_attempts == 1
+
+    monkeypatch.setattr("hermes_workflows.revision.os.fsync", real_fsync)
+    retried = ledger.record_edit(
+        "wf_directory_fsync", 1, Draft("edited", 2), value_type=Draft
+    )
+
+    assert [
+        record.to_dict(include_value=True)
+        for record in ledger.revisions("wf_directory_fsync")
+    ] == uncertain_snapshot
+    assert retried == uncertain_records[1]
+    assert [
+        record.to_dict(include_value=True)
+        for record in RevisionLedger(path).revisions("wf_directory_fsync")
+    ] == uncertain_snapshot
+    assert replace_attempts == 1
+
+
 @pytest.mark.parametrize("stage", ("write", "flush", "fsync", "replace"))
 def test_persistence_stage_failure_removes_tempfile_and_plaintext(
     tmp_path, monkeypatch, stage

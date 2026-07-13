@@ -398,6 +398,14 @@ class RevisionLedger:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            directory_descriptor = os.open(
+                self.path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
         except OSError as exc:
             raise RevisionError("revision ledger persistence failed") from exc
         finally:
