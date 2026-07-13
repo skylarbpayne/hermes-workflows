@@ -87,6 +87,17 @@ class WrappedTypedDraft(TypedDict):
 
 
 @dataclass(frozen=True)
+class MappingKeyOrderDraft:
+    score: int
+    nested: dict[str, int]
+
+
+class MappingKeyOrderTypedDraft(TypedDict):
+    score: int
+    nested: dict[str, int]
+
+
+@dataclass(frozen=True)
 class MisplacedRequiredDraft:
     score: Required[int]
 
@@ -1430,7 +1441,7 @@ def test_schema_dict_keys_are_rejected_before_field_coercion_or_lineage_mutation
         )
 
     assert str(caught.value) == (
-        "revision JSON object keys must be exact finite JSON scalars"
+        "revision JSON object keys must be exact built-in strings"
     )
     assert "SECRET" not in str(caught.value)
     assert key.string_reads == 0
@@ -1440,18 +1451,20 @@ def test_schema_dict_keys_are_rejected_before_field_coercion_or_lineage_mutation
     assert RevisionLedger(path).revisions(workflow_id) == lineage
 
 
-def test_revision_values_reject_keys_that_collide_in_canonical_json(tmp_path):
-    colliding = {1: "first", "1": "second"}
+def test_revision_values_reject_non_string_keys_before_canonical_json(tmp_path):
+    non_string = {1: "first", "1": "second"}
     reduced = {"1": "second"}
 
     with pytest.raises(RevisionValueError) as caught:
-        canonical_value_hash(colliding)
-    assert str(caught.value) == "revision value contains duplicate canonical object keys"
+        canonical_value_hash(non_string)
+    assert str(caught.value) == (
+        "revision JSON object keys must be exact built-in strings"
+    )
     assert canonical_value_hash(reduced)
 
     ledger = RevisionLedger(tmp_path / "revisions.json")
-    with pytest.raises(RevisionValueError, match="duplicate canonical object keys"):
-        ledger.record_output("wf_revision", 1, colliding, value_type=object)
+    with pytest.raises(RevisionValueError, match="exact built-in strings"):
+        ledger.record_output("wf_revision", 1, non_string, value_type=object)
     assert ledger.revisions("wf_revision") == ()
 
 
@@ -1463,8 +1476,8 @@ def test_declared_mapping_rejects_keys_that_collide_during_coercion(tmp_path):
         ledger.record_output(
             "wf_revision",
             1,
-            {1: "first", "1": "second"},
-            value_type=dict[str, str],
+            {"1": "first", "01": "second"},
+            value_type=dict[int, str],
         )
 
     assert str(caught.value) == "revision value contains duplicate canonical object keys"
@@ -1482,7 +1495,7 @@ def test_declared_mapping_rejects_stateful_key_before_stringification_or_persist
     with pytest.raises(RevisionValueError) as hash_error:
         canonical_value_hash({key: 1})
     assert str(hash_error.value) == (
-        "revision JSON object keys must be exact finite JSON scalars"
+        "revision JSON object keys must be exact built-in strings"
     )
     assert key.string_reads == 0
 
@@ -1495,11 +1508,43 @@ def test_declared_mapping_rejects_stateful_key_before_stringification_or_persist
         )
 
     message = str(caught.value)
-    assert message == "revision JSON object keys must be exact finite JSON scalars"
+    assert message == "revision JSON object keys must be exact built-in strings"
     assert "SECRET" not in message
     assert key.string_reads == 0
     assert ledger.revisions("wf_revision_stateful_key") == ()
     assert not path.exists()
+
+
+def test_non_string_mapping_key_is_rejected_before_restart_can_change_its_type(
+    tmp_path,
+):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_revision_non_string_key_restart"
+    ledger = RevisionLedger(path)
+
+    try:
+        recorded = ledger.record_output(
+            workflow_id,
+            1,
+            {7: {"nested": 1}},
+            value_type=dict[object, dict[str, int]],
+        )
+    except RevisionValueError as caught:
+        assert str(caught) == (
+            "revision JSON object keys must be exact built-in strings"
+        )
+        assert ledger.revisions(workflow_id) == ()
+        assert not path.exists()
+        return
+
+    restarted = RevisionLedger(path).revisions(workflow_id)[0]
+    assert recorded.value == {7: {"nested": 1}}
+    assert type(next(iter(recorded.value))) is int
+    assert restarted.value == {"7": {"nested": 1}}
+    assert type(next(iter(restarted.value))) is str
+    pytest.fail(
+        "accepted exact built-in int key; restart changed key from int 7 to str '7'"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1522,7 +1567,7 @@ def test_declared_mapping_rejects_scalar_subclass_keys_without_persistence(
         )
 
     message = str(caught.value)
-    assert message == "revision JSON object keys must be exact finite JSON scalars"
+    assert message == "revision JSON object keys must be exact built-in strings"
     assert "secret" not in message.lower()
     assert ledger.revisions("wf_revision_scalar_subclass_key") == ()
     assert not path.exists()
@@ -1541,36 +1586,160 @@ def test_declared_mapping_rejects_nonfinite_float_keys_without_persistence(tmp_p
             value_type=dict[object, int],
         )
 
-    assert str(caught.value) == (
-        "revision JSON object keys must be exact finite JSON scalars"
-    )
+    assert str(caught.value) == "revision JSON object keys must be exact built-in strings"
     assert ledger.revisions("wf_revision_nonfinite_key") == ()
     assert not path.exists()
 
 
 @pytest.mark.parametrize(
     "key",
-    ("stable", 7, 1.5, True, None),
-    ids=("str", "int", "float", "bool", "null"),
+    (
+        7,
+        1.5,
+        True,
+        None,
+        float("nan"),
+        SecretStringKey("secret"),
+        SecretIntegerKey(1),
+        SecretFloatKey(1.5),
+        StatefulMappingKey(),
+    ),
+    ids=(
+        "int",
+        "float",
+        "bool",
+        "null",
+        "nonfinite-float",
+        "str-subclass",
+        "int-subclass",
+        "float-subclass",
+        "custom-stateful",
+    ),
 )
-def test_exact_stable_scalar_mapping_keys_are_deterministic_across_restart(
+def test_nested_non_string_mapping_keys_leave_durable_and_in_memory_state_unchanged(
     tmp_path, key
 ):
     path = tmp_path / "revisions.json"
-    value = {key: 1}
-    first = RevisionLedger(path).record_output(
-        "wf_revision_stable_key", 1, value, value_type=dict[object, int]
+    workflow_id = "wf_revision_rejected_nested_key"
+    ledger = RevisionLedger(path)
+    first = ledger.record_output(
+        workflow_id,
+        1,
+        {"nested": {"stable": 1}},
+        value_type=dict[str, dict[object, int]],
     )
-    persisted = path.read_bytes()
+    persisted_bytes = path.read_bytes()
+    lineage = [
+        record.to_dict(include_value=True) for record in ledger.revisions(workflow_id)
+    ]
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_edit(
+            workflow_id,
+            1,
+            {"nested": {key: 2}},
+            value_type=dict[str, dict[object, int]],
+        )
+
+    message = str(caught.value)
+    assert message == "revision JSON object keys must be exact built-in strings"
+    assert "SECRET" not in message
+    if isinstance(key, StatefulMappingKey):
+        assert key.string_reads == 0
+    assert path.read_bytes() == persisted_bytes
+    assert [
+        record.to_dict(include_value=True) for record in ledger.revisions(workflow_id)
+    ] == lineage == [first.to_dict(include_value=True)]
+    assert [
+        record.to_dict(include_value=True)
+        for record in RevisionLedger(path).revisions(workflow_id)
+    ] == lineage
+
+
+@pytest.mark.parametrize(
+    ("value_type", "invalid_value"),
+    (
+        (
+            MappingKeyOrderDraft,
+            lambda score: {"score": score, "nested": {7: 2}},
+        ),
+        (
+            MappingKeyOrderDraft,
+            lambda score: MappingKeyOrderDraft(score, {7: 2}),  # type: ignore[arg-type]
+        ),
+        (
+            MappingKeyOrderTypedDraft,
+            lambda score: {"score": score, "nested": {7: 2}},
+        ),
+    ),
+    ids=("dataclass-dict", "dataclass-instance", "typed-dict"),
+)
+def test_nested_mapping_keys_are_validated_before_dataclass_or_typed_dict_coercion(
+    tmp_path, value_type, invalid_value
+):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_revision_nested_key_order"
+    ledger = RevisionLedger(path)
+    first = ledger.record_output(
+        workflow_id,
+        1,
+        {"score": 1, "nested": {"stable": 1}},
+        value_type=value_type,
+    )
+    persisted_bytes = path.read_bytes()
+    lineage = [
+        record.to_dict(include_value=True) for record in ledger.revisions(workflow_id)
+    ]
+    score = CoercionProbe()
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_edit(
+            workflow_id,
+            1,
+            invalid_value(score),
+            value_type=value_type,
+        )
+
+    assert str(caught.value) == (
+        "revision JSON object keys must be exact built-in strings"
+    )
+    assert score.integer_reads == 0
+    assert path.read_bytes() == persisted_bytes
+    assert [
+        record.to_dict(include_value=True) for record in ledger.revisions(workflow_id)
+    ] == lineage == [first.to_dict(include_value=True)]
+
+
+def test_exact_string_mapping_keys_survive_edit_restart_and_base_selection(tmp_path):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_revision_exact_string_key"
+    ledger = RevisionLedger(path)
+    ledger.record_output(
+        workflow_id,
+        1,
+        {"nested": {"stable": "1"}},
+        value_type=dict[str, dict[str, int]],
+    )
+    edited = ledger.record_edit(
+        workflow_id,
+        1,
+        {"nested": {"stable": "2"}},
+        value_type=dict[str, dict[str, int]],
+    )
 
     restarted = RevisionLedger(path)
-    replay = restarted.record_output(
-        "wf_revision_stable_key", 1, value, value_type=dict[object, int]
+    selected = restarted.select_next_base(
+        workflow_id,
+        2,
+        value_type=dict[str, dict[str, int]],
     )
 
-    assert replay.revision_id == first.revision_id
-    assert replay.value_sha256 == first.value_sha256
-    assert path.read_bytes() == persisted
+    assert selected.value == {"nested": {"stable": 2}}
+    assert type(next(iter(selected.value))) is str
+    assert type(next(iter(selected.value["nested"]))) is str
+    assert selected.value_sha256 == edited.value_sha256
+    assert selected.base_revision_id == edited.revision_id
+    assert selected.parent_revision_id == edited.revision_id
 
 
 def test_attempt_number_rejects_hostile_int_subclasses_without_comparison(tmp_path):

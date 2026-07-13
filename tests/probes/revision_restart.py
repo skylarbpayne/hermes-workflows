@@ -70,6 +70,30 @@ class ConflictingDraftMapping(Mapping):
         return 3
 
 
+class SecretStringKey(str):
+    pass
+
+
+class SecretIntegerKey(int):
+    pass
+
+
+class SecretFloatKey(float):
+    pass
+
+
+class StatefulMappingKey:
+    def __init__(self):
+        self.string_reads = 0
+
+    def __hash__(self):
+        return 1
+
+    def __str__(self):
+        self.string_reads += 1
+        return f"SECRET_STATEFUL_KEY_{self.string_reads}"
+
+
 def _fixture() -> tuple[Path, dict[str, object]]:
     path = REPO_ROOT / "tests" / "fixtures" / "revision_v1.json"
     return path, json.loads(path.read_text(encoding="utf-8"))
@@ -394,6 +418,77 @@ def _verify_typed_schema_validation(directory: Path) -> dict[str, object]:
     }
 
 
+def _verify_mapping_key_validation(directory: Path) -> dict[str, object]:
+    path = directory / "mapping-keys.json"
+    workflow_id = "wf_revision_mapping_keys"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output(
+        workflow_id,
+        1,
+        {"nested": {"stable": 1}},
+        value_type=dict[str, dict[object, int]],
+    )
+    persisted_bytes = path.read_bytes()
+    lineage = [
+        record.to_dict(include_value=True) for record in ledger.revisions(workflow_id)
+    ]
+    stateful_key = StatefulMappingKey()
+    invalid_keys = (
+        7,
+        1.5,
+        True,
+        None,
+        float("nan"),
+        SecretStringKey("SECRET_STRING_KEY"),
+        SecretIntegerKey(1),
+        SecretFloatKey(1.5),
+        stateful_key,
+    )
+    expected = "revision JSON object keys must be exact built-in strings"
+
+    for index, key in enumerate(invalid_keys):
+        try:
+            ledger.record_edit(
+                workflow_id,
+                1,
+                {"nested": {key: index}},
+                value_type=dict[str, dict[object, int]],
+            )
+        except RevisionError as exc:
+            if str(exc) != expected or "SECRET" in str(exc):
+                raise RuntimeError(
+                    "mapping-key rejection was unbounded or leaked key data"
+                ) from exc
+        else:
+            raise RuntimeError("revision accepted a non-string mapping key")
+        if path.read_bytes() != persisted_bytes:
+            raise RuntimeError("rejected mapping key changed persisted revision bytes")
+        current = [
+            record.to_dict(include_value=True)
+            for record in ledger.revisions(workflow_id)
+        ]
+        if current != lineage:
+            raise RuntimeError("rejected mapping key changed in-memory revision lineage")
+
+    restarted = RevisionLedger(path)
+    restarted_lineage = [
+        record.to_dict(include_value=True)
+        for record in restarted.revisions(workflow_id)
+    ]
+    if restarted_lineage != lineage or lineage != [output.to_dict(include_value=True)]:
+        raise RuntimeError("rejected mapping key changed restart revision lineage")
+    if stateful_key.string_reads != 0:
+        raise RuntimeError("mapping-key rejection stringified a stateful key")
+
+    return {
+        "rejection_count": len(invalid_keys),
+        "rejection": expected,
+        "persisted_bytes_unchanged": True,
+        "in_memory_lineage_unchanged": True,
+        "restart_lineage_unchanged": True,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -423,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         duplicate_slot_rejection = _verify_duplicate_slot_is_rejected(Path(temporary))
         unfinalized_base_rejections = _verify_unfinalized_base_is_rejected(Path(temporary))
         typed_schema_validation = _verify_typed_schema_validation(Path(temporary))
+        mapping_key_validation = _verify_mapping_key_validation(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -444,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         "duplicate_slot_rejection": duplicate_slot_rejection,
         "unfinalized_base_rejections": unfinalized_base_rejections,
         "typed_schema_validation": typed_schema_validation,
+        "mapping_key_validation": mapping_key_validation,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

@@ -440,6 +440,7 @@ def resolve_revision_service(registry: OperatorServiceRegistry) -> RevisionServi
 
 def _coerce_value(value: object, value_type: Any) -> Any:
     try:
+        _validate_revision_mapping_keys(value)
         coerced = _coerce_revision_value(value, value_type)
         json_value = _revision_json_value(coerced)
     except RevisionValueError:
@@ -1290,18 +1291,50 @@ def _normalize_revision_json_value(
 
 
 def _canonical_revision_mapping_key(key: object) -> str:
-    if type(key) not in (str, int, float, bool, type(None)) or (
-        type(key) is float and not math.isfinite(cast(float, key))
-    ):
+    if type(key) is not str:
         raise RevisionValueError(
-            "revision JSON object keys must be exact finite JSON scalars"
+            "revision JSON object keys must be exact built-in strings"
         )
-    return str(key)
+    return cast(str, key)
 
 
-def _validate_revision_mapping_keys(value: dict[object, object]) -> None:
-    for key in value:
-        _canonical_revision_mapping_key(key)
+def _validate_revision_mapping_keys(
+    value: object,
+    *,
+    active_ids: set[int] | None = None,
+) -> None:
+    if active_ids is None:
+        active_ids = set()
+    is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
+    is_mapping = type(value) is dict
+    is_sequence = isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    )
+    if not (is_dataclass_value or is_mapping or is_sequence):
+        return
+
+    value_id = id(value)
+    if value_id in active_ids:
+        return
+    active_ids.add(value_id)
+    try:
+        if is_mapping:
+            mapping = cast(dict[object, object], value)
+            for key in mapping:
+                _canonical_revision_mapping_key(key)
+            for nested in mapping.values():
+                _validate_revision_mapping_keys(nested, active_ids=active_ids)
+            return
+        if is_dataclass_value:
+            for item in fields(cast(Any, value)):
+                _validate_revision_mapping_keys(
+                    getattr(value, item.name), active_ids=active_ids
+                )
+            return
+        for nested in cast(Sequence[object], value):
+            _validate_revision_mapping_keys(nested, active_ids=active_ids)
+    finally:
+        active_ids.remove(value_id)
 
 
 def _revision_value_type_label(value_type: Any) -> str:
