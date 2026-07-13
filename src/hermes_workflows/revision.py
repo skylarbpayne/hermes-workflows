@@ -184,9 +184,25 @@ class RevisionLedger:
                 raise RevisionConflictError(
                     f"edit for attempt {attempt_number} cannot be recorded after descendant base selection"
                 )
-            parent = self._latest(
-                workflow_id, attempt_number, kinds=("output", "base")
-            )
+            if existing_edit is not None:
+                _coerce_exact_value(
+                    existing_edit.value,
+                    value_type,
+                    expected_sha256=existing_edit.value_sha256,
+                )
+                parent = next(
+                    (
+                        record
+                        for record in self._records
+                        if record.workflow_id == workflow_id
+                        and record.revision_id == existing_edit.parent_revision_id
+                    ),
+                    None,
+                )
+            else:
+                parent = self._latest(
+                    workflow_id, attempt_number, kinds=("output", "base")
+                )
             if parent is None:
                 raise RevisionError("an output or selected base must exist before an edit")
             diff = RevisionDiffV1(

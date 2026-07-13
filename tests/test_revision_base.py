@@ -2283,6 +2283,65 @@ def test_preselection_edit_replay_remains_idempotent_after_descendant_base(tmp_p
     assert ledger.revisions("wf_revision") == (output, edit, selected)
 
 
+def test_edit_replay_remains_idempotent_after_later_output_in_same_attempt(tmp_path):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_revision_replay"
+    ledger = RevisionLedger(path)
+    ledger.record_output(workflow_id, 1, Draft("First", 1), value_type=Draft)
+    selected = ledger.select_next_base(workflow_id, 2, value_type=Draft)
+    stale_writer = RevisionLedger(path)
+    edit = ledger.record_edit(workflow_id, 2, Draft("Human edit", 2), value_type=Draft)
+    ledger.record_output(workflow_id, 2, Draft("Generated later", 3), value_type=Draft)
+    persisted_bytes = path.read_bytes()
+    persisted_records = ledger.revisions(workflow_id)
+
+    replayed = ledger.record_edit(
+        workflow_id, 2, Draft("Human edit", 2), value_type=Draft
+    )
+
+    assert replayed == edit
+    assert replayed.parent_revision_id == selected.revision_id
+    assert path.read_bytes() == persisted_bytes
+    assert ledger.revisions(workflow_id) == persisted_records
+
+    stale_replay = stale_writer.record_edit(
+        workflow_id, 2, Draft("Human edit", 2), value_type=Draft
+    )
+    assert stale_replay == edit
+    assert path.read_bytes() == persisted_bytes
+    assert stale_writer.revisions(workflow_id) == persisted_records
+
+    restarted = RevisionLedger(path)
+    restarted_replay = restarted.record_edit(
+        workflow_id, 2, Draft("Human edit", 2), value_type=Draft
+    )
+
+    assert restarted_replay == edit
+    assert restarted_replay.parent_revision_id == selected.revision_id
+    assert path.read_bytes() == persisted_bytes
+    assert restarted.revisions(workflow_id) == persisted_records
+
+    with pytest.raises(RevisionValueError, match="exact revision value"):
+        restarted.record_edit(
+            workflow_id, 2, Draft("Human edit", 2), value_type=DriftedDraft
+        )
+    assert path.read_bytes() == persisted_bytes
+    assert restarted.revisions(workflow_id) == persisted_records
+
+    with pytest.raises(RevisionConflictError) as caught:
+        restarted.record_edit(
+            workflow_id, 2, Draft("Changed edit", 4), value_type=Draft
+        )
+    message = str(caught.value)
+    assert message == "edit slot for attempt 2 already has a different revision"
+    assert len(message.encode("utf-8")) <= 256
+    assert workflow_id not in message
+    assert "Human edit" not in message
+    assert "Changed edit" not in message
+    assert path.read_bytes() == persisted_bytes
+    assert restarted.revisions(workflow_id) == persisted_records
+
+
 def test_restart_rejects_ledger_with_edit_after_descendant_base(tmp_path):
     stale_path = tmp_path / "stale.json"
     stale = RevisionLedger(stale_path)

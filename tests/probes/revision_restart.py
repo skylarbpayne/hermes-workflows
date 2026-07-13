@@ -24,6 +24,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from hermes_workflows.revision import (  # noqa: E402
+    RevisionConflictError,
     RevisionError,
     RevisionLedger,
     canonical_value_hash,
@@ -1015,6 +1016,76 @@ def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
     }
 
 
+def _verify_edit_replay_after_later_output(directory: Path) -> dict[str, object]:
+    path = directory / "edit-replay-after-output.json"
+    workflow_id = "wf_revision_edit_replay"
+    ledger = RevisionLedger(path)
+    ledger.record_output(workflow_id, 1, Draft("First", 1), value_type=Draft)
+    selected = ledger.select_next_base(workflow_id, 2, value_type=Draft)
+    stale_writer = RevisionLedger(path)
+    edit = ledger.record_edit(
+        workflow_id, 2, Draft("Human edit", 2), value_type=Draft
+    )
+    ledger.record_output(
+        workflow_id, 2, Draft("Generated later", 3), value_type=Draft
+    )
+
+    other_workflow_id = "wf_revision_edit_replay_other"
+    ledger.record_output(
+        other_workflow_id, 1, Draft("Other first", 1), value_type=Draft
+    )
+    ledger.select_next_base(other_workflow_id, 2, value_type=Draft)
+    ledger.record_edit(
+        other_workflow_id, 2, Draft("Other edit", 2), value_type=Draft
+    )
+    ledger.record_output(
+        other_workflow_id, 2, Draft("Other generated", 3), value_type=Draft
+    )
+
+    persisted_bytes = path.read_bytes()
+    persisted_count = len(ledger.revisions(workflow_id))
+    for replay_ledger in (ledger, stale_writer, RevisionLedger(path)):
+        replayed = replay_ledger.record_edit(
+            workflow_id, 2, Draft("Human edit", 2), value_type=Draft
+        )
+        if replayed != edit or replayed.parent_revision_id != selected.revision_id:
+            raise RuntimeError("identical edit replay did not preserve its original identity")
+        if path.read_bytes() != persisted_bytes:
+            raise RuntimeError("identical edit replay changed durable bytes")
+        if len(replay_ledger.revisions(workflow_id)) != persisted_count:
+            raise RuntimeError("identical edit replay changed the durable record count")
+
+    restarted = RevisionLedger(path)
+    try:
+        restarted.record_edit(
+            workflow_id, 2, Draft("Changed edit", 4), value_type=Draft
+        )
+    except RevisionConflictError as exc:
+        conflict = str(exc)
+        expected = "edit slot for attempt 2 already has a different revision"
+        if conflict != expected or len(conflict.encode("utf-8")) > 256:
+            raise RuntimeError("changed edit replay produced an invalid conflict") from exc
+        if workflow_id in conflict or "Human edit" in conflict or "Changed edit" in conflict:
+            raise RuntimeError("changed edit replay leaked revision content") from exc
+    else:
+        raise RuntimeError("changed edit replay replaced an existing edit slot")
+
+    if path.read_bytes() != persisted_bytes:
+        raise RuntimeError("changed edit replay changed durable bytes")
+    if len(restarted.revisions(workflow_id)) != persisted_count:
+        raise RuntimeError("changed edit replay changed the durable record count")
+    return {
+        "revision_id_preserved": True,
+        "parent_revision_id_preserved": True,
+        "restart_replay_preserved": True,
+        "stale_writer_replay_preserved": True,
+        "workflow_scoping_preserved": True,
+        "persisted_bytes_unchanged": True,
+        "record_count_unchanged": True,
+        "changed_replay_rejection": conflict,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("write", "select"))
@@ -1048,6 +1119,9 @@ def main(argv: list[str] | None = None) -> int:
         scalar_snapshotting = _verify_scalar_snapshotting(Path(temporary))
         scalar_kind_diffing = _verify_scalar_kind_diffing(Path(temporary))
         sequence_snapshotting = _verify_sequence_snapshotting(Path(temporary))
+        edit_replay_after_later_output = _verify_edit_replay_after_later_output(
+            Path(temporary)
+        )
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
         raise RuntimeError("v2 base hash did not preserve the edited-v1 hash")
@@ -1073,6 +1147,7 @@ def main(argv: list[str] | None = None) -> int:
         "scalar_snapshotting": scalar_snapshotting,
         "scalar_kind_diffing": scalar_kind_diffing,
         "sequence_snapshotting": sequence_snapshotting,
+        "edit_replay_after_later_output": edit_replay_after_later_output,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
