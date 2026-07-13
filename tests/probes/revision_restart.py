@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence as TypingSequence
+from typing import Literal, Sequence as TypingSequence
 from typing import TypedDict, Union, overload
 
 try:
@@ -730,6 +730,111 @@ def _verify_scalar_snapshotting(directory: Path) -> dict[str, object]:
     }
 
 
+def _verify_scalar_kind_diffing(directory: Path) -> dict[str, object]:
+    collision_receipts = []
+    for shape, after in (
+        ("top", True),
+        ("top", 1.0),
+        ("nested", True),
+        ("nested", 1.0),
+    ):
+        scalar_kind = type(after).__name__
+        path = directory / f"scalar-kind-{shape}-{scalar_kind}.json"
+        workflow_id = f"wf_revision_scalar_kind_{shape}_{scalar_kind}"
+        value_type = Literal[1, True] if shape == "top" and after is True else object
+        before_value = 1 if shape == "top" else {"value": 1}
+        after_value = after if shape == "top" else {"value": after}
+        ledger = RevisionLedger(path)
+        output = ledger.record_output(
+            workflow_id, 1, before_value, value_type=value_type
+        )
+        edited = ledger.record_edit(
+            workflow_id, 1, after_value, value_type=value_type
+        )
+        if (
+            output.value_sha256 != canonical_value_hash(before_value)
+            or edited.value_sha256 != canonical_value_hash(after_value)
+            or output.value_sha256 == edited.value_sha256
+            or edited.diff is None
+            or edited.diff.changed_leaf_count != 1
+        ):
+            raise RuntimeError("canonical scalar-kind collision was not counted as changed")
+
+        persisted_bytes = path.read_bytes()
+        restarted = RevisionLedger(path)
+        restarted_edit = restarted.revisions(workflow_id)[1]
+        if restarted_edit.diff != edited.diff or path.read_bytes() != persisted_bytes:
+            raise RuntimeError("scalar-kind diff changed across durable reopen")
+        selected = restarted.select_next_base(workflow_id, 2, value_type=value_type)
+        replayed = restarted.record_edit(
+            workflow_id, 1, after_value, value_type=value_type
+        )
+        reopened_lineage = RevisionLedger(path).revisions(workflow_id)
+        if (
+            replayed != edited
+            or selected.value_sha256 != edited.value_sha256
+            or selected.base_revision_id != edited.revision_id
+            or reopened_lineage[1].diff != edited.diff
+            or reopened_lineage[2] != selected
+        ):
+            raise RuntimeError("scalar-kind diff replay or selected-base lineage changed")
+        collision_receipts.append(
+            {
+                "shape": shape,
+                "after_kind": scalar_kind,
+                "before_sha256": output.value_sha256,
+                "after_sha256": edited.value_sha256,
+                "changed_leaf_count": edited.diff.changed_leaf_count,
+            }
+        )
+
+    same_kind_counts = []
+    for index, value in enumerate((None, False, 1, 1.0, "same")):
+        ledger = RevisionLedger(directory / f"same-scalar-kind-{index}.json")
+        workflow_id = f"wf_revision_same_scalar_kind_{index}"
+        ledger.record_output(workflow_id, 1, value, value_type=object)
+        edited = ledger.record_edit(workflow_id, 1, value, value_type=object)
+        if edited.diff is None or edited.diff.changed_leaf_count != 0:
+            raise RuntimeError("equal same-kind scalar was counted as changed")
+        same_kind_counts.append(edited.diff.changed_leaf_count)
+
+    rejected_path = directory / "rejected-scalar-kind.json"
+    rejected_workflow_id = "wf_revision_rejected_scalar_kind"
+    rejected = RevisionLedger(rejected_path)
+    first = rejected.record_output(rejected_workflow_id, 1, 1, value_type=object)
+    rejected_bytes = rejected_path.read_bytes()
+    rejected_lineage = [first.to_dict(include_value=True)]
+    try:
+        rejected.record_edit(
+            rejected_workflow_id, 1, float("nan"), value_type=object
+        )
+    except RevisionError:
+        pass
+    else:
+        raise RuntimeError("revision accepted a rejected non-finite scalar")
+    if (
+        rejected_path.read_bytes() != rejected_bytes
+        or [
+            item.to_dict(include_value=True)
+            for item in rejected.revisions(rejected_workflow_id)
+        ]
+        != rejected_lineage
+        or [
+            item.to_dict(include_value=True)
+            for item in RevisionLedger(rejected_path).revisions(rejected_workflow_id)
+        ]
+        != rejected_lineage
+    ):
+        raise RuntimeError("rejected scalar changed durable or restarted lineage")
+
+    return {
+        "collision_receipts": collision_receipts,
+        "same_kind_counts": same_kind_counts,
+        "rejection_persisted_bytes_unchanged": True,
+        "rejection_lineage_unchanged": True,
+    }
+
+
 def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
     path = directory / "stateful-sequence.json"
     workflow_id = "wf_revision_stateful_sequence"
@@ -941,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
         typed_schema_validation = _verify_typed_schema_validation(Path(temporary))
         mapping_key_validation = _verify_mapping_key_validation(Path(temporary))
         scalar_snapshotting = _verify_scalar_snapshotting(Path(temporary))
+        scalar_kind_diffing = _verify_scalar_kind_diffing(Path(temporary))
         sequence_snapshotting = _verify_sequence_snapshotting(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
@@ -965,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
         "typed_schema_validation": typed_schema_validation,
         "mapping_key_validation": mapping_key_validation,
         "scalar_snapshotting": scalar_snapshotting,
+        "scalar_kind_diffing": scalar_kind_diffing,
         "sequence_snapshotting": sequence_snapshotting,
     }
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -2385,6 +2385,82 @@ def test_diff_descriptor_is_bounded_deterministic_and_contains_no_values(tmp_pat
         )
 
 
+@pytest.mark.parametrize(
+    ("after", "value_type"),
+    [
+        (True, Literal[1, True]),
+        (1.0, object),
+    ],
+)
+def test_diff_counts_canonically_distinct_top_level_scalar_kinds(
+    tmp_path, after, value_type
+):
+    path = tmp_path / "revisions.json"
+    workflow_id = f"wf_scalar_kind_{type(after).__name__}"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output(workflow_id, 1, 1, value_type=value_type)
+
+    edited = ledger.record_edit(workflow_id, 1, after, value_type=value_type)
+
+    assert output.value_sha256 == canonical_value_hash(1)
+    assert edited.value_sha256 == canonical_value_hash(after)
+    assert output.value_sha256 != edited.value_sha256
+    assert edited.diff == RevisionDiffV1(
+        before_sha256=output.value_sha256,
+        after_sha256=edited.value_sha256,
+        changed_leaf_count=1,
+    )
+
+    restarted = RevisionLedger(path)
+    assert restarted.revisions(workflow_id)[1].diff == edited.diff
+    selected = restarted.select_next_base(workflow_id, 2, value_type=value_type)
+    assert selected.value_sha256 == edited.value_sha256
+    assert selected.base_revision_id == edited.revision_id
+
+
+@pytest.mark.parametrize("after", [True, 1.0])
+def test_diff_counts_canonically_distinct_nested_scalar_kinds(tmp_path, after):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    workflow_id = f"wf_nested_scalar_kind_{type(after).__name__}"
+    output = ledger.record_output(workflow_id, 1, {"value": 1}, value_type=object)
+
+    edited = ledger.record_edit(
+        workflow_id, 1, {"value": after}, value_type=object
+    )
+
+    assert output.value_sha256 != edited.value_sha256
+    assert edited.diff is not None
+    assert edited.diff.changed_leaf_count == 1
+
+
+@pytest.mark.parametrize("value", [None, False, 1, 1.0, "same"])
+def test_diff_treats_equal_same_kind_builtin_scalars_as_unchanged(tmp_path, value):
+    ledger = RevisionLedger(tmp_path / "revisions.json")
+    output = ledger.record_output("wf_same_scalar_kind", 1, value, value_type=object)
+
+    edited = ledger.record_edit("wf_same_scalar_kind", 1, value, value_type=object)
+
+    assert edited.value_sha256 == output.value_sha256
+    assert edited.diff is not None
+    assert edited.diff.changed_leaf_count == 0
+
+
+def test_rejected_scalar_kind_edit_preserves_durable_and_restarted_lineage(tmp_path):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_rejected_scalar_kind"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output(workflow_id, 1, 1, value_type=object)
+    persisted_bytes = path.read_bytes()
+    lineage = (output,)
+
+    with pytest.raises(RevisionValueError):
+        ledger.record_edit(workflow_id, 1, float("nan"), value_type=object)
+
+    assert path.read_bytes() == persisted_bytes
+    assert ledger.revisions(workflow_id) == lineage
+    assert RevisionLedger(path).revisions(workflow_id) == lineage
+
+
 def test_restart_rejects_tampered_diff_count(tmp_path):
     path = tmp_path / "revisions.json"
     ledger = RevisionLedger(path)

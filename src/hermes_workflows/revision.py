@@ -1200,8 +1200,6 @@ def _changed_leaf_count(before: object, after: object) -> int:
         return 1
     before_json = to_json_value(before)
     after_json = to_json_value(after)
-    if before_json == after_json:
-        return 0
     if isinstance(before_json, dict) and isinstance(after_json, dict):
         keys = set(before_json) | set(after_json)
         return sum(
@@ -1217,7 +1215,9 @@ def _changed_leaf_count(before: object, after: object) -> int:
             )
             for index in range(length)
         )
-    return 1
+    if type(before_json) is not type(after_json):
+        return 1
+    return 0 if before_json == after_json else 1
 
 
 class _Missing:
