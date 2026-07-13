@@ -338,6 +338,29 @@ class StatefulSequence(Sequence[int]):
         return 1
 
 
+class EphemeralTupleSequence(Sequence[tuple[int, ...]]):
+    def __init__(self, size: int):
+        self.size = size
+
+    @overload
+    def __getitem__(self, index: int) -> tuple[int, ...]: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[tuple[int, ...]]: ...
+
+    def __getitem__(
+        self, index: Union[int, slice]
+    ) -> Union[tuple[int, ...], Sequence[tuple[int, ...]]]:
+        if isinstance(index, slice):
+            return [(item,) for item in range(self.size)[index]]
+        if 0 <= index < self.size:
+            return (index,)
+        raise IndexError(index)
+
+    def __len__(self):
+        return self.size
+
+
 @dataclass
 class StatefulDataclass:
     value: int
@@ -599,6 +622,43 @@ def test_stateful_sequence_is_snapshotted_once_for_hash_persistence_and_restart(
     assert selected.value == persisted_value
     assert selected.value_sha256 == record.value_sha256
     assert selected.base_revision_id == record.revision_id
+
+
+def test_distinct_ephemeral_containers_preserve_exact_values_through_restart(tmp_path):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_ephemeral_tuple_sequence"
+    expected = [[index] for index in range(6)]
+
+    record = RevisionLedger(path).record_output(
+        workflow_id,
+        1,
+        EphemeralTupleSequence(6),
+        value_type=Sequence[tuple[int, ...]],
+    )
+    persisted_bytes = path.read_bytes()
+    persisted_value = json.loads(persisted_bytes)["revisions"][0]["value"]
+
+    assert record.value == persisted_value == expected
+    assert record.value_sha256 == canonical_value_hash(expected)
+
+    restarted = RevisionLedger(path)
+    restarted_record = restarted.revisions(workflow_id)[0]
+    assert path.read_bytes() == persisted_bytes
+    assert restarted_record.value == expected
+    assert restarted_record.value_sha256 == record.value_sha256
+
+    selected = restarted.select_next_base(
+        workflow_id, 2, value_type=Sequence[tuple[int, ...]]
+    )
+    persisted_after_select = json.loads(path.read_bytes())
+
+    assert selected.value == expected
+    assert selected.value_sha256 == record.value_sha256
+    assert selected.base_revision_id == record.revision_id
+    assert [item["value"] for item in persisted_after_select["revisions"]] == [
+        expected,
+        expected,
+    ]
 
 
 def test_stateful_declared_dataclass_is_frozen_before_hash_persistence_and_restart(

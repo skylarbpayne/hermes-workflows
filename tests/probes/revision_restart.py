@@ -126,6 +126,29 @@ class StatefulSequence(Sequence[int]):
         return 1
 
 
+class EphemeralTupleSequence(Sequence[tuple[int, ...]]):
+    def __init__(self, size: int):
+        self.size = size
+
+    @overload
+    def __getitem__(self, index: int) -> tuple[int, ...]: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> TypingSequence[tuple[int, ...]]: ...
+
+    def __getitem__(
+        self, index: Union[int, slice]
+    ) -> Union[tuple[int, ...], TypingSequence[tuple[int, ...]]]:
+        if isinstance(index, slice):
+            return [(item,) for item in range(self.size)[index]]
+        if 0 <= index < self.size:
+            return (index,)
+        raise IndexError(index)
+
+    def __len__(self):
+        return self.size
+
+
 @dataclass
 class StatefulDataclass:
     value: int
@@ -568,6 +591,48 @@ def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
     ):
         raise RuntimeError("stateful sequence restart did not preserve exact base identity")
 
+    ephemeral_path = directory / "ephemeral-tuple-sequence.json"
+    ephemeral_workflow_id = "wf_revision_ephemeral_tuple_sequence"
+    ephemeral_expected = [[index] for index in range(6)]
+    ephemeral_record = RevisionLedger(ephemeral_path).record_output(
+        ephemeral_workflow_id,
+        1,
+        EphemeralTupleSequence(6),
+        value_type=TypingSequence[tuple[int, ...]],
+    )
+    ephemeral_persisted_bytes = ephemeral_path.read_bytes()
+    ephemeral_persisted = json.loads(ephemeral_persisted_bytes)["revisions"][0][
+        "value"
+    ]
+    if (
+        ephemeral_record.value != ephemeral_expected
+        or ephemeral_persisted != ephemeral_expected
+        or ephemeral_record.value_sha256 != canonical_value_hash(ephemeral_expected)
+    ):
+        raise RuntimeError("distinct ephemeral containers did not preserve exact values")
+    ephemeral_restarted = RevisionLedger(ephemeral_path)
+    ephemeral_restarted_record = ephemeral_restarted.revisions(ephemeral_workflow_id)[0]
+    if (
+        ephemeral_path.read_bytes() != ephemeral_persisted_bytes
+        or ephemeral_restarted_record.value != ephemeral_expected
+        or ephemeral_restarted_record.value_sha256 != ephemeral_record.value_sha256
+    ):
+        raise RuntimeError("ephemeral container restart changed persisted identity")
+    ephemeral_selected = ephemeral_restarted.select_next_base(
+        ephemeral_workflow_id,
+        2,
+        value_type=TypingSequence[tuple[int, ...]],
+    )
+    ephemeral_after_select = json.loads(ephemeral_path.read_bytes())
+    if (
+        ephemeral_selected.value != ephemeral_expected
+        or ephemeral_selected.value_sha256 != ephemeral_record.value_sha256
+        or ephemeral_selected.base_revision_id != ephemeral_record.revision_id
+        or [item["value"] for item in ephemeral_after_select["revisions"]]
+        != [ephemeral_expected, ephemeral_expected]
+    ):
+        raise RuntimeError("ephemeral container descendant selected the wrong base")
+
     shared_path = directory / "shared-stateful-sequence.json"
     shared_value = StatefulSequence()
     shared_record = RevisionLedger(shared_path).record_output(
@@ -668,6 +733,9 @@ def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
         "value_sha256": record.value_sha256,
         "persisted_hash_matches": True,
         "restart_base_matches": True,
+        "ephemeral_distinct_values_preserved": True,
+        "ephemeral_distinct_hash_matches": True,
+        "ephemeral_distinct_restart_base_matches": True,
         "shared_alias_iterations": shared_value.iterations,
         "shared_alias_reused": True,
         "stateful_dataclass_reads": dataclass_value.reads,

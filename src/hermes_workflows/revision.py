@@ -1239,7 +1239,7 @@ def _normalize_revision_json_value(
     *,
     depth: int,
     active_ids: set[int],
-    completed: dict[int, JsonValue],
+    completed: dict[int, tuple[object, JsonValue]],
 ) -> JsonValue:
     if depth > _MAX_PERSISTED_JSON_DEPTH:
         raise RevisionValueError("revision value exceeds the supported JSON depth limit")
@@ -1264,8 +1264,9 @@ def _normalize_revision_json_value(
     value_id = id(value)
     if value_id in active_ids:
         raise RevisionValueError("revision value must be acyclic JSON")
-    if value_id in completed:
-        return completed[value_id]
+    completed_entry = completed.get(value_id)
+    if completed_entry is not None and completed_entry[0] is value:
+        return completed_entry[1]
     active_ids.add(value_id)
     try:
         if is_dataclass_value:
@@ -1303,7 +1304,7 @@ def _normalize_revision_json_value(
                 )
                 for item in cast(Sequence[object], value)
             ]
-        completed[value_id] = result
+        completed[value_id] = (value, result)
         return result
     finally:
         active_ids.remove(value_id)
@@ -1322,7 +1323,7 @@ def _snapshot_revision_containers(
     *,
     depth: int,
     active_ids: set[int],
-    completed: dict[int, object],
+    completed: dict[int, tuple[object, object]],
 ) -> object:
     if depth > _MAX_PERSISTED_JSON_DEPTH:
         raise RevisionValueError("revision value exceeds the supported JSON depth limit")
@@ -1339,8 +1340,9 @@ def _snapshot_revision_containers(
     value_id = id(value)
     if value_id in active_ids:
         raise RevisionValueError("revision value must be acyclic JSON")
-    if value_id in completed:
-        return completed[value_id]
+    completed_entry = completed.get(value_id)
+    if completed_entry is not None and completed_entry[0] is value:
+        return completed_entry[1]
     active_ids.add(value_id)
     try:
         if is_dataclass_value:
@@ -1375,7 +1377,7 @@ def _snapshot_revision_containers(
                 )
                 for item in cast(Sequence[object], value)
             ]
-        completed[value_id] = result
+        completed[value_id] = (value, result)
         return result
     finally:
         active_ids.remove(value_id)
