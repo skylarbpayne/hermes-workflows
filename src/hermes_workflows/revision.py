@@ -577,6 +577,7 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
         key_type, item_type = args
         prepared_mapping = {}
         for key, item in value.items():
+            _canonical_revision_mapping_key(key)
             prepared_key = _coerce_revision_value(key, key_type)
             if prepared_key in prepared_mapping:
                 raise RevisionValueError(
@@ -1260,7 +1261,7 @@ def _normalize_revision_json_value(
         if is_mapping:
             result: dict[str, JsonValue] = {}
             for key, item in cast(Mapping[object, object], value).items():
-                canonical_key = str(key)
+                canonical_key = _canonical_revision_mapping_key(key)
                 if canonical_key in result:
                     raise RevisionValueError(
                         "revision value contains duplicate canonical object keys"
@@ -1281,6 +1282,16 @@ def _normalize_revision_json_value(
         ]
     finally:
         active_ids.remove(value_id)
+
+
+def _canonical_revision_mapping_key(key: object) -> str:
+    if type(key) not in (str, int, float, bool, type(None)) or (
+        type(key) is float and not math.isfinite(cast(float, key))
+    ):
+        raise RevisionValueError(
+            "revision JSON object keys must be exact finite JSON scalars"
+        )
+    return str(key)
 
 
 def _revision_value_type_label(value_type: Any) -> str:

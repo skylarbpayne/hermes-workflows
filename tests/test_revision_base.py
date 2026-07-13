@@ -309,6 +309,30 @@ class HostileInt(int):
         raise RuntimeError("SECRET_NUMERIC_COMPARATOR")
 
 
+class StatefulMappingKey:
+    def __init__(self):
+        self.string_reads = 0
+
+    def __hash__(self):
+        return 1
+
+    def __str__(self):
+        self.string_reads += 1
+        return f"SECRET_STATEFUL_KEY_{self.string_reads}"
+
+
+class SecretStringKey(str):
+    pass
+
+
+class SecretIntegerKey(int):
+    pass
+
+
+class SecretFloatKey(float):
+    pass
+
+
 class FailingPersistHandle:
     def __init__(self, handle, stage):
         self._handle = handle
@@ -1345,6 +1369,107 @@ def test_declared_mapping_rejects_keys_that_collide_during_coercion(tmp_path):
     assert str(caught.value) == "revision value contains duplicate canonical object keys"
     assert ledger.revisions("wf_revision") == ()
     assert not path.exists()
+
+
+def test_declared_mapping_rejects_stateful_key_before_stringification_or_persistence(
+    tmp_path,
+):
+    path = tmp_path / "revisions.json"
+    key = StatefulMappingKey()
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError) as hash_error:
+        canonical_value_hash({key: 1})
+    assert str(hash_error.value) == (
+        "revision JSON object keys must be exact finite JSON scalars"
+    )
+    assert key.string_reads == 0
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_revision_stateful_key",
+            1,
+            {key: 1},
+            value_type=dict[object, int],
+        )
+
+    message = str(caught.value)
+    assert message == "revision JSON object keys must be exact finite JSON scalars"
+    assert "SECRET" not in message
+    assert key.string_reads == 0
+    assert ledger.revisions("wf_revision_stateful_key") == ()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "key",
+    (SecretStringKey("secret"), SecretIntegerKey(1), SecretFloatKey(1.5)),
+    ids=("str-subclass", "int-subclass", "float-subclass"),
+)
+def test_declared_mapping_rejects_scalar_subclass_keys_without_persistence(
+    tmp_path, key
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_revision_scalar_subclass_key",
+            1,
+            {key: 1},
+            value_type=dict[object, int],
+        )
+
+    message = str(caught.value)
+    assert message == "revision JSON object keys must be exact finite JSON scalars"
+    assert "secret" not in message.lower()
+    assert ledger.revisions("wf_revision_scalar_subclass_key") == ()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("key", (float("nan"), float("inf"), float("-inf")))
+def test_declared_mapping_rejects_nonfinite_float_keys_without_persistence(tmp_path, key):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_revision_nonfinite_key",
+            1,
+            {key: 1},
+            value_type=dict[object, int],
+        )
+
+    assert str(caught.value) == (
+        "revision JSON object keys must be exact finite JSON scalars"
+    )
+    assert ledger.revisions("wf_revision_nonfinite_key") == ()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "key",
+    ("stable", 7, 1.5, True, None),
+    ids=("str", "int", "float", "bool", "null"),
+)
+def test_exact_stable_scalar_mapping_keys_are_deterministic_across_restart(
+    tmp_path, key
+):
+    path = tmp_path / "revisions.json"
+    value = {key: 1}
+    first = RevisionLedger(path).record_output(
+        "wf_revision_stable_key", 1, value, value_type=dict[object, int]
+    )
+    persisted = path.read_bytes()
+
+    restarted = RevisionLedger(path)
+    replay = restarted.record_output(
+        "wf_revision_stable_key", 1, value, value_type=dict[object, int]
+    )
+
+    assert replay.revision_id == first.revision_id
+    assert replay.value_sha256 == first.value_sha256
+    assert path.read_bytes() == persisted
 
 
 def test_attempt_number_rejects_hostile_int_subclasses_without_comparison(tmp_path):
