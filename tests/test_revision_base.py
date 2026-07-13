@@ -627,6 +627,34 @@ def test_nested_scalar_subclasses_are_recursively_frozen_to_exact_builtins(tmp_p
     assert canonical_value_hash(persisted) == record.value_sha256
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("sign", [1, -1])
+def test_oversized_integers_are_rejected_before_hash_or_persistence(
+    tmp_path, nested, sign
+):
+    path = tmp_path / "oversized-integer.json"
+    ledger = RevisionLedger(path)
+    oversized = sign * 10**4300
+    value = {"nested": [oversized]} if nested else oversized
+
+    with pytest.raises(
+        RevisionValueError,
+        match="^revision value integer exceeds the supported digit limit$",
+    ):
+        ledger.record_output("wf_oversized_integer", 1, value, value_type=object)
+
+    assert ledger.revisions("wf_oversized_integer") == ()
+    assert not path.exists()
+    assert not path.with_name(f".{path.name}.lock").exists()
+
+    accepted_value = {"nested": [1]} if nested else 1
+    accepted = ledger.record_output(
+        "wf_oversized_integer", 1, accepted_value, value_type=object
+    )
+    assert accepted.value == accepted_value
+    assert RevisionLedger(path).revisions("wf_oversized_integer") == (accepted,)
+
+
 def test_bool_is_rejected_for_int_schema_without_mutating_lineage(tmp_path):
     path = tmp_path / "bool-int.json"
     ledger = RevisionLedger(path)

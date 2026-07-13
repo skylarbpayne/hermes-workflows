@@ -38,6 +38,7 @@ SCHEMA_VERSION = 1
 MAX_DIFF_DESCRIPTOR_BYTES = 512
 REVISION_SERVICE_ID = "revision.service"
 _MAX_PERSISTED_INTEGER_DIGITS = 4300
+_MAX_PERSISTED_INTEGER_ABS_EXCLUSIVE = 10**_MAX_PERSISTED_INTEGER_DIGITS
 _MAX_PERSISTED_JSON_DEPTH = 100
 
 
@@ -1272,7 +1273,16 @@ def _normalize_revision_json_value(
     if isinstance(value, str):
         return cast(JsonValue, str.__str__(value))
     if isinstance(value, int):
-        return cast(JsonValue, int.__int__(value))
+        normalized_integer = int.__int__(value)
+        if not (
+            -_MAX_PERSISTED_INTEGER_ABS_EXCLUSIVE
+            < normalized_integer
+            < _MAX_PERSISTED_INTEGER_ABS_EXCLUSIVE
+        ):
+            raise RevisionValueError(
+                "revision value integer exceeds the supported digit limit"
+            )
+        return cast(JsonValue, normalized_integer)
     if isinstance(value, float):
         return cast(JsonValue, float.__float__(value))
     is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
