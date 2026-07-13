@@ -87,6 +87,46 @@ class SecretFloatKey(float):
     pass
 
 
+class RevisionInt(int):
+    pass
+
+
+class RevisionString(str):
+    pass
+
+
+class RevisionFloat(float):
+    pass
+
+
+class HostileEqualInt(int):
+    def __int__(self):
+        raise RuntimeError("SECRET_SCALAR_INT")
+
+    def __index__(self):
+        raise RuntimeError("SECRET_SCALAR_INDEX")
+
+    def __str__(self):
+        raise RuntimeError("SECRET_SCALAR_STRING")
+
+    def __eq__(self, other):
+        raise RuntimeError("SECRET_SCALAR_EQUALITY")
+
+    def __ne__(self, other):
+        raise RuntimeError("SECRET_SCALAR_EQUALITY")
+
+    def __repr__(self):
+        raise RuntimeError("SECRET_SCALAR_REPR")
+
+
+@dataclass(frozen=True)
+class ScalarSubclassDraft:
+    title: str
+    score: int
+    ratio: float
+    history: list[int]
+
+
 class StatefulMappingKey:
     def __init__(self):
         self.string_reads = 0
@@ -568,6 +608,128 @@ def _verify_mapping_key_validation(directory: Path) -> dict[str, object]:
     }
 
 
+def _verify_scalar_snapshotting(directory: Path) -> dict[str, object]:
+    top_level_hashes = {}
+    for name, value, value_type, expected in (
+        ("int", RevisionInt(7), int, 7),
+        ("str", RevisionString("seven"), str, "seven"),
+        ("float", RevisionFloat(7.5), float, 7.5),
+    ):
+        path = directory / f"scalar-{name}.json"
+        record = RevisionLedger(path).record_output(
+            f"wf_revision_scalar_{name}", 1, value, value_type=value_type
+        )
+        persisted = json.loads(path.read_bytes())["revisions"][0]["value"]
+        if (
+            type(record.value) is not value_type
+            or record.value != expected
+            or persisted != expected
+            or record.value_sha256 != canonical_value_hash(expected)
+        ):
+            raise RuntimeError(f"top-level {name} subclass was not frozen exactly")
+        top_level_hashes[name] = record.value_sha256
+
+    replay_path = directory / "scalar-replay.json"
+    workflow_id = "wf_revision_scalar_replay"
+    ledger = RevisionLedger(replay_path)
+    output = ledger.record_output(workflow_id, 1, RevisionInt(1), value_type=int)
+    edited = ledger.record_edit(workflow_id, 1, RevisionInt(2), value_type=int)
+    replayed = ledger.record_edit(workflow_id, 1, HostileEqualInt(2), value_type=int)
+    persisted_bytes = replay_path.read_bytes()
+    if (
+        type(output.value) is not int
+        or type(edited.value) is not int
+        or type(replayed.value) is not int
+        or replayed.revision_id != edited.revision_id
+        or edited.value_sha256 != canonical_value_hash(2)
+        or b'"value":2' not in persisted_bytes
+        or b'"value":true' in persisted_bytes
+    ):
+        raise RuntimeError("hostile scalar replay did not preserve one exact integer snapshot")
+    restarted = RevisionLedger(replay_path)
+    selected = restarted.select_next_base(workflow_id, 2, value_type=int)
+    if (
+        type(restarted.revisions(workflow_id)[1].value) is not int
+        or type(selected.value) is not int
+        or selected.value != 2
+        or selected.value_sha256 != edited.value_sha256
+        or selected.base_revision_id != edited.revision_id
+    ):
+        raise RuntimeError("scalar subclass restart selected the wrong exact base")
+
+    nested_path = directory / "nested-scalar-subclasses.json"
+    nested = RevisionLedger(nested_path).record_output(
+        "wf_revision_nested_scalar_subclasses",
+        1,
+        ScalarSubclassDraft(
+            title=RevisionString("Draft"),
+            score=RevisionInt(2),
+            ratio=RevisionFloat(1.5),
+            history=[RevisionInt(1), RevisionInt(2)],
+        ),
+        value_type=ScalarSubclassDraft,
+    )
+    nested_persisted = json.loads(nested_path.read_bytes())["revisions"][0]["value"]
+    if (
+        type(nested.value["title"]) is not str
+        or type(nested.value["score"]) is not int
+        or type(nested.value["ratio"]) is not float
+        or any(type(item) is not int for item in nested.value["history"])
+        or nested_persisted != nested.value
+        or canonical_value_hash(nested_persisted) != nested.value_sha256
+    ):
+        raise RuntimeError("nested scalar subclasses were not recursively frozen")
+
+    rejected_path = directory / "bool-int.json"
+    rejected_workflow_id = "wf_revision_bool_int"
+    rejected = RevisionLedger(rejected_path)
+    first = rejected.record_output(rejected_workflow_id, 1, 1, value_type=int)
+    rejected_bytes = rejected_path.read_bytes()
+    rejected_lineage = [first.to_dict(include_value=True)]
+    try:
+        rejected.record_edit(rejected_workflow_id, 1, True, value_type=int)
+    except RevisionError as exc:
+        rejection = str(exc)
+        if (
+            rejection != "invalid revision value for int"
+            or len(rejection.encode("utf-8")) > 256
+            or "True" in rejection
+        ):
+            raise RuntimeError("bool/int rejection was unbounded or leaked value data") from exc
+    else:
+        raise RuntimeError("int revision schema accepted a boolean")
+    if (
+        rejected_path.read_bytes() != rejected_bytes
+        or [
+            item.to_dict(include_value=True)
+            for item in rejected.revisions(rejected_workflow_id)
+        ]
+        != rejected_lineage
+        or [
+            item.to_dict(include_value=True)
+            for item in RevisionLedger(rejected_path).revisions(rejected_workflow_id)
+        ]
+        != rejected_lineage
+    ):
+        raise RuntimeError("bool/int rejection changed durable revision lineage")
+    bool_record = RevisionLedger(directory / "bool.json").record_output(
+        "wf_revision_bool", 1, True, value_type=bool
+    )
+    if type(bool_record.value) is not bool or bool_record.value is not True:
+        raise RuntimeError("explicit bool revision schema did not preserve boolean value")
+
+    return {
+        "top_level_hashes": top_level_hashes,
+        "nested_exact_builtins": True,
+        "hostile_replay_bounded": True,
+        "restart_base_matches": True,
+        "bool_int_rejection": rejection,
+        "rejection_persisted_bytes_unchanged": True,
+        "rejection_lineage_unchanged": True,
+        "explicit_bool_accepted": True,
+    }
+
+
 def _verify_sequence_snapshotting(directory: Path) -> dict[str, object]:
     path = directory / "stateful-sequence.json"
     workflow_id = "wf_revision_stateful_sequence"
@@ -778,6 +940,7 @@ def main(argv: list[str] | None = None) -> int:
         unfinalized_base_rejections = _verify_unfinalized_base_is_rejected(Path(temporary))
         typed_schema_validation = _verify_typed_schema_validation(Path(temporary))
         mapping_key_validation = _verify_mapping_key_validation(Path(temporary))
+        scalar_snapshotting = _verify_scalar_snapshotting(Path(temporary))
         sequence_snapshotting = _verify_sequence_snapshotting(Path(temporary))
 
     if restarted["v2_base_hash"] != written["edited_v1_hash"]:
@@ -801,6 +964,7 @@ def main(argv: list[str] | None = None) -> int:
         "unfinalized_base_rejections": unfinalized_base_rejections,
         "typed_schema_validation": typed_schema_validation,
         "mapping_key_validation": mapping_key_validation,
+        "scalar_snapshotting": scalar_snapshotting,
         "sequence_snapshotting": sequence_snapshotting,
     }
     print(json.dumps(result, indent=2, sort_keys=True))

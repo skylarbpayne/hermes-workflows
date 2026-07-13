@@ -456,6 +456,46 @@ class CoercionProbe:
         return 1
 
 
+class RevisionInt(int):
+    pass
+
+
+class RevisionString(str):
+    pass
+
+
+class RevisionFloat(float):
+    pass
+
+
+class HostileEqualInt(int):
+    def __int__(self):
+        raise RuntimeError("SECRET_SCALAR_INT")
+
+    def __index__(self):
+        raise RuntimeError("SECRET_SCALAR_INDEX")
+
+    def __str__(self):
+        raise RuntimeError("SECRET_SCALAR_STRING")
+
+    def __eq__(self, other):
+        raise RuntimeError("SECRET_SCALAR_EQUALITY")
+
+    def __ne__(self, other):
+        raise RuntimeError("SECRET_SCALAR_EQUALITY")
+
+    def __repr__(self):
+        raise RuntimeError("SECRET_SCALAR_REPR")
+
+
+@dataclass(frozen=True)
+class ScalarSubclassDraft:
+    title: str
+    score: int
+    ratio: float
+    history: list[int]
+
+
 class FailingPersistHandle:
     def __init__(self, handle, stage):
         self._handle = handle
@@ -502,6 +542,110 @@ def test_valid_edit_is_schema_coerced_and_becomes_exact_next_base(tmp_path):
     assert edited.parent_revision_id == original.revision_id
     assert edited.attempt_id == original.attempt_id
     assert selected.attempt_id != edited.attempt_id
+
+
+def test_declared_scalar_subclasses_are_frozen_before_return_replay_and_restart(tmp_path):
+    path = tmp_path / "scalar-subclasses.json"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output(
+        "wf_scalar_subclasses", 1, RevisionInt(1), value_type=int
+    )
+    edited = ledger.record_edit(
+        "wf_scalar_subclasses", 1, RevisionInt(2), value_type=int
+    )
+    replayed = ledger.record_edit(
+        "wf_scalar_subclasses", 1, HostileEqualInt(2), value_type=int
+    )
+
+    assert type(output.value) is int
+    assert type(edited.value) is int
+    assert type(replayed.value) is int
+    assert replayed == edited
+    assert edited.value_sha256 == canonical_value_hash(2)
+    persisted_bytes = path.read_bytes()
+    assert b'"value":2' in persisted_bytes
+    assert b'"value":true' not in persisted_bytes
+
+    restarted = RevisionLedger(path)
+    selected = restarted.select_next_base(
+        "wf_scalar_subclasses", 2, value_type=int
+    )
+
+    assert type(restarted.revisions("wf_scalar_subclasses")[1].value) is int
+    assert type(selected.value) is int
+    assert selected.value == 2
+    assert selected.value_sha256 == edited.value_sha256
+    assert selected.base_revision_id == edited.revision_id
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type", "expected"),
+    [
+        (RevisionInt(7), int, 7),
+        (RevisionString("seven"), str, "seven"),
+        (RevisionFloat(7.5), float, 7.5),
+    ],
+)
+def test_top_level_scalar_subclasses_return_exact_builtins(
+    tmp_path, value, value_type, expected
+):
+    record = RevisionLedger(tmp_path / f"{value_type.__name__}.json").record_output(
+        f"wf_top_level_{value_type.__name__}", 1, value, value_type=value_type
+    )
+
+    assert type(record.value) is value_type
+    assert record.value == expected
+    assert record.value_sha256 == canonical_value_hash(expected)
+
+
+def test_nested_scalar_subclasses_are_recursively_frozen_to_exact_builtins(tmp_path):
+    path = tmp_path / "nested-scalar-subclasses.json"
+    record = RevisionLedger(path).record_output(
+        "wf_nested_scalar_subclasses",
+        1,
+        ScalarSubclassDraft(
+            title=RevisionString("Draft"),
+            score=RevisionInt(2),
+            ratio=RevisionFloat(1.5),
+            history=[RevisionInt(1), RevisionInt(2)],
+        ),
+        value_type=ScalarSubclassDraft,
+    )
+
+    assert record.value == {
+        "title": "Draft",
+        "score": 2,
+        "ratio": 1.5,
+        "history": [1, 2],
+    }
+    assert type(record.value["title"]) is str
+    assert type(record.value["score"]) is int
+    assert type(record.value["ratio"]) is float
+    assert all(type(item) is int for item in record.value["history"])
+    persisted = json.loads(path.read_bytes())["revisions"][0]["value"]
+    assert persisted == record.value
+    assert canonical_value_hash(persisted) == record.value_sha256
+
+
+def test_bool_is_rejected_for_int_schema_without_mutating_lineage(tmp_path):
+    path = tmp_path / "bool-int.json"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output("wf_bool_int", 1, 1, value_type=int)
+    persisted_bytes = path.read_bytes()
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_edit("wf_bool_int", 1, True, value_type=int)
+
+    assert str(caught.value) == "invalid revision value for int"
+    assert "True" not in str(caught.value)
+    assert path.read_bytes() == persisted_bytes
+    assert ledger.revisions("wf_bool_int") == (output,)
+    restarted = RevisionLedger(path)
+    assert restarted.revisions("wf_bool_int") == (output,)
+
+    bool_record = ledger.record_output("wf_bool", 1, True, value_type=bool)
+    assert type(bool_record.value) is bool
+    assert bool_record.value is True
 
 
 def test_invalid_edit_is_rejected_without_mutating_lineage(tmp_path):

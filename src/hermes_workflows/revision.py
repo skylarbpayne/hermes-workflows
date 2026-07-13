@@ -499,6 +499,9 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
             raise TypeError("revision value matches multiple declared union branches")
         return matches[0][1]
 
+    if any(value_type is scalar_type for scalar_type in (str, int, float, bool)):
+        return _coerce_revision_scalar(value, value_type)
+
     _reject_unknown_dataclass_fields(value, value_type)
 
     if is_dataclass(value_type) and isinstance(value_type, type):
@@ -603,10 +606,31 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
         raise TypeError("unsupported revision generic schema")
     if any(
         value_type is supported_type
-        for supported_type in (Any, object, str, int, float, bool, dict, list, tuple)
+        for supported_type in (Any, object, dict, list, tuple)
     ):
         return coerce_workflow_input(value, value_type)
     raise TypeError("unsupported revision schema")
+
+
+def _coerce_revision_scalar(value: object, value_type: type[Any]) -> Any:
+    if type(value) is bool and value_type is not bool:
+        raise TypeError("boolean revision values require a bool schema")
+    coerced = coerce_workflow_input(value, value_type)
+    if value_type is bool:
+        if type(coerced) is not bool:
+            raise TypeError("revision bool coercion did not produce a boolean")
+        return coerced
+    if value_type is str:
+        normalized = str.__str__(coerced)
+    elif value_type is int:
+        if type(coerced) is bool:
+            raise TypeError("boolean revision values require a bool schema")
+        normalized = int.__int__(coerced)
+    else:
+        normalized = float.__float__(coerced)
+    if type(normalized) is not value_type:
+        raise TypeError("revision scalar coercion did not produce an exact built-in value")
+    return normalized
 
 
 def _revision_presence_wrapper_kind(origin: Any) -> str | None:
@@ -1243,6 +1267,14 @@ def _normalize_revision_json_value(
 ) -> JsonValue:
     if depth > _MAX_PERSISTED_JSON_DEPTH:
         raise RevisionValueError("revision value exceeds the supported JSON depth limit")
+    if value is None or type(value) is bool:
+        return cast(JsonValue, value)
+    if isinstance(value, str):
+        return cast(JsonValue, str.__str__(value))
+    if isinstance(value, int):
+        return cast(JsonValue, int.__int__(value))
+    if isinstance(value, float):
+        return cast(JsonValue, float.__float__(value))
     is_dataclass_value = is_dataclass(value) and not isinstance(value, type)
     if isinstance(value, Mapping) and type(value) is not dict:
         raise RevisionValueError("revision JSON objects must be concrete dicts")
