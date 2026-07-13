@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, Literal, Optional, TypedDict, Union, overload
+from typing import Any, Annotated, Final, Literal, Optional, TypedDict, Union, overload
 
 try:
     from typing import NotRequired, Required
@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - exercised by the Python 3.9 test job.
 
 import pytest
 
+from hermes_workflows.input_parsing import coerce_workflow_input
 from hermes_workflows.operator_services import OperatorServicesV1
 from hermes_workflows.projection_sections import ProjectionContributorV1
 from hermes_workflows.revision import (
@@ -58,6 +59,18 @@ class NestedDraft:
     archived: tuple[Draft, ...]
     by_name: dict[str, Draft]
     fallback: Optional[Draft]
+
+
+@dataclass(frozen=True)
+class ParameterizedTupleDraft:
+    unstructured: tuple[Any, ...]
+    fixed: tuple[str, int]
+    variadic: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class BareTupleDraft:
+    items: tuple
 
 
 @dataclass(frozen=True)
@@ -765,6 +778,147 @@ def test_valid_typed_dict_edit_restarts_into_exact_selected_base(tmp_path):
 
     assert selected.value == {"title": "Human edit", "score": 2}
     assert selected.value_sha256 == edited.value_sha256
+    assert selected.base_revision_id == edited.revision_id
+
+
+def test_revision_v1_rejects_nominal_bare_tuple_accepted_by_input_coercion(
+    tmp_path,
+):
+    path = tmp_path / "bare-tuple.json"
+    value = (1, 2)
+
+    canonical = coerce_workflow_input(value, tuple)
+    assert canonical == value
+    assert type(canonical) is tuple
+
+    ledger = RevisionLedger(path)
+    with pytest.raises(
+        RevisionValueError,
+        match="^invalid revision value for tuple$",
+    ):
+        ledger.record_output("wf_bare_tuple", 1, value, value_type=tuple)
+
+    assert ledger.revisions("wf_bare_tuple") == ()
+    assert not path.exists()
+
+
+def test_nominal_bare_tuple_rejection_preserves_existing_ledger_exactly(tmp_path):
+    path = tmp_path / "bare-tuple-existing.json"
+    ledger = RevisionLedger(path)
+    existing = ledger.record_output(
+        "wf_existing_tuple",
+        1,
+        (1, 2),
+        value_type=tuple[int, ...],
+    )
+    persisted_bytes = path.read_bytes()
+    persisted_count = len(json.loads(persisted_bytes)["revisions"])
+    persisted_lineage = ledger.revisions("wf_existing_tuple")
+
+    with pytest.raises(
+        RevisionValueError,
+        match="^invalid revision value for tuple$",
+    ):
+        ledger.record_output("wf_rejected_tuple", 1, (3, 4), value_type=tuple)
+    with pytest.raises(
+        RevisionValueError,
+        match="^invalid revision value for tuple$",
+    ):
+        ledger.record_edit("wf_existing_tuple", 1, (3, 4), value_type=tuple)
+
+    assert path.read_bytes() == persisted_bytes
+    assert len(json.loads(path.read_bytes())["revisions"]) == persisted_count == 1
+    assert ledger.revisions("wf_existing_tuple") == persisted_lineage == (existing,)
+    assert ledger.revisions("wf_rejected_tuple") == ()
+    restarted = RevisionLedger(path)
+    assert restarted.revisions("wf_existing_tuple") == persisted_lineage
+    assert restarted.revisions("wf_rejected_tuple") == ()
+
+
+def test_nested_nominal_bare_tuple_schema_is_rejected_before_persistence(tmp_path):
+    path = tmp_path / "nested-bare-tuple.json"
+    ledger = RevisionLedger(path)
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_output(
+            "wf_nested_bare_tuple",
+            1,
+            {"items": (1, 2)},
+            value_type=BareTupleDraft,
+        )
+
+    assert len(str(caught.value).encode("utf-8")) <= 512
+    assert ledger.revisions("wf_nested_bare_tuple") == ()
+    assert not path.exists()
+
+
+def test_parameterized_tuple_schemas_preserve_replay_restart_and_next_base(
+    tmp_path,
+):
+    path = tmp_path / "parameterized-tuples.json"
+    workflow_id = "wf_parameterized_tuples"
+    ledger = RevisionLedger(path)
+    output = ledger.record_output(
+        workflow_id,
+        1,
+        {
+            "unstructured": ("raw", 1, True),
+            "fixed": ("draft", "1"),
+            "variadic": ("1", 2, 3),
+        },
+        value_type=ParameterizedTupleDraft,
+    )
+    edit_value = {
+        "unstructured": ("human", {"approved": True}),
+        "fixed": ("edit", "2"),
+        "variadic": ("4", 5, 6),
+    }
+    expected_edit = {
+        "unstructured": ["human", {"approved": True}],
+        "fixed": ["edit", 2],
+        "variadic": [4, 5, 6],
+    }
+    edited = ledger.record_edit(
+        workflow_id,
+        1,
+        edit_value,
+        value_type=ParameterizedTupleDraft,
+    )
+    persisted_bytes = path.read_bytes()
+    replayed = ledger.record_edit(
+        workflow_id,
+        1,
+        edit_value,
+        value_type=ParameterizedTupleDraft,
+    )
+
+    assert output.value == {
+        "unstructured": ["raw", 1, True],
+        "fixed": ["draft", 1],
+        "variadic": [1, 2, 3],
+    }
+    assert edited.value == expected_edit
+    assert replayed == edited
+    assert path.read_bytes() == persisted_bytes
+
+    restarted = RevisionLedger(path)
+    restarted_replay = restarted.record_edit(
+        workflow_id,
+        1,
+        edit_value,
+        value_type=ParameterizedTupleDraft,
+    )
+    assert restarted_replay == edited
+    assert path.read_bytes() == persisted_bytes
+
+    selected = restarted.select_next_base(
+        workflow_id,
+        2,
+        value_type=ParameterizedTupleDraft,
+    )
+    assert selected.value == expected_edit
+    assert selected.value_sha256 == edited.value_sha256
+    assert selected.value_sha256 == canonical_value_hash(expected_edit)
     assert selected.base_revision_id == edited.revision_id
 
 
