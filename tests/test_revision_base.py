@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -305,6 +307,33 @@ class DraftDict(dict):
 class HostileInt(int):
     def __lt__(self, other):
         raise RuntimeError("SECRET_NUMERIC_COMPARATOR")
+
+
+class FailingPersistHandle:
+    def __init__(self, handle, stage):
+        self._handle = handle
+        self._stage = stage
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._handle.close()
+
+    def write(self, value):
+        if self._stage == "write":
+            self._handle.write(value[: max(1, len(value) // 2)])
+            self._handle.flush()
+            raise OSError("SECRET_WRITE_FAILURE")
+        return self._handle.write(value)
+
+    def flush(self):
+        if self._stage == "flush":
+            raise OSError("SECRET_FLUSH_FAILURE")
+        return self._handle.flush()
+
+    def fileno(self):
+        return self._handle.fileno()
 
 
 def test_valid_edit_is_schema_coerced_and_becomes_exact_next_base(tmp_path):
@@ -778,6 +807,103 @@ def test_persistence_failure_is_not_retained_as_an_idempotent_replay(
     assert ledger.revisions("wf_revision") == (retried,)
     assert RevisionLedger(path).revisions("wf_revision") == (retried,)
     assert replace_attempts == 2
+
+
+def test_persistence_tempfile_is_private_at_creation(tmp_path, monkeypatch):
+    path = tmp_path / "revisions.json"
+    observed = []
+    real_mkstemp = tempfile.mkstemp
+
+    def observe_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        observed.append(
+            {
+                "mode": stat.S_IMODE(os.stat(name).st_mode),
+                "directory": Path(name).parent,
+            }
+        )
+        return fd, name
+
+    monkeypatch.setattr("hermes_workflows.revision.tempfile.mkstemp", observe_mkstemp)
+
+    RevisionLedger(path).record_output(
+        "wf_private_tempfile", 1, Draft("private", 1), value_type=Draft
+    )
+
+    assert observed == [{"mode": 0o600, "directory": tmp_path}]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_persistence_tempfile_collision_does_not_overwrite_existing_file(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "revisions.json"
+    colliding = tmp_path / f".{path.name}.collision.tmp"
+    colliding.write_text("collision sentinel", encoding="utf-8")
+    candidates = iter(("collision", "unique"))
+    monkeypatch.setattr(
+        "hermes_workflows.revision.tempfile._get_candidate_names",
+        lambda: candidates,
+    )
+
+    RevisionLedger(path).record_output(
+        "wf_tempfile_collision", 1, Draft("private", 1), value_type=Draft
+    )
+
+    assert colliding.read_text(encoding="utf-8") == "collision sentinel"
+    assert path.exists()
+    assert not (tmp_path / f".{path.name}.unique.tmp").exists()
+
+
+@pytest.mark.parametrize("stage", ("write", "flush", "fsync", "replace"))
+def test_persistence_stage_failure_removes_tempfile_and_plaintext(
+    tmp_path, monkeypatch, stage
+):
+    path = tmp_path / "revisions.json"
+    ledger = RevisionLedger(path)
+    original = ledger.record_output(
+        "wf_persistence_failure", 1, Draft("durable", 1), value_type=Draft
+    )
+    durable_bytes = path.read_bytes()
+    secret = "SECRET_PLAINTEXT_" + "x" * 4096
+
+    if stage in {"write", "flush"}:
+        real_fdopen = os.fdopen
+
+        def failing_fdopen(*args, **kwargs):
+            return FailingPersistHandle(real_fdopen(*args, **kwargs), stage)
+
+        monkeypatch.setattr("hermes_workflows.revision.os.fdopen", failing_fdopen)
+    elif stage == "fsync":
+        monkeypatch.setattr(
+            "hermes_workflows.revision.os.fsync",
+            lambda _fd: (_ for _ in ()).throw(OSError("SECRET_FSYNC_FAILURE")),
+        )
+    else:
+        monkeypatch.setattr(
+            "hermes_workflows.revision.os.replace",
+            lambda _source, _destination: (_ for _ in ()).throw(
+                OSError("SECRET_REPLACE_FAILURE")
+            ),
+        )
+
+    with pytest.raises(RevisionError) as caught:
+        ledger.record_edit(
+            "wf_persistence_failure",
+            1,
+            Draft(secret, 2),
+            value_type=Draft,
+        )
+
+    assert str(caught.value) == "revision ledger persistence failed"
+    assert secret not in str(caught.value)
+    assert path.read_bytes() == durable_bytes
+    assert ledger.revisions("wf_persistence_failure") == (original,)
+    assert RevisionLedger(path).revisions("wf_persistence_failure") == (original,)
+    assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
+    for candidate in tmp_path.iterdir():
+        if candidate.is_file():
+            assert secret not in candidate.read_text(encoding="utf-8", errors="ignore")
 
 
 def test_stale_writer_cannot_overwrite_a_conflicting_durable_slot(tmp_path):

@@ -8,6 +8,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
@@ -381,19 +382,33 @@ class RevisionLedger:
             "revisions": [record.to_dict(include_value=True) for record in records],
         }
         encoded = _canonical_json(payload) + "\n"
-        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        temporary: Path | None = None
+        descriptor: int | None = None
         try:
-            with temporary.open("w", encoding="utf-8") as handle:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                dir=str(self.path.parent),
+            )
+            temporary = Path(temporary_name)
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            descriptor = None
+            with handle:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.chmod(temporary, 0o600)
             os.replace(temporary, self.path)
         except OSError as exc:
             raise RevisionError("revision ledger persistence failed") from exc
         finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
             try:
-                temporary.unlink(missing_ok=True)
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
             except OSError:
                 pass
 
