@@ -333,6 +333,44 @@ class SecretFloatKey(float):
     pass
 
 
+class StatefulStringFieldKey(str):
+    def __new__(cls, value):
+        instance = super().__new__(cls, value)
+        instance.string_reads = 0
+        return instance
+
+    def __str__(self):
+        self.string_reads += 1
+        return f"SECRET_STRING_FIELD_KEY_{self.string_reads}"
+
+
+class StatefulFieldKey:
+    def __init__(self, value):
+        self.value = value
+        self.string_reads = 0
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __eq__(self, other):
+        if isinstance(other, StatefulFieldKey):
+            return self.value == other.value
+        return self.value == other
+
+    def __str__(self):
+        self.string_reads += 1
+        return f"SECRET_CUSTOM_FIELD_KEY_{self.string_reads}"
+
+
+class CoercionProbe:
+    def __init__(self):
+        self.integer_reads = 0
+
+    def __int__(self):
+        self.integer_reads += 1
+        return 1
+
+
 class FailingPersistHandle:
     def __init__(self, handle, stage):
         self._handle = handle
@@ -1337,6 +1375,69 @@ def test_revision_object_inputs_require_concrete_dicts_before_materialization(
     assert len(message.encode("utf-8")) <= 256
     assert ledger.revisions("wf_revision_custom_mapping") == ()
     assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("value_type", "original", "invalid_value"),
+    (
+        (
+            Draft,
+            Draft("Draft", 1),
+            lambda key, score: {key: "Edited", "score": score},
+        ),
+        (
+            NestedDraft,
+            NestedDraft(Draft("Draft", 1), [], (), {}, None),
+            lambda key, score: {
+                "primary": {key: "Edited", "score": score},
+                "alternatives": [],
+                "archived": (),
+                "by_name": {},
+                "fallback": None,
+            },
+        ),
+        (
+            TypedDraft,
+            {"title": "Draft", "score": 1},
+            lambda key, score: {key: "Edited", "score": score},
+        ),
+    ),
+    ids=("dataclass", "nested-dataclass", "typed-dict"),
+)
+@pytest.mark.parametrize(
+    "key_factory",
+    (StatefulStringFieldKey, StatefulFieldKey),
+    ids=("str-subclass", "custom-key"),
+)
+def test_schema_dict_keys_are_rejected_before_field_coercion_or_lineage_mutation(
+    tmp_path, value_type, original, invalid_value, key_factory
+):
+    path = tmp_path / "revisions.json"
+    workflow_id = "wf_revision_schema_key"
+    ledger = RevisionLedger(path)
+    first = ledger.record_output(workflow_id, 1, original, value_type=value_type)
+    persisted = path.read_bytes()
+    lineage = ledger.revisions(workflow_id)
+    key = key_factory("title")
+    score = CoercionProbe()
+
+    with pytest.raises(RevisionValueError) as caught:
+        ledger.record_edit(
+            workflow_id,
+            1,
+            invalid_value(key, score),
+            value_type=value_type,
+        )
+
+    assert str(caught.value) == (
+        "revision JSON object keys must be exact finite JSON scalars"
+    )
+    assert "SECRET" not in str(caught.value)
+    assert key.string_reads == 0
+    assert score.integer_reads == 0
+    assert path.read_bytes() == persisted
+    assert ledger.revisions(workflow_id) == lineage == (first,)
+    assert RevisionLedger(path).revisions(workflow_id) == lineage
 
 
 def test_revision_values_reject_keys_that_collide_in_canonical_json(tmp_path):

@@ -457,7 +457,9 @@ def _coerce_revision_value(value: object, value_type: Any) -> Any:
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
-    if isinstance(value, Mapping) and type(value) is not dict:
+    if type(value) is dict:
+        _validate_revision_mapping_keys(cast(dict[object, object], value))
+    elif isinstance(value, Mapping):
         raise TypeError("revision object inputs must be concrete dicts")
 
     if _revision_presence_wrapper_kind(origin) is not None:
@@ -886,6 +888,9 @@ def _reject_unknown_dataclass_fields(value: object, value_type: Any) -> None:
     args = get_args(value_type)
     union_type = getattr(types, "UnionType", None)
 
+    if type(value) is dict:
+        _validate_revision_mapping_keys(cast(dict[object, object], value))
+
     if _revision_presence_wrapper_kind(origin) is not None:
         if len(args) != 1:
             raise TypeError("malformed revision presence wrapper")
@@ -1292,6 +1297,11 @@ def _canonical_revision_mapping_key(key: object) -> str:
             "revision JSON object keys must be exact finite JSON scalars"
         )
     return str(key)
+
+
+def _validate_revision_mapping_keys(value: dict[object, object]) -> None:
+    for key in value:
+        _canonical_revision_mapping_key(key)
 
 
 def _revision_value_type_label(value_type: Any) -> str:
