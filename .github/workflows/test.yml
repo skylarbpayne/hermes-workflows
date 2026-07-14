@@ -22,3 +22,48 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
       - name: Run tests
         run: pytest -q
+
+  release-candidate:
+    needs: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Build release candidate
+        run: python -m pip install --upgrade pip build && rm -rf dist && python -m build --wheel
+      - name: Verify release candidate bytes and package identity
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import zipfile
+          from pathlib import Path
+
+          release = json.loads(Path("docs/releases/0.0.1rc1.json").read_text(encoding="utf-8"))
+          artifact = release["artifact"]
+          wheel = Path("dist") / artifact["filename"]
+          assert wheel.is_file(), wheel
+          assert wheel.stat().st_size == artifact["size_bytes"]
+          assert hashlib.sha256(wheel.read_bytes()).hexdigest() == artifact["sha256"]
+
+          with zipfile.ZipFile(wheel) as archive:
+              metadata_name = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+              metadata = archive.read(metadata_name).decode("utf-8")
+              version = next(line.split(": ", 1)[1] for line in metadata.splitlines() if line.startswith("Version: "))
+              manifest_bytes = archive.read("hermes_workflows/plugin_payload_manifest.v1.json")
+
+          assert version == release["version"]
+          manifest = json.loads(manifest_bytes)
+          expected_manifest = dict(release["package_resource_manifest"])
+          identity = expected_manifest.pop("identity")
+          assert manifest == expected_manifest
+          assert identity == "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+          PY
+      - uses: actions/upload-artifact@v6
+        with:
+          name: hermes-workflows-0.0.1rc1-${{ github.sha }}
+          path: dist/hermes_workflows-0.0.1rc1-py3-none-any.whl
+          if-no-files-found: error
+          retention-days: 90

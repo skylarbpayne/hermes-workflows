@@ -1,6 +1,6 @@
 [project]
 name = "hermes-workflows"
-version = "0.0.1"
+version = "0.0.1rc1"
 description = "Code-first durable workflows for agent work, typed Review Queues, Workflow Workers, and receipts."
 readme = "README.md"
 requires-python = ">=3.9"
