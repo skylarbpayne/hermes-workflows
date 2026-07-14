@@ -1,0 +1,36 @@
+{
+  "artifact": {
+    "filename": "hermes_workflows-0.0.1rc1-py3-none-any.whl",
+    "immutable_url": "https://github.com/skylarbpayne/hermes-workflows/releases/download/v0.0.1rc1/hermes_workflows-0.0.1rc1-py3-none-any.whl",
+    "sha256": "9995dfcdfbb05057d21401896d94f3fdc9e89891f18fe6f6f6097c616e595ba2",
+    "size_bytes": 183555
+  },
+  "base_sha": "d99da904455a33a0406062289cad5ce5cea17fe2",
+  "consumes": {
+    "fnd_pkg": "e1e7a09e0c52702b4ab93e9a70520fd5ede4f9e3",
+    "fnd_regloc": "ad9e83091d72cab2f79b8324944d1dea4b740951"
+  },
+  "package_resource_manifest": {
+    "files": [],
+    "identity": "sha256:8c7dc41504681d7acdc0b1a9e085e99fb4445c2e5440e6ea29077fb599aec3fc",
+    "owner_id": "hermes-workflows",
+    "package_name": "hermes-workflows",
+    "package_version": "0.0.1rc1",
+    "payload_root": "plugin_payload",
+    "schema_version": 1
+  },
+  "release_tag": "v0.0.1rc1",
+  "rollback": {
+    "artifact_bytes_replaced": false,
+    "strategy": "Revert the release metadata PR; if the artifact is bad, publish a new version. Never replace bytes at v0.0.1rc1."
+  },
+  "runtime_mutation_receipt": {
+    "database": false,
+    "palmer_repository": false,
+    "profile": false,
+    "registry": false,
+    "service": false
+  },
+  "schema_version": 1,
+  "version": "0.0.1rc1"
+}
