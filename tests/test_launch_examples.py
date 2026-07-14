@@ -9,6 +9,13 @@ from hermes_workflows.examples.reviewable_draft import reviewable_draft_workflow
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_TYPED_QUICKSTART = REPO_ROOT / "docs" / "snippets" / "typed_quickstart.py"
+PRIMARY_COPYABLE_DOCS = (
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "docs" / "authoring.md",
+    REPO_ROOT / "docs" / "setup-for-agents.md",
+    REPO_ROOT / "src" / "hermes_workflows" / "plugin_skills" / "hermes-workflows-creating" / "SKILL.md",
+)
 
 
 def _load_example(filename: str, attr: str):
@@ -19,6 +26,29 @@ def _load_example(filename: str, attr: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return getattr(module, attr)
+
+
+def _load_example_from_path(path: Path, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _canonical_typed_quickstart_body() -> str:
+    source = CANONICAL_TYPED_QUICKSTART.read_text()
+    marker = "from __future__ import annotations"
+    return marker + source.split(marker, 1)[1]
+
+
+def _extract_canonical_typed_quickstart(path: Path) -> str:
+    for fenced in path.read_text().split("```python")[1:]:
+        source, separator, _ = fenced.partition("```")
+        if separator and "class ReleaseNoteInput:" in source and "class ReleaseNoteResult:" in source:
+            return source.strip() + "\n"
+    raise AssertionError(f"{path.relative_to(REPO_ROOT)} does not publish the canonical typed quickstart")
 
 
 def _drain(engine: WorkflowEngine, workflow_id: str, *, max_commands: int = 20):
@@ -57,6 +87,44 @@ def test_installed_reviewable_draft_quickstart_reaches_typed_review_queue(tmp_pa
 
     assert result.status == "waiting"
     assert _review_keys(engine, "wf_reviewable_draft") == {"review_draft_packet"}
+
+
+def test_primary_copyable_docs_execute_the_canonical_typed_wait_and_result(tmp_path):
+    expected_source = _canonical_typed_quickstart_body()
+
+    for index, path in enumerate(PRIMARY_COPYABLE_DOCS):
+        extracted = _extract_canonical_typed_quickstart(path)
+        assert extracted == expected_source
+
+        snippet = tmp_path / f"typed-quickstart-{index}.py"
+        snippet.write_text(extracted)
+        module = _load_example_from_path(snippet, f"published_typed_quickstart_{index}")
+        workflow_id = f"wf_published_typed_quickstart_{index}"
+        engine = WorkflowEngine(tmp_path / f"published-{index}.sqlite")
+
+        waiting = engine.run_until_idle(
+            module.release_note_workflow,
+            {"change": "Expose typed workflow contracts."},
+            workflow_id=workflow_id,
+        )
+
+        assert waiting.status == "waiting"
+        assert waiting.waiting_on == "signal:operator.response:review_release_note"
+        engine.submit_operator_response(
+            workflow_id=workflow_id,
+            key="review_release_note",
+            payload={"action": "approve", "feedback": "Ready to ship."},
+            source={"kind": "human", "id": "reviewer", "channel": "test", "message_id": f"docs-{index}"},
+        )
+        completed = engine.drain(workflow_id)
+
+        assert completed.status == "completed"
+        assert isinstance(completed.result, module.ReleaseNoteResult)
+        assert completed.result == module.ReleaseNoteResult(
+            draft=module.Draft(text="Release note: Expose typed workflow contracts."),
+            decision=module.ReviewDecision(action="approve", feedback="Ready to ship."),
+            side_effects=module.SideEffects(published=False),
+        )
 
 
 def test_launch_examples_reach_expected_review_queue_requests(tmp_path):

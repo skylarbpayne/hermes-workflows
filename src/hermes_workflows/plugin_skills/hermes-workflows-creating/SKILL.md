@@ -36,62 +36,75 @@ Do not expose runtime plumbing (`ctx.handoff`, raw signals, internal waits, leas
 6. Record receipts: commands run, stdout/stderr/exit code, artifact paths, external handles, side-effect ledger.
 7. Add smoke tests that run without provider credentials by using `mock_output` where appropriate.
 
-## Minimal skeleton
+## Canonical typed skeleton
+
+This is the primary copyable workflow. Keep the workflow input, agent output, review response, and workflow result typed end to end; do not normalize a loose dictionary inside the workflow body.
 
 ```python
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
+from typing import Literal, Optional
 
-from hermes_workflows import agent, ask, bash, parallel, workflow
-
-
-@dataclass
-class MyWorkflowInput:
-    topic: str
+from hermes_workflows import agent, ask, workflow
 
 
-@dataclass
-class DraftPacket:
-    title: str
-    body: str
-    risks: list[str] = field(default_factory=list)
+@dataclass(frozen=True)
+class ReleaseNoteInput:
+    change: str
 
 
-@dataclass
+@dataclass(frozen=True)
+class Draft:
+    text: str
+
+
+@dataclass(frozen=True)
 class ReviewDecision:
-    action: Literal["approve", "request_changes", "drop"]
-    feedback: str | None = None
+    action: Literal["approve", "request_changes"]
+    feedback: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SideEffects:
+    published: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseNoteResult:
+    draft: Draft
+    decision: ReviewDecision
+    side_effects: SideEffects
 
 
 @workflow
-async def my_workflow(inputs: MyWorkflowInput) -> dict:
-    req = inputs if isinstance(inputs, MyWorkflowInput) else MyWorkflowInput(**dict(inputs or {}))
-
-    preflight = await bash(
-        "python -V && git status --short",
-        key="preflight",
-        timeout_seconds=60,
-    )
-
+async def release_note_workflow(inputs: ReleaseNoteInput) -> ReleaseNoteResult:
     draft = await agent(
-        "draft_packet",
-        prompt="Create a concise reviewable draft from the input.",
-        input={"request": req, "preflight": preflight.stdout[-4000:]},
-        returns=DraftPacket,
-        mock_output={"title": req.topic, "body": "Demo draft", "risks": []},
+        "writer",
+        prompt="Draft a release note for the supplied change.",
+        input=inputs,
+        returns=Draft,
+        # The canonical quickstart must reach typed review without credentials.
+        mock_output={"text": f"Release note: {inputs.change}"},
     )
-
     decision = await ask(
-        "Review this draft before any external side effect.",
-        key="review_draft_packet",
-        input={"draft": draft, "side_effects": {"published": False}},
+        "Review this release note.",
+        key="review_release_note",
+        input=draft,
         returns=ReviewDecision,
     )
+    return ReleaseNoteResult(
+        draft=draft,
+        decision=decision,
+        side_effects=SideEffects(),
+    )
 
-    return {"status": decision.action, "draft": draft, "decision": decision}
+
+if __name__ == "__main__":
+    raise SystemExit(release_note_workflow.run())  # type: ignore[attr-defined]
 ```
+
+Serialized dictionary input is coerced at the framework boundary. A loose `dict` workflow signature is compatibility-only and must not replace this typed standard in generated or documented workflows.
 
 ## Step design rules
 

@@ -1,6 +1,24 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import hermes_workflows
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PRIMARY_BEHAVIOR_DOCS = (
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "docs" / "index.md",
+    REPO_ROOT / "docs" / "setup-for-agents.md",
+)
+STARTED_JSON = '{"error":null,"result":null,"status":"running","waiting_on":null,"workflow_id":"wf_typed_quickstart"}'
+WAITING_JSON = '{"error":null,"result":null,"status":"waiting","waiting_on":"signal:operator.response:review_release_note","workflow_id":"wf_typed_quickstart"}'
+RESULT_JSON = (
+    '{"error":null,"result":{"decision":{"action":"approve","feedback":"Ready to ship."},'
+    '"draft":{"text":"Release note: Expose typed workflow contracts."},'
+    '"side_effects":{"published":false}},"status":"completed","waiting_on":null,'
+    '"workflow_id":"wf_typed_quickstart"}'
+)
 
 
 def test_top_level_public_facade_teaches_authoring_primitives_and_artifacts_only() -> None:
@@ -47,6 +65,15 @@ def test_top_level_public_facade_teaches_authoring_primitives_and_artifacts_only
     assert "ApprovalDecisionInput" not in hermes_workflows.__all__
     assert "OperatorStepView" not in hermes_workflows.__all__
     assert "step" not in hermes_workflows.__all__
+
+
+def test_primary_docs_publish_exact_typed_quickstart_behavior() -> None:
+    for path in PRIMARY_BEHAVIOR_DOCS:
+        docs = path.read_text()
+        assert '{"change":"Expose typed workflow contracts."}' in docs
+        assert STARTED_JSON in docs
+        assert WAITING_JSON in docs
+        assert RESULT_JSON in docs
 
 
 def test_top_level_dir_hides_advanced_compatibility_shims() -> None:

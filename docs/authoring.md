@@ -13,35 +13,75 @@ from hermes_workflows import agent, ask, bash, goal, parallel, pipeline, workflo
 
 Use those first. `WorkflowEngine`, `@step`, direct `ctx.*` calls, raw signals, approval DTOs, and outbox internals are **not intended for direct use in normal workflows**. They are low-level integration/runtime surfaces for maintainers building adapters or the runtime itself.
 
-## Workflow shape
+## Canonical typed quickstart
 
-A normal workflow is an ordinary async Python function with a typed input and a typed result:
+A normal workflow is an ordinary async Python function with a typed input and a typed result. This is the canonical copyable quickstart; its serialized input is coerced to `ReleaseNoteInput`, both durable authoring calls return declared types, and the Python result is a `ReleaseNoteResult`:
 
 ```python
+from __future__ import annotations
+
 from dataclasses import dataclass
-from hermes_workflows import workflow
+from typing import Literal, Optional
+
+from hermes_workflows import agent, ask, workflow
 
 
-@dataclass
-class EchoInput:
-    message: str
+@dataclass(frozen=True)
+class ReleaseNoteInput:
+    change: str
 
 
-@dataclass
-class EchoResult:
-    received: str
+@dataclass(frozen=True)
+class Draft:
+    text: str
+
+
+@dataclass(frozen=True)
+class ReviewDecision:
+    action: Literal["approve", "request_changes"]
+    feedback: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SideEffects:
+    published: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseNoteResult:
+    draft: Draft
+    decision: ReviewDecision
+    side_effects: SideEffects
 
 
 @workflow
-async def my_workflow(inputs: EchoInput) -> EchoResult:
-    return EchoResult(received=inputs.message)
+async def release_note_workflow(inputs: ReleaseNoteInput) -> ReleaseNoteResult:
+    draft = await agent(
+        "writer",
+        prompt="Draft a release note for the supplied change.",
+        input=inputs,
+        returns=Draft,
+        # The canonical quickstart must reach typed review without credentials.
+        mock_output={"text": f"Release note: {inputs.change}"},
+    )
+    decision = await ask(
+        "Review this release note.",
+        key="review_release_note",
+        input=draft,
+        returns=ReviewDecision,
+    )
+    return ReleaseNoteResult(
+        draft=draft,
+        decision=decision,
+        side_effects=SideEffects(),
+    )
 
 
 if __name__ == "__main__":
-    raise SystemExit(my_workflow.run())
+    raise SystemExit(release_note_workflow.run())  # type: ignore[attr-defined]
 ```
 
-The runtime records completed work durably. On replay, completed steps return stored outputs and only missing work is queued or executed.
+Run it with `--input-json '{"change":"Expose typed workflow contracts."}'`. The first durable run is `running`, the runner reaches `signal:operator.response:review_release_note`, and an approved typed response produces the nested `ReleaseNoteResult` JSON shown in the [setup guide](setup-for-agents.html). The runtime records completed work durably; on replay, completed steps return stored outputs and only missing work is queued or executed. Loose dictionary contracts remain available for advanced compatibility, but they are secondary and should not be the first workflow an author copies.
 
 ## `agent(...)`: typed AI or worker work
 
