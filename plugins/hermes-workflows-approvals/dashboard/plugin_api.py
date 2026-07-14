@@ -13,14 +13,18 @@ from pathlib import Path
 from typing import Any
 
 from hermes_workflows import ApprovalDecisionInput, WorkflowEngine
+from hermes_workflows.approvals import strip_client_controlled_provenance, validate_revision_response
 from hermes_workflows.artifacts import artifact_descriptor, workflow_source_preview
 from hermes_workflows.hermes_plugin_approvals import (
     _configured_dbs,
     _next_step_for_receipt,
     _redact,
     _receipt_to_payload,
+    _revision_schema_for_response,
+    _source_for_normalized_revision_replay,
     approval_view_to_dict,
 )
+from hermes_workflows.revision_validation import RevisionActionValidationError
 from hermes_workflows.workflow_loading import load_workflow_ref
 
 try:  # FastAPI is provided by Hermes Agent's dashboard process.
@@ -30,8 +34,8 @@ except Exception:  # pragma: no cover - keeps direct unit imports dependency-lig
 
 
 class _FallbackHTTPException(Exception):
-    def __init__(self, status_code: int, detail: str):
-        super().__init__(detail)
+    def __init__(self, status_code: int, detail: Any):
+        super().__init__(str(detail))
         self.status_code = status_code
         self.detail = detail
 
@@ -2240,7 +2244,7 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
     raw_payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
     if not raw_payload:
         raise HTTPException(status_code=400, detail="review response payload is required")
-    payload = {key: value for key, value in raw_payload.items() if key not in {"by", "source"}}
+    payload = strip_client_controlled_provenance(raw_payload)
     raw_idempotency_key = str(body.get("idempotency_key") or body.get("event_id") or "").strip()
     message_id = raw_idempotency_key or f"dashboard:{uuid.uuid4()}"
     if not message_id.startswith("dashboard:"):
@@ -2250,15 +2254,27 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
         _ensure_workflow_project_on_path(db_path)
         engine = WorkflowEngine(db_path)
         normalized_payload = _normalize_review_payload_for_dashboard_request(engine, workflow_id, key, payload)
+        effective_idempotency_key = message_id
+        source = {
+            "channel": "local-dashboard",
+            "message_id": message_id,
+        }
+        if _revision_schema_for_response(engine, workflow_id, key) is not None:
+            normalized_payload, validated = validate_revision_response(normalized_payload)
+            effective_idempotency_key = f"revision:{workflow_id}:{key}:{validated.idempotency_key}"
+            source = _source_for_normalized_revision_replay(
+                engine,
+                workflow_id,
+                key,
+                effective_idempotency_key,
+                source,
+            )
         receipt = engine.submit_operator_response(
             workflow_id=workflow_id,
             key=key,
             payload=normalized_payload,
-            source={
-                "channel": "hermes-dashboard",
-                "message_id": message_id,
-            },
-            idempotency_key=message_id,
+            source=source,
+            idempotency_key=effective_idempotency_key,
             resume=True,
         )
         post_resume = _status_packet(
@@ -2274,6 +2290,8 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
 
     try:
         receipt, post_resume = await asyncio.to_thread(record_and_resume)
+    except RevisionActionValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"review response/resume failed: {type(exc).__name__}: {exc}") from exc
     receipt_payload = _receipt_to_payload(receipt, resume_requested=True)
@@ -2307,7 +2325,7 @@ async def decide_approval(body: dict[str, Any]) -> dict[str, Any]:
         key=key,
         action=action,
         source={
-            "channel": "hermes-dashboard",
+            "channel": "local-dashboard",
             "message_id": message_id,
         },
         note=body.get("note"),
