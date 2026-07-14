@@ -667,6 +667,10 @@
         const feedbackAction = (actions || []).find(function (item) { return item.requires_feedback && item.value !== "approve"; });
         if (feedbackAction) selectedAction = feedbackAction.value;
       }
+      if (String(selectedAction || "").toLowerCase().replace(/-/g, "_") === "request_changes" && !feedbackText && !editedOutputText) {
+        setUi(Object.assign({}, ui, { error: "request_changes requires nonblank feedback or valid edited_output" }));
+        return;
+      }
       const payload = { action: selectedAction, feedback: feedbackText || undefined };
       const editable = (step.input_surface || {}).editable_output || {};
       const editField = editable.field || "edited_output";

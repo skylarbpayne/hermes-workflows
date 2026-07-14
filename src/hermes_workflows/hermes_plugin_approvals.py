@@ -7,9 +7,15 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from .approvals import ApprovalDecisionInput
+from .approvals import (
+    ApprovalDecisionInput,
+    is_revision_action_schema,
+    strip_client_controlled_provenance,
+    validate_revision_response,
+)
 from .engine import WorkflowEngine
 from .receipts import redact_secrets
+from .revision_validation import RevisionActionValidationError
 
 PLUGIN_NAME = "hermes-workflows-approvals"
 TOOLSET = "hermes_workflows_approvals"
@@ -293,8 +299,29 @@ def _source_from_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def _receipt_to_payload(receipt: Any, *, resume_requested: bool) -> dict[str, Any]:
     payload = _as_payload(receipt)
+    response_provenance = getattr(receipt, "response_provenance", None)
+    if isinstance(response_provenance, dict):
+        payload["response_provenance"] = response_provenance
     payload["resume_requested"] = resume_requested
     return payload
+
+
+def _revision_schema_for_response(engine: WorkflowEngine, workflow_id: str, key: str) -> dict[str, Any] | None:
+    matching_step = next(
+        (
+            step
+            for step in engine.list_operator_steps(status="waiting")
+            if step.get("workflow_id") == workflow_id and step.get("key") == key
+        ),
+        None,
+    )
+    if not isinstance(matching_step, dict):
+        return None
+    descriptor = matching_step.get("schema_descriptor")
+    if not isinstance(descriptor, dict):
+        request = matching_step.get("request")
+        descriptor = request.get("schema_descriptor") if isinstance(request, dict) else None
+    return descriptor if isinstance(descriptor, dict) and is_revision_action_schema(descriptor) else None
 
 
 def _next_step_for_receipt(receipt_payload: dict[str, Any]) -> str | None:
@@ -363,15 +390,29 @@ def _handle_workflow_review_respond(args: dict[str, Any], **kwargs: Any) -> str:
             payload = json.loads(payload)
         if not isinstance(payload, dict) or not payload:
             raise ValueError("payload must be a non-empty object")
-        receipt = WorkflowEngine(db_path).submit_operator_response(
-            workflow_id=str(args.get("workflow_id") or "").strip(),
-            key=str(args.get("key") or "").strip(),
+        workflow_id = str(args.get("workflow_id") or "").strip()
+        key = str(args.get("key") or "").strip()
+        payload = strip_client_controlled_provenance(payload)
+        engine = WorkflowEngine(db_path)
+        if _revision_schema_for_response(engine, workflow_id, key) is not None:
+            try:
+                payload, validated = validate_revision_response(payload)
+            except RevisionActionValidationError as exc:
+                return _tool_error(str(exc), validation=exc.to_dict())
+            idempotency_key = f"revision:{workflow_id}:{key}:{validated.idempotency_key}"
+        else:
+            idempotency_key = (
+                args.get("idempotency_key")
+                or args.get("message_url")
+                or args.get("message_id")
+                or args.get("event_id")
+            )
+        receipt = engine.submit_operator_response(
+            workflow_id=workflow_id,
+            key=key,
             payload=payload,
             source=_source_from_args(args),
-            idempotency_key=args.get("idempotency_key")
-            or args.get("message_url")
-            or args.get("message_id")
-            or args.get("event_id"),
+            idempotency_key=idempotency_key,
             resume=resume,
         )
         receipt_payload = _receipt_to_payload(receipt, resume_requested=resume)

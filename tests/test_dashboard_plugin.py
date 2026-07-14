@@ -740,9 +740,11 @@ def test_dashboard_approval_does_not_require_or_invent_actor_identity(tmp_path, 
 
     assert receipt["success"] is True
     assert "by" not in receipt["receipt"]
+    assert receipt["receipt"]["response_provenance"]["kind"] == "unattributed_local_operator"
+    assert receipt["receipt"]["response_provenance"]["principal"] is None
     assert signal["payload"]["payload"] == {"action": "approve"}
     assert signal["payload"]["source"] == {
-        "channel": "hermes-dashboard",
+        "channel": "local-dashboard",
         "message_id": signal["payload"]["source"]["message_id"],
     }
 
@@ -774,7 +776,7 @@ def test_dashboard_approval_strips_browser_actor_and_provenance(tmp_path, monkey
     assert receipt["success"] is True
     assert receipt["receipt"]["resume_requested"] is True
     assert signal["payload"]["source"] == {
-        "channel": "hermes-dashboard",
+        "channel": "local-dashboard",
         "message_id": signal["payload"]["source"]["message_id"],
     }
     assert "by" not in receipt["receipt"]
@@ -810,8 +812,8 @@ def test_dashboard_approval_records_action_without_actor_identity(tmp_path, monk
     assert completed.status == "completed"
     status = WorkflowEngine(db).workflow_status("wf_named_human")
     signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
-    assert status["result"] == {"approved": True, "actor": None, "source_channel": "hermes-dashboard"}
-    assert signal["payload"]["source"]["channel"] == "hermes-dashboard"
+    assert status["result"] == {"approved": True, "actor": None, "source_channel": "local-dashboard"}
+    assert signal["payload"]["source"]["channel"] == "local-dashboard"
     assert signal["payload"]["payload"] == {"action": "approve"}
 
 
@@ -844,8 +846,8 @@ def test_dashboard_approval_has_no_permission_or_actor_check(tmp_path, monkeypat
     assert completed.status == "completed"
     status = WorkflowEngine(db).workflow_status("wf_named_human_mismatch")
     signal = [event for event in status["events"] if event["type"] == "SignalReceived"][-1]
-    assert status["result"] == {"approved": True, "actor": None, "source_channel": "hermes-dashboard"}
-    assert signal["payload"]["source"]["channel"] == "hermes-dashboard"
+    assert status["result"] == {"approved": True, "actor": None, "source_channel": "local-dashboard"}
+    assert signal["payload"]["source"]["channel"] == "local-dashboard"
     assert signal["payload"]["payload"] == {"action": "approve"}
 
 
@@ -885,9 +887,79 @@ def test_dashboard_review_response_does_not_require_or_invent_approver_identity(
     signal = [event for event in WorkflowEngine(db).events("wf_dashboard_ask_response") if event["type"] == "SignalReceived"][-1]
     assert signal["payload"]["payload"] == {"action": "approve"}
     assert signal["payload"]["source"] == {
-        "channel": "hermes-dashboard",
+        "channel": "local-dashboard",
         "message_id": signal["payload"]["source"]["message_id"],
     }
+
+
+def test_dashboard_review_response_rejects_empty_request_changes_with_structured_error(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_review_decision_workflow,
+        {},
+        workflow_id="wf_dashboard_empty_revision",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_review_decision_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    with pytest.raises(Exception) as excinfo:
+        run(
+            api.respond_review_request(
+                {
+                    "db": "runtime-smoke",
+                    "workflow_id": "wf_dashboard_empty_revision",
+                    "key": "review_dashboard_decision",
+                    "payload": {"action": "request_changes", "feedback": "\u2003"},
+                }
+            )
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 400
+    detail = getattr(excinfo.value, "detail", None)
+    assert isinstance(detail, dict)
+    assert detail["code"] == "revision_action_invalid"
+    assert detail["message"] == "request_changes requires nonblank feedback or valid edited_output"
+    assert [error["field"] for error in detail["field_errors"]] == ["feedback", "edited_output"]
+    assert WorkflowEngine(db).workflow_status("wf_dashboard_empty_revision")["status"] == "waiting"
+    assert not [event for event in WorkflowEngine(db).events("wf_dashboard_empty_revision") if event["type"] == "SignalReceived"]
+
+
+def test_dashboard_review_response_strips_all_client_identity_and_provenance_fields(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_review_decision_workflow,
+        {},
+        workflow_id="wf_dashboard_spoof_revision",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_review_decision_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+
+    receipt = run(
+        api.respond_review_request(
+            {
+                "db": "runtime-smoke",
+                "workflow_id": "wf_dashboard_spoof_revision",
+                "key": "review_dashboard_decision",
+                "payload": {
+                    "action": "request_changes",
+                    "feedback": "  Tighten it.  ",
+                    "by": "skylar",
+                    "actor": "skylar",
+                    "principal": {"subject": "skylar"},
+                    "source": {"id": "skylar"},
+                    "response_provenance": {"kind": "authenticated_principal", "principal": {"subject": "skylar"}},
+                },
+            }
+        )
+    )
+
+    assert receipt["receipt"]["response_provenance"]["kind"] == "unattributed_local_operator"
+    assert receipt["receipt"]["response_provenance"]["principal"] is None
+    signal = [event for event in WorkflowEngine(db).events("wf_dashboard_spoof_revision") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["payload"] == {"action": "request_changes", "feedback": "Tighten it."}
+    assert signal["payload"]["source"]["channel"] == "local-dashboard"
 
 
 def test_dashboard_review_response_idempotency_key_replay_does_not_duplicate_continuation(tmp_path, monkeypatch):
@@ -1200,6 +1272,7 @@ def test_dashboard_frontend_renders_structured_forms_instead_of_raw_trip_json_bo
     assert "hwf-structured-field" in index_js
     assert "hwf-structured-form" in style_css
     assert "hwf-structured-field-type" in style_css
+    assert "request_changes requires nonblank feedback or valid edited_output" in index_js
 
 
 

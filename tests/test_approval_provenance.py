@@ -111,6 +111,52 @@ def test_human_approval_accepts_human_source_and_returns_provenance(tmp_path):
         "channel": "discord",
         "message_url": "discord://thread/123/message/456",
     }
+    assert decision.to_dict() == {
+        "action": "approve",
+        "by": "skylar",
+        "source": {
+            "channel": "discord",
+            "message_url": "discord://thread/123/message/456",
+        },
+    }
+    assert decision.response_provenance == {
+        "schema_version": 1,
+        "kind": "legacy_unverified",
+        "principal": None,
+        "display_label": "skylar",
+        "event": {
+            "channel": "discord",
+            "message_id": None,
+            "message_url": "discord://thread/123/message/456",
+            "event_id": None,
+        },
+    }
+
+
+def test_local_dashboard_decision_is_truthfully_unattributed():
+    from hermes_workflows.approvals import ApprovalDecision
+
+    decision = ApprovalDecision(
+        action="approve",
+        source={"channel": "local-dashboard", "event_id": "dashboard:click-1"},
+    )
+
+    assert decision.to_dict() == {
+        "action": "approve",
+        "source": {"channel": "local-dashboard", "event_id": "dashboard:click-1"},
+    }
+    assert decision.response_provenance == {
+        "schema_version": 1,
+        "kind": "unattributed_local_operator",
+        "principal": None,
+        "display_label": None,
+        "event": {
+            "channel": "local-dashboard",
+            "message_id": None,
+            "message_url": None,
+            "event_id": "dashboard:click-1",
+        },
+    }
 
 
 def test_human_approval_rejects_missing_source(tmp_path):

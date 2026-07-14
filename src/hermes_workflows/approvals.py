@@ -3,6 +3,73 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterator, Mapping
 
+from .provenance import project_response_provenance
+from .revision_validation import ValidatedRevisionActionV1, validate_revision_action
+
+
+CLIENT_CONTROLLED_PROVENANCE_FIELDS = frozenset(
+    {
+        "actor",
+        "authenticated_principal",
+        "by",
+        "display_label",
+        "principal",
+        "provenance",
+        "response_provenance",
+        "source",
+        "user",
+    }
+)
+
+
+def strip_client_controlled_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove identity/provenance assertions from an untrusted response body."""
+
+    if not isinstance(payload, Mapping):
+        raise TypeError("response payload must be an object")
+    return {key: value for key, value in payload.items() if key not in CLIENT_CONTROLLED_PROVENANCE_FIELDS}
+
+
+def is_revision_action_schema(schema_descriptor: Any) -> bool:
+    """Return whether a typed operator request uses the v1 revision action contract."""
+
+    if not isinstance(schema_descriptor, Mapping):
+        return False
+    fields = schema_descriptor.get("fields")
+    if not isinstance(fields, list):
+        return False
+    action = next((field for field in fields if isinstance(field, Mapping) and field.get("name") == "action"), None)
+    if not isinstance(action, Mapping):
+        return False
+    options = action.get("options") if isinstance(action.get("options"), list) else schema_descriptor.get("choices")
+    field_names = {str(field.get("name")) for field in fields if isinstance(field, Mapping)}
+    return (
+        isinstance(options, list)
+        and {"approve", "request_changes"}.issubset(options)
+        and bool({"feedback", "edited_output"} & field_names)
+    )
+
+
+def validate_revision_response(payload: Mapping[str, Any]) -> tuple[dict[str, Any], ValidatedRevisionActionV1]:
+    """Validate and materialize a revision response for durable adapter submission."""
+
+    validated = validate_revision_action(payload)
+    return _materialize_json(validated.normalized_payload), validated
+
+
+def response_provenance_for(*, by: str | None, source: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Truthfully classify an adapter response without upgrading client labels."""
+
+    return project_response_provenance({"by": by, "source": source}).to_dict()
+
+
+def _materialize_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _materialize_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_materialize_json(item) for item in value]
+    return value
+
 
 @dataclass(frozen=True)
 class ApprovalView:
@@ -60,6 +127,10 @@ class ApprovalDecision(Mapping[str, Any]):
     def feedback(self) -> str | None:
         return self.direct_feedback or self.reason or self.note or self.message or self.comment
 
+    @property
+    def response_provenance(self) -> dict[str, Any]:
+        return response_provenance_for(by=self.by, source=self.source)
+
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"action": self.action}
         if self.by is not None:
@@ -114,6 +185,10 @@ class ApprovalReceipt:
     waiting_on: str | None
     result_summary: dict[str, Any] | None
     workflow_ref: str | None = None
+
+    @property
+    def response_provenance(self) -> dict[str, Any]:
+        return response_provenance_for(by=self.by, source=self.source)
 
 
 # Neutral names for the general human/operator checkpoint substrate. Approval

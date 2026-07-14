@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hermes_workflows import WorkflowEngine, approve, step, workflow
+from hermes_workflows import WorkflowEngine, approve, ask, step, workflow
 from hermes_workflows.engine import JsonCodec
 
 
@@ -32,6 +32,24 @@ async def plugin_approval_workflow(inputs):
         allowed=["approve", "reject"],
     )
     return await plugin_followup_step(decision)
+
+
+@dataclass
+class PluginReviewDecision:
+    action: str
+    feedback: str | None = None
+    edited_output: str | None = None
+
+
+@workflow
+async def plugin_review_workflow(inputs):
+    return await ask(
+        "Review the plugin draft?",
+        key="review_plugin_draft",
+        input={"draft": "test"},
+        choice=["approve", "request_changes"],
+        returns=PluginReviewDecision,
+    )
 
 
 class FakePluginContext:
@@ -57,6 +75,17 @@ def create_pending_approval(db: Path) -> WorkflowEngine:
         {},
         workflow_id="wf_plugin",
         workflow_ref="tests.test_hermes_plugin_approvals:plugin_approval_workflow",
+    )
+    return engine
+
+
+def create_pending_review(db: Path) -> WorkflowEngine:
+    engine = WorkflowEngine(db)
+    engine.run_until_idle(
+        plugin_review_workflow,
+        {},
+        workflow_id="wf_plugin_review",
+        workflow_ref="tests.test_hermes_plugin_approvals:plugin_review_workflow",
     )
     return engine
 
@@ -213,11 +242,94 @@ def test_workflow_approval_decide_defaults_to_resume_true(tmp_path):
     )
 
     assert result["receipt"]["action"] == "approve"
+    assert result["receipt"]["response_provenance"]["kind"] == "legacy_unverified"
+    assert result["receipt"]["response_provenance"]["principal"] is None
+    assert result["receipt"]["response_provenance"]["display_label"] == "operator"
     assert result["receipt"]["resume_requested"] is True
     assert result["receipt"]["status"] == "running"
     completed = WorkflowEngine(db).drain("wf_plugin")
     assert completed.status == "completed"
     assert completed.result["followup_ran"] is True
+
+
+def test_workflow_review_respond_rejects_empty_request_changes_with_contract_error(tmp_path):
+    from hermes_workflows.hermes_plugin_approvals import register
+
+    db = tmp_path / "workflow.sqlite"
+    create_pending_review(db)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+
+    result = json.loads(
+        plugin_context.tools["workflow_review_respond"]["handler"](
+            {
+                "db": str(db),
+                "workflow_id": "wf_plugin_review",
+                "key": "review_plugin_draft",
+                "payload": {"action": "request_changes", "feedback": "\u2003"},
+                "by": "skylar",
+                "channel": "hermes-plugin",
+                "message_id": "tool-review-1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["validation"] == {
+        "code": "revision_action_invalid",
+        "message": "request_changes requires nonblank feedback or valid edited_output",
+        "field_errors": [
+            {
+                "field": "feedback",
+                "code": "actionable_required",
+                "message": "request_changes requires nonblank feedback or valid edited_output",
+            },
+            {
+                "field": "edited_output",
+                "code": "actionable_required",
+                "message": "request_changes requires nonblank feedback or valid edited_output",
+            },
+        ],
+    }
+    assert WorkflowEngine(db).workflow_status("wf_plugin_review")["status"] == "waiting"
+    assert not [event for event in WorkflowEngine(db).events("wf_plugin_review") if event["type"] == "SignalReceived"]
+
+
+def test_workflow_review_respond_strips_client_identity_and_records_normalized_revision(tmp_path):
+    from hermes_workflows.hermes_plugin_approvals import register
+
+    db = tmp_path / "workflow.sqlite"
+    create_pending_review(db)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+
+    result = parse_tool_result(
+        plugin_context.tools["workflow_review_respond"]["handler"](
+            {
+                "db": str(db),
+                "workflow_id": "wf_plugin_review",
+                "key": "review_plugin_draft",
+                "payload": {
+                    "action": " request_changes ",
+                    "feedback": "  Make it concrete.  ",
+                    "by": "skylar",
+                    "actor": "skylar",
+                    "source": {"id": "skylar"},
+                    "response_provenance": {"kind": "authenticated_principal", "principal": {"subject": "skylar"}},
+                },
+                "by": "skylar",
+                "channel": "hermes-plugin",
+                "message_id": "tool-review-2",
+                "resume": False,
+            }
+        )
+    )
+
+    assert result["receipt"]["response_provenance"]["kind"] == "legacy_unverified"
+    assert result["receipt"]["response_provenance"]["principal"] is None
+    signal = [event for event in WorkflowEngine(db).events("wf_plugin_review") if event["type"] == "SignalReceived"][-1]
+    assert signal["payload"]["payload"] == {"action": "request_changes", "feedback": "Make it concrete."}
+    assert signal["idempotency_key"].startswith("revision:wf_plugin_review:review_plugin_draft:revision-action:v1:")
 
 
 def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path):
