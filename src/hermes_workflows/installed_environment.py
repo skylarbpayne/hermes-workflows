@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from .package_resources import foundation_manifest, installed_package_version, o
 
 
 PathLike = Union[str, Path]
+_DB_ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -88,9 +90,9 @@ def installed_environment_report(
 ) -> InstalledEnvironmentReport:
     """Resolve safe package, interpreter, registry, and DB-alias identity."""
 
-    alias = str(db_alias)
-    if not alias.strip():
-        raise ValueError("db_alias must be nonblank")
+    if not isinstance(db_alias, str) or _DB_ALIAS_PATTERN.fullmatch(db_alias) is None:
+        raise ValueError(f"db_alias must match {_DB_ALIAS_PATTERN.pattern}")
+    alias = db_alias
     registry = Path(registry_path).expanduser().resolve(strict=True)
     if not registry.is_file():
         raise ValueError("registry_path must identify a file")

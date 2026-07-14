@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hermes_workflows.installed_environment import installed_environment_report, resolve_installed_execution
 
 
@@ -59,6 +61,50 @@ def test_identity_reports_package_origin_registry_fingerprint_manifest_and_db_al
     assert "environment" not in report
 
 
+@pytest.mark.parametrize("db_alias", ("default", "smoke-db", "team_1"))
+def test_identity_accepts_bounded_db_identifiers(tmp_path, db_alias):
+    registry = tmp_path / "workflows.registry.json"
+    registry.write_text("{}\n", encoding="utf-8")
+
+    report = installed_environment_report(registry_path=registry, db_alias=db_alias).to_dict()
+
+    assert report["db_alias"] == db_alias
+
+
+@pytest.mark.parametrize(
+    "db_alias",
+    (
+        "",
+        "   ",
+        "smoke-db\nSECRET_SENTINEL",
+        "../../SECRET_SENTINEL",
+        "a" * 200_000 + "SECRET_SENTINEL",
+    ),
+    ids=("blank", "whitespace", "control", "path-like", "oversized"),
+)
+def test_identity_rejects_invalid_db_aliases_with_bounded_non_reflective_errors(tmp_path, db_alias):
+    registry = tmp_path / "workflows.registry.json"
+    registry.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as raised:
+        installed_environment_report(registry_path=registry, db_alias=db_alias)
+
+    error = str(raised.value)
+    assert len(error) <= 96
+    assert "SECRET_SENTINEL" not in error
+
+
+def test_identity_report_stays_bounded_at_maximum_db_alias_length(tmp_path):
+    registry = tmp_path / "workflows.registry.json"
+    registry.write_text("{}\n", encoding="utf-8")
+
+    report = installed_environment_report(registry_path=registry, db_alias="a" * 64).to_dict()
+
+    assert isinstance(report["db_alias"], str)
+    assert len(report["db_alias"]) == 64
+    assert len(json.dumps(report, sort_keys=True)) <= 4096
+
+
 def test_fixture_has_reviewed_byte_identity():
     assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == FIXTURE_SHA256
 
@@ -87,6 +133,42 @@ def test_clean_wheel_probe_reaches_typed_wait_under_installed_interpreter_withou
     assert payload["fake_uv_visible"] is True
     assert payload["fake_uv_called"] is False
     assert payload["hidden_bypasses_used"] == []
+    assert completed.stderr == ""
+
+
+def test_clean_wheel_probe_accepts_relative_work_root(tmp_path):
+    completed = subprocess.run(
+        [sys.executable, str(PROBE), "--work-root", "relative-probe"],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert payload["waiting_on"] == "signal:operator.response:review_release_note"
+    assert payload["interpreter_under_venv"] is True
+    assert payload["package_origin_under_venv"] is True
+    assert completed.stderr == ""
+
+
+def test_clean_wheel_probe_accepts_dot_segment_work_root(tmp_path):
+    work_root = tmp_path / "parent" / ".." / "dot-segment-probe"
+    completed = subprocess.run(
+        [sys.executable, str(PROBE), "--work-root", str(work_root)],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert payload["waiting_on"] == "signal:operator.response:review_release_note"
+    assert payload["installed_cli_shebang"] == "#!" + payload["python_executable"]
+    assert payload["interpreter_under_venv"] is True
+    assert payload["package_origin_under_venv"] is True
     assert completed.stderr == ""
 
 

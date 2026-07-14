@@ -11,7 +11,7 @@ The `hermes-workflows` console script belongs to the Python environment that ins
 - configured DB alias; and
 - the visible `uv` path, if any, as evidence that its presence does not control execution.
 
-The report deliberately omits the full environment because it may contain credentials. It reports the DB alias, not registry-v2 catalog semantics.
+The report deliberately omits the full environment because it may contain credentials. It reports the DB alias, not registry-v2 catalog semantics. Reported aliases use the same bounded identifier shape as registry-location aliases: 1–64 lowercase ASCII letters, digits, underscores, or hyphens, beginning with a letter. Invalid values fail with a fixed, non-reflective error.
 
 ## Verification
 
@@ -20,7 +20,7 @@ Run:
     uv run pytest -q tests/test_installed_cli_environment.py
     python tests/probes/installed_cli_smoke.py
 
-The probe builds a wheel, installs it without an editable checkout into a new virtual environment, puts a marker-writing fake `uv` first on `PATH`, and exercises the packaged typed quickstart through the installed interpreter and console script. Success means the workflow reaches `signal:operator.response:review_release_note`, both the interpreter and package origin are beneath the temporary virtual environment, identity fingerprints are present, and the fake marker is absent.
+The probe normalizes its work root once before creating paths. It builds a wheel, installs it without an editable checkout into a new virtual environment, puts a marker-writing fake `uv` first on `PATH`, and exercises the packaged typed quickstart through the installed interpreter and console script. Success means the workflow reaches `signal:operator.response:review_release_note`, both the interpreter and package origin are beneath the temporary virtual environment, identity fingerprints are present, and the fake marker is absent.
 
 The probe may not use private parser switches, private engine commands, or child-marker environment variables to evade the public execution contract. Central CLI deletion and wiring remain owned by INT-C1; this module is the isolated resolver and evidence seam that integration consumes.
 

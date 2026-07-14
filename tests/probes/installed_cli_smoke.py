@@ -63,6 +63,7 @@ def _identity_command(python: Path, registry: Path, db_alias: str) -> List[str]:
 
 
 def run_probe(work_root: Path) -> Dict[str, Any]:
+    work_root = Path(os.path.abspath(str(work_root.expanduser())))
     work_root.mkdir(parents=True, exist_ok=False)
     dist = work_root / "dist"
     dist.mkdir()
