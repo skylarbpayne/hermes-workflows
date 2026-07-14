@@ -1,0 +1,1 @@
+{"db":{"alias":"smoke-db","relative_path":"state/workflows.sqlite"},"input":{"change":"Expose typed workflow contracts."},"registry_location":{"registry_file":".hermes/workflows.registry.json","state_root":"state"},"schema_version":2,"workflow":{"alias":"install-smoke","workflow_ref":"hermes_workflows.examples.install_smoke:release_note_workflow"}}
