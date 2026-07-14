@@ -321,6 +321,33 @@ def _revision_schema_for_response(engine: WorkflowEngine, workflow_id: str, key:
     return descriptor if isinstance(descriptor, dict) and is_revision_action_schema(descriptor) else None
 
 
+def _source_for_normalized_revision_replay(
+    engine: WorkflowEngine,
+    workflow_id: str,
+    key: str,
+    idempotency_key: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the first durable transport provenance for an exact revision replay."""
+
+    signal_key = f"signal:operator.response:{key}"
+    matching_signal = next(
+        (
+            event
+            for event in reversed(engine.events(workflow_id))
+            if event.get("type") == "SignalReceived"
+            and event.get("key") == signal_key
+            and event.get("idempotency_key") == idempotency_key
+        ),
+        None,
+    )
+    if not isinstance(matching_signal, dict):
+        return source
+    event_payload = matching_signal.get("payload")
+    persisted_source = event_payload.get("source") if isinstance(event_payload, dict) else None
+    return dict(persisted_source) if isinstance(persisted_source, dict) else source
+
+
 def _next_step_for_receipt(receipt_payload: dict[str, Any]) -> str | None:
     status = receipt_payload.get("status")
     if receipt_payload.get("resume_requested"):
@@ -391,12 +418,20 @@ def _handle_workflow_review_respond(args: dict[str, Any], **kwargs: Any) -> str:
         key = str(args.get("key") or "").strip()
         payload = strip_client_controlled_provenance(payload)
         engine = WorkflowEngine(db_path)
+        source = _source_from_args(args)
         if _revision_schema_for_response(engine, workflow_id, key) is not None:
             try:
                 payload, validated = validate_revision_response(payload)
             except RevisionActionValidationError as exc:
                 return _tool_error(str(exc), validation=exc.to_dict())
             idempotency_key = f"revision:{workflow_id}:{key}:{validated.idempotency_key}"
+            source = _source_for_normalized_revision_replay(
+                engine,
+                workflow_id,
+                key,
+                idempotency_key,
+                source,
+            )
         else:
             idempotency_key = (
                 args.get("idempotency_key")
@@ -408,7 +443,7 @@ def _handle_workflow_review_respond(args: dict[str, Any], **kwargs: Any) -> str:
             workflow_id=workflow_id,
             key=key,
             payload=payload,
-            source=_source_from_args(args),
+            source=source,
             idempotency_key=idempotency_key,
             resume=resume,
         )

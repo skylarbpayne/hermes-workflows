@@ -354,16 +354,25 @@ def test_workflow_review_respond_replays_normalized_revision_after_step_completi
     first = parse_tool_result(handler(body))
     replay_body = dict(body)
     replay_body["payload"] = {"action": "request_changes", "feedback": "Make it concrete."}
+    replay_body["message_id"] = "tool-normalized-replay-2"
     second = parse_tool_result(handler(replay_body))
 
     assert first["success"] is True
     assert second["success"] is True
+    assert second["receipt"]["response_provenance"]["kind"] == "legacy_unverified"
+    assert second["receipt"]["response_provenance"]["principal"] is None
     events = WorkflowEngine(db).events("wf_plugin_review")
-    assert len([event for event in events if event["type"] == "SignalReceived" and event["key"] == "signal:operator.response:review_plugin_draft"]) == 1
+    signals = [event for event in events if event["type"] == "SignalReceived" and event["key"] == "signal:operator.response:review_plugin_draft"]
+    assert len(signals) == 1
+    assert signals[0]["payload"]["source"] == {
+        "channel": "hermes-plugin",
+        "message_id": "tool-normalized-replay-1",
+    }
     assert len([event for event in events if event["type"] == "StepCompleted" and event["key"] == "review_plugin_draft"]) == 1
 
     conflicting_body = dict(body)
     conflicting_body["payload"] = {"action": "request_changes", "feedback": "Use a different structure."}
+    conflicting_body["message_id"] = "tool-normalized-replay-3"
     conflicting = json.loads(handler(conflicting_body))
     assert conflicting["success"] is False
     assert "already has a recorded decision/response" in conflicting["error"]

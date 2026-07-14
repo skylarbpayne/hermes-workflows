@@ -983,19 +983,32 @@ def test_dashboard_review_response_replays_normalized_revision_after_step_comple
     first = run(api.respond_review_request(body))
     replay_body = dict(body)
     replay_body["payload"] = {"action": "request_changes", "feedback": "Tighten the opening."}
+    replay_body["idempotency_key"] = "dashboard-normalized-replay-2"
     second = run(api.respond_review_request(replay_body))
 
     assert first["success"] is True
     assert second["success"] is True
+    assert second["receipt"]["response_provenance"]["kind"] == "unattributed_local_operator"
+    assert second["receipt"]["response_provenance"]["principal"] is None
     assert dashboard_operator_response_counts(db, "wf_dashboard_normalized_revision_replay", "review_dashboard_decision") == {
         "signals": 1,
         "steps": 1,
         "commands": 1,
         "command_status": "pending",
     }
+    signals = [
+        event
+        for event in WorkflowEngine(db).events("wf_dashboard_normalized_revision_replay")
+        if event["type"] == "SignalReceived" and event["key"] == "signal:operator.response:review_dashboard_decision"
+    ]
+    assert signals[0]["payload"]["source"] == {
+        "channel": "local-dashboard",
+        "message_id": "dashboard:dashboard-normalized-replay-1",
+    }
 
     conflicting_body = dict(body)
     conflicting_body["payload"] = {"action": "request_changes", "feedback": "Use a different structure."}
+    conflicting_body["idempotency_key"] = "dashboard-normalized-replay-3"
     with pytest.raises(Exception, match="already has a recorded decision/response"):
         run(api.respond_review_request(conflicting_body))
     assert dashboard_operator_response_counts(db, "wf_dashboard_normalized_revision_replay", "review_dashboard_decision") == {

@@ -21,6 +21,7 @@ from hermes_workflows.hermes_plugin_approvals import (
     _redact,
     _receipt_to_payload,
     _revision_schema_for_response,
+    _source_for_normalized_revision_replay,
     approval_view_to_dict,
 )
 from hermes_workflows.revision_validation import RevisionActionValidationError
@@ -2254,17 +2255,25 @@ async def respond_review_request(body: dict[str, Any]) -> dict[str, Any]:
         engine = WorkflowEngine(db_path)
         normalized_payload = _normalize_review_payload_for_dashboard_request(engine, workflow_id, key, payload)
         effective_idempotency_key = message_id
+        source = {
+            "channel": "local-dashboard",
+            "message_id": message_id,
+        }
         if _revision_schema_for_response(engine, workflow_id, key) is not None:
             normalized_payload, validated = validate_revision_response(normalized_payload)
             effective_idempotency_key = f"revision:{workflow_id}:{key}:{validated.idempotency_key}"
+            source = _source_for_normalized_revision_replay(
+                engine,
+                workflow_id,
+                key,
+                effective_idempotency_key,
+                source,
+            )
         receipt = engine.submit_operator_response(
             workflow_id=workflow_id,
             key=key,
             payload=normalized_payload,
-            source={
-                "channel": "local-dashboard",
-                "message_id": message_id,
-            },
+            source=source,
             idempotency_key=effective_idempotency_key,
             resume=True,
         )
