@@ -21,7 +21,7 @@ python -m pip install .
 hermes-workflows --help
 hermes-workflows doctor \
   --db .hermes/workflows.sqlite \
-  --workflow-ref hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow
+  --workflow-ref hermes_workflows.examples.install_smoke:release_note_workflow
 ```
 
 Until a package-index release is published, install from a trusted source checkout. Do not use `pip install hermes-workflows`, `uvx`, or `pipx` launch instructions yet.
@@ -45,10 +45,9 @@ Put workflow aliases and DB aliases in `.hermes/workflows.registry.json`:
     "default": "workflows.sqlite"
   },
   "workflows": {
-    "reviewable-draft": {
-      "workflow_ref": "hermes_workflows.examples.reviewable_draft:reviewable_draft_workflow",
-      "db": "default",
-      "default_input": {}
+    "typed-quickstart": {
+      "workflow_ref": "hermes_workflows.examples.install_smoke:release_note_workflow",
+      "db": "default"
     }
   }
 }
@@ -67,13 +66,23 @@ hermes-workflows registry doctor --config .hermes/workflows.registry.json
 Start or replay a workflow instance through the registry:
 
 ```bash
-hermes-workflows run reviewable-draft \
+hermes-workflows run typed-quickstart \
   --config .hermes/workflows.registry.json \
-  --id wf_reviewable_draft_demo \
-  --input-json '{"topic":"Hermes Workflows launch"}'
+  --id wf_typed_quickstart \
+  --input-json '{"change":"Expose typed workflow contracts."}'
 ```
 
 `run` records the workflow activation and queues missing work. It is not the always-on continuation loop. A run can return `running` before the Review Queue request exists because a runner still needs to execute queued steps and replay the workflow to the next wait.
+
+The exact serialized input and initial `run` result are:
+
+```json
+{"change":"Expose typed workflow contracts."}
+```
+
+```json
+{"error":null,"result":null,"status":"running","waiting_on":null,"workflow_id":"wf_typed_quickstart"}
+```
 
 ## 4. Run the foreground Workflow Runner v2
 
@@ -98,6 +107,12 @@ hermes-workflows runner run \
 ```
 
 The runner leases runnable or lease-expired `run_workflow`, `run_step`, `external_agent`, and child-workflow commands from configured DBs. It loads each instance's stored `workflow_ref` through the registry, executes the command, records durable output, and replays the workflow until it reaches a Review Queue request, another durable wait, or a terminal state.
+
+For this credential-free quickstart, the runner executes the deterministic mock agent result and reaches the typed review wait exactly:
+
+```json
+{"error":null,"result":null,"status":"waiting","waiting_on":"signal:operator.response:review_release_note","workflow_id":"wf_typed_quickstart"}
+```
 
 `agent(...)` already runs through the existing agent-step machinery: the workflow emits an `external_agent` command, the runner calls `WorkflowEngine.agent_runner`, and the canonical `hermes_workflows.agent_runner.SubprocessAgentRunner` runs the configured adapter command. The compatibility module `hermes_workflows.runners` re-exports the same runner classes for older code. For Hermes CLI, keep using that path: `agent_cli_adapter` receives the durable runner request on stdin, expands `agent(..., model="...")` with `--agent-model-arg`, and passes the rendered prompt to Hermes as `--oneshot <prompt>` with `--agent-prompt-arg`.
 
@@ -161,40 +176,70 @@ export HERMES_WORKFLOWS_AGENT_MODEL_ARGS_JSON='["--model={model}"]'
 Launch-facing workflow authors should import the small facade:
 
 ```python
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
-from hermes_workflows import agent, ask, bash, goal, parallel, pipeline, workflow
+from hermes_workflows import agent, ask, workflow
 
 
-@dataclass
+@dataclass(frozen=True)
+class ReleaseNoteInput:
+    change: str
+
+
+@dataclass(frozen=True)
+class Draft:
+    text: str
+
+
+@dataclass(frozen=True)
 class ReviewDecision:
     action: Literal["approve", "request_changes"]
-    feedback: str | None = None
+    feedback: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SideEffects:
+    published: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseNoteResult:
+    draft: Draft
+    decision: ReviewDecision
+    side_effects: SideEffects
 
 
 @workflow
-async def reviewable_draft_workflow(inputs):
+async def release_note_workflow(inputs: ReleaseNoteInput) -> ReleaseNoteResult:
     draft = await agent(
         "writer",
-        prompt="Draft a concise packet for the requested topic.",
-        input={"topic": inputs["topic"]},
-        returns=dict,
+        prompt="Draft a release note for the supplied change.",
+        input=inputs,
+        returns=Draft,
+        # The canonical quickstart must reach typed review without credentials.
+        mock_output={"text": f"Release note: {inputs.change}"},
     )
     decision = await ask(
-        prompt="Review this packet.",
-        key="review_packet",
+        "Review this release note.",
+        key="review_release_note",
         input=draft,
         returns=ReviewDecision,
     )
-    return {"draft": draft, "decision": decision.action, "side_effects": {"sent": 0}}
+    return ReleaseNoteResult(
+        draft=draft,
+        decision=decision,
+        side_effects=SideEffects(),
+    )
 
 
 if __name__ == "__main__":
-    raise SystemExit(reviewable_draft_workflow.run())
+    raise SystemExit(release_note_workflow.run())  # type: ignore[attr-defined]
 ```
 
-Use `parallel([...])` for fan-out/fan-in, `pipeline(items, stage_a, stage_b, ...)` for staged item work, `bash(...)` for deterministic shell checks, and `goal(do_fn, check_fn, max_iters=...)` for bounded improve-until-accepted loops. Avoid teaching new users `WorkflowEngine`, low-level runtime context APIs, `step`, or manual command draining unless you are writing an adapter, migration, or advanced test. See [Author workflows](authoring.html) for the complete launch-facing SDK guide.
+The canonical workflow boundary is typed end to end. Loose dictionary inputs are a secondary compatibility surface, not the standard to advertise. Use `parallel([...])` for fan-out/fan-in, `pipeline(items, stage_a, stage_b, ...)` for staged item work, `bash(...)` for deterministic shell checks, and `goal(do_fn, check_fn, max_iters=...)` for bounded improve-until-accepted loops. Avoid teaching new users `WorkflowEngine`, low-level runtime context APIs, `step`, or manual command draining unless you are writing an adapter, migration, or advanced test. See [Author workflows](authoring.html) for the complete launch-facing SDK guide.
 
 ## 6. Record human decisions
 
@@ -205,9 +250,9 @@ Hermes plugin/tool shape:
 ```json
 {
   "db": "default",
-  "workflow_id": "wf_reviewable_draft_demo",
-  "key": "review_draft_packet",
-  "payload": {"action": "approve", "feedback": null},
+  "workflow_id": "wf_typed_quickstart",
+  "key": "review_release_note",
+  "payload": {"action": "approve", "feedback": "Ready to ship."},
   "by": "operator",
   "channel": "dashboard",
   "resume": false
@@ -215,6 +260,12 @@ Hermes plugin/tool shape:
 ```
 
 Review Queue responses create an inspectable workflow continuation. With `resume=false`, the runtime only records the operator response and leaves a visible `run_workflow` continuation command with reason `operator_response`; a trusted foreground runner must consume that command. Trusted local adapters may still request `resume=true`, but operators should treat the returned post-resume state and command history as the source of truth. Continuation should be observable in `hermes-workflows status --commands recent` / `hermes-workflows runner status`, not hidden inside a chat callback.
+
+After recording the `approve` response above with feedback `Ready to ship.` and running the continuation, the exact terminal result is:
+
+```json
+{"error":null,"result":{"decision":{"action":"approve","feedback":"Ready to ship."},"draft":{"text":"Release note: Expose typed workflow contracts."},"side_effects":{"published":false}},"status":"completed","waiting_on":null,"workflow_id":"wf_typed_quickstart"}
+```
 
 ## 7. Configure the Hermes dashboard/plugin
 

@@ -43,6 +43,34 @@ Use `agent(...)` for typed AI/worker work, `ask(...)` for typed human or externa
 
 </div>
 
+## Canonical typed quickstart
+
+Start with the fully typed `ReleaseNoteInput` → `Draft` → `ReviewDecision` → `ReleaseNoteResult` example in [Author workflows](authoring.html). The same executable source ships as `hermes_workflows.examples.install_smoke:release_note_workflow`; loose dictionary contracts are compatibility-only, not the primary authoring standard.
+
+Run it with this exact serialized input:
+
+```json
+{"change":"Expose typed workflow contracts."}
+```
+
+The initial run records:
+
+```json
+{"error":null,"result":null,"status":"running","waiting_on":null,"workflow_id":"wf_typed_quickstart"}
+```
+
+After the foreground runner executes the credential-free mock agent call, the typed Review Queue request is visible:
+
+```json
+{"error":null,"result":null,"status":"waiting","waiting_on":"signal:operator.response:review_release_note","workflow_id":"wf_typed_quickstart"}
+```
+
+After an `approve` response with feedback `Ready to ship.` and runner continuation, the typed Python result is serialized exactly as:
+
+```json
+{"error":null,"result":{"decision":{"action":"approve","feedback":"Ready to ship."},"draft":{"text":"Release note: Expose typed workflow contracts."},"side_effects":{"published":false}},"status":"completed","waiting_on":null,"workflow_id":"wf_typed_quickstart"}
+```
+
 ## Dashboard preview
 
 <figure>
