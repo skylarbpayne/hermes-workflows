@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_workflows.sqlite_policy as sqlite_policy
 from hermes_workflows.sqlite_policy import (
     JsonlSQLiteDiagnosticSink,
     JournalModeChangeRequired,
@@ -200,6 +201,72 @@ def test_lock_exhaustion_is_explicit_and_durable(tmp_path):
         "sqlite.lock_exhausted",
     ]
     assert records[-1]["attempt"] == 2
+
+
+@pytest.mark.parametrize(
+    ("diagnostic_elapsed_seconds", "sleep_elapsed_seconds", "expected_sleeps"),
+    ((0.2, 0.0, 0), (0.0, 0.2, 1)),
+)
+def test_retry_never_starts_after_diagnostics_or_sleep_exhaust_the_lease_budget(
+    monkeypatch,
+    diagnostic_elapsed_seconds,
+    sleep_elapsed_seconds,
+    expected_sleeps,
+):
+    policy = SQLitePolicyV1(
+        busy_timeout_ms=10,
+        retry_initial_delay_ms=10,
+        retry_max_delay_ms=10,
+        retry_max_attempts=2,
+        retry_jitter_ratio=0.0,
+        lease_safety_margin_ms=10,
+    )
+    now = 0.0
+    operation_calls: list[float] = []
+    sleeps: list[float] = []
+    diagnostics: list[dict[str, object]] = []
+
+    def monotonic():
+        return now
+
+    def operation():
+        operation_calls.append(now)
+        if len(operation_calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return "written"
+
+    def emit(record):
+        nonlocal now
+        diagnostics.append(dict(record))
+        now += diagnostic_elapsed_seconds
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += sleep_elapsed_seconds
+
+    monkeypatch.setattr(sqlite_policy.time, "monotonic", monotonic)
+
+    with pytest.raises(SQLiteLockExhausted) as raised:
+        run_with_lock_retry(
+            operation,
+            policy=policy,
+            lease_seconds=0.2,
+            renewal_interval_seconds=0.05,
+            operation_name="claim_command",
+            diagnostic_sink=emit,
+            sleep=sleep,
+            random_value=lambda: 0.5,
+        )
+
+    assert raised.value.attempts == 1
+    assert operation_calls == [0.0]
+    assert len(sleeps) == expected_sleeps
+    assert [record["event"] for record in diagnostics] == [
+        "sqlite.lock_retry",
+        "sqlite.lock_exhausted",
+    ]
+    assert diagnostics[-1]["attempt"] == 1
 
 
 def test_non_lock_database_errors_are_never_retried_or_swallowed():

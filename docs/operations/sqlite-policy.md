@@ -51,7 +51,7 @@ The plan admits only the largest prefix of attempts for which:
 
 `attempts * B + sum(D_i) <= budget_ms`
 
-If even one busy timeout cannot fit, `lease_retry_plan()` raises `LeaseUnsafePolicy`. Runtime elapsed time is checked again before each sleep, so a slow host fails explicitly before consuming the lease window. Jitter is bounded by `retry_jitter_ratio`; it cannot expand beyond the calculated worst case.
+If even one busy timeout cannot fit, `lease_retry_plan()` raises `LeaseUnsafePolicy`. Runtime elapsed time is re-read after each durable diagnostic and sleep before another operation can start, so slow diagnostics or a slow host fail explicitly instead of consuming the lease window. Jitter is bounded by `retry_jitter_ratio`; it cannot expand beyond the calculated worst case.
 
 The contention probe holds `BEGIN IMMEDIATE` longer than one renewal interval, then verifies recovery before lease exhaustion, durable lock/recovery diagnostics, and exactly one target write:
 

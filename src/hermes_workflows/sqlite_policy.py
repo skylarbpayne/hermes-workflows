@@ -467,7 +467,43 @@ def run_with_lock_retry(
                     plan=plan,
                 ),
             )
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            if elapsed_ms + delay_ms + policy.busy_timeout_ms > plan.budget_ms:
+                _emit_diagnostic(
+                    diagnostic_sink,
+                    _diagnostic_record(
+                        event="sqlite.lock_exhausted",
+                        operation=operation_name,
+                        attempt=attempt,
+                        max_attempts=plan.max_attempts,
+                        lock_count=lock_count,
+                        classification=classification,
+                        elapsed_ms=elapsed_ms,
+                        delay_ms=None,
+                        policy=policy,
+                        plan=plan,
+                    ),
+                )
+                raise SQLiteLockExhausted(operation_name, attempt, plan.budget_ms) from error
             sleep(delay_ms / 1000.0)
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            if elapsed_ms + policy.busy_timeout_ms > plan.budget_ms:
+                _emit_diagnostic(
+                    diagnostic_sink,
+                    _diagnostic_record(
+                        event="sqlite.lock_exhausted",
+                        operation=operation_name,
+                        attempt=attempt,
+                        max_attempts=plan.max_attempts,
+                        lock_count=lock_count,
+                        classification=classification,
+                        elapsed_ms=elapsed_ms,
+                        delay_ms=None,
+                        policy=policy,
+                        plan=plan,
+                    ),
+                )
+                raise SQLiteLockExhausted(operation_name, attempt, plan.budget_ms) from error
             continue
         if lock_count:
             _emit_diagnostic(
