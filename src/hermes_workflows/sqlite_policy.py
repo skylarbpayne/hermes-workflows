@@ -402,7 +402,27 @@ def run_with_lock_retry(
     )
     started = time.monotonic()
     lock_count = 0
+    last_classification = "locked"
     for attempt in range(1, plan.max_attempts + 1):
+        if lock_count:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            if elapsed_ms + policy.busy_timeout_ms > plan.budget_ms:
+                _emit_diagnostic(
+                    diagnostic_sink,
+                    _diagnostic_record(
+                        event="sqlite.lock_exhausted",
+                        operation=operation_name,
+                        attempt=attempt - 1,
+                        max_attempts=plan.max_attempts,
+                        lock_count=lock_count,
+                        classification=last_classification,
+                        elapsed_ms=elapsed_ms,
+                        delay_ms=None,
+                        policy=policy,
+                        plan=plan,
+                    ),
+                )
+                raise SQLiteLockExhausted(operation_name, attempt - 1, plan.budget_ms)
         try:
             result = operation()
         except sqlite3.OperationalError as error:
@@ -410,6 +430,7 @@ def run_with_lock_retry(
             if classification is None:
                 raise
             lock_count += 1
+            last_classification = classification
             elapsed_ms = (time.monotonic() - started) * 1000.0
             if attempt >= plan.max_attempts:
                 _emit_diagnostic(
@@ -506,6 +527,24 @@ def run_with_lock_retry(
                 raise SQLiteLockExhausted(operation_name, attempt, plan.budget_ms) from error
             continue
         if lock_count:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            if elapsed_ms + policy.busy_timeout_ms > plan.budget_ms:
+                _emit_diagnostic(
+                    diagnostic_sink,
+                    _diagnostic_record(
+                        event="sqlite.lock_exhausted",
+                        operation=operation_name,
+                        attempt=attempt,
+                        max_attempts=plan.max_attempts,
+                        lock_count=lock_count,
+                        classification=last_classification,
+                        elapsed_ms=elapsed_ms,
+                        delay_ms=None,
+                        policy=policy,
+                        plan=plan,
+                    ),
+                )
+                raise SQLiteLockExhausted(operation_name, attempt, plan.budget_ms)
             _emit_diagnostic(
                 diagnostic_sink,
                 _diagnostic_record(
@@ -515,7 +554,7 @@ def run_with_lock_retry(
                     max_attempts=plan.max_attempts,
                     lock_count=lock_count,
                     classification="locked",
-                    elapsed_ms=(time.monotonic() - started) * 1000.0,
+                    elapsed_ms=elapsed_ms,
                     delay_ms=None,
                     policy=policy,
                     plan=plan,

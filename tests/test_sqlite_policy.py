@@ -269,6 +269,93 @@ def test_retry_never_starts_after_diagnostics_or_sleep_exhaust_the_lease_budget(
     assert diagnostics[-1]["attempt"] == 1
 
 
+def test_retry_rechecks_lease_budget_immediately_before_the_next_operation(monkeypatch):
+    policy = SQLitePolicyV1(
+        busy_timeout_ms=10,
+        retry_initial_delay_ms=10,
+        retry_max_delay_ms=10,
+        retry_max_attempts=2,
+        retry_jitter_ratio=0.0,
+        lease_safety_margin_ms=10,
+    )
+    timeline = iter((0.0, 0.0, 0.0, 0.12, 0.2))
+    operation_calls = 0
+    diagnostics: list[dict[str, object]] = []
+
+    def operation():
+        nonlocal operation_calls
+        operation_calls += 1
+        if operation_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return "written"
+
+    monkeypatch.setattr(sqlite_policy.time, "monotonic", lambda: next(timeline))
+
+    with pytest.raises(SQLiteLockExhausted) as raised:
+        run_with_lock_retry(
+            operation,
+            policy=policy,
+            lease_seconds=0.2,
+            renewal_interval_seconds=0.05,
+            operation_name="claim_command",
+            diagnostic_sink=lambda record: diagnostics.append(dict(record)),
+            sleep=lambda _: None,
+            random_value=lambda: 0.5,
+        )
+
+    assert raised.value.attempts == 1
+    assert operation_calls == 1
+    assert [record["event"] for record in diagnostics] == [
+        "sqlite.lock_retry",
+        "sqlite.lock_exhausted",
+    ]
+    assert diagnostics[-1]["elapsed_ms"] == pytest.approx(200.0)
+
+
+def test_recovered_retry_must_complete_within_the_lease_budget(monkeypatch):
+    policy = SQLitePolicyV1(
+        busy_timeout_ms=10,
+        retry_initial_delay_ms=10,
+        retry_max_delay_ms=10,
+        retry_max_attempts=2,
+        retry_jitter_ratio=0.0,
+        lease_safety_margin_ms=10,
+    )
+    now = 0.0
+    operation_calls = 0
+    diagnostics: list[dict[str, object]] = []
+
+    def operation():
+        nonlocal now, operation_calls
+        operation_calls += 1
+        if operation_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        now = 0.2
+        return "written"
+
+    monkeypatch.setattr(sqlite_policy.time, "monotonic", lambda: now)
+
+    with pytest.raises(SQLiteLockExhausted) as raised:
+        run_with_lock_retry(
+            operation,
+            policy=policy,
+            lease_seconds=0.2,
+            renewal_interval_seconds=0.05,
+            operation_name="claim_command",
+            diagnostic_sink=lambda record: diagnostics.append(dict(record)),
+            sleep=lambda _: None,
+            random_value=lambda: 0.5,
+        )
+
+    assert raised.value.attempts == 2
+    assert operation_calls == 2
+    assert [record["event"] for record in diagnostics] == [
+        "sqlite.lock_retry",
+        "sqlite.lock_exhausted",
+    ]
+    assert diagnostics[-1]["elapsed_ms"] == pytest.approx(200.0)
+
+
 def test_non_lock_database_errors_are_never_retried_or_swallowed():
     calls = 0
 
