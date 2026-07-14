@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "schema_version": 1,
+    "journal_mode": "wal",
+    "foreign_keys": true,
+    "busy_timeout_ms": 50,
+    "retry_initial_delay_ms": 20,
+    "retry_multiplier": 2.0,
+    "retry_max_delay_ms": 80,
+    "retry_max_attempts": 6,
+    "retry_jitter_ratio": 0.25,
+    "lease_safety_margin_ms": 50
+  },
+  "pragmas": {
+    "journal_mode": "wal",
+    "foreign_keys": 1,
+    "busy_timeout_ms": 50
+  },
+  "known_lock_cases": [
+    {
+      "message": "database is locked",
+      "classification": "locked"
+    },
+    {
+      "message": "database table is locked",
+      "classification": "locked"
+    },
+    {
+      "message": "database schema is locked: main",
+      "classification": "locked"
+    }
+  ],
+  "non_lock_messages": [
+    "disk I/O error",
+    "no such table: workflow_instances",
+    "database or disk is full"
+  ],
+  "lease_case": {
+    "lease_seconds": 1.0,
+    "renewal_interval_seconds": 0.2,
+    "budget_ms": 750.0,
+    "max_attempts": 6,
+    "max_elapsed_ms": 675.0,
+    "delays_ms": [20.0, 40.0, 80.0, 80.0, 80.0],
+    "worst_case_delays_ms": [25.0, 50.0, 100.0, 100.0, 100.0]
+  },
+  "unsupported_filesystems": [
+    "9p",
+    "afpfs",
+    "cifs",
+    "davfs",
+    "fuse.sshfs",
+    "glusterfs",
+    "lustre",
+    "nfs",
+    "nfs4",
+    "smbfs",
+    "sshfs"
+  ]
+}
