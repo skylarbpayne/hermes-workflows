@@ -123,6 +123,9 @@ def test_owned_service_hook_ignores_all_client_actor_and_provenance_fields():
                 "principal": _principal("skylar").to_dict(),
                 "authenticated_principal": _principal("skylar").to_dict(),
                 "provenance": {"kind": "authenticated_principal"},
+                "response_provenance": ResponseProvenanceV1.authenticated(
+                    _principal("skylar"), "Skylar", _event()
+                ).to_dict(),
                 "source": {"kind": "human", "id": "skylar"},
             }
         ).encode("utf-8"),

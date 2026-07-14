@@ -111,6 +111,10 @@ def main() -> int:
         "by": "skylar",
         "display_label": "Skylar",
         "principal": {"issuer": "client", "subject": "skylar"},
+        "response_provenance": {
+            "kind": "authenticated_principal",
+            "principal": {"subject": "skylar"},
+        },
         "source": {"kind": "human", "id": "skylar"},
     }
     try:

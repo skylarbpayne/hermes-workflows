@@ -26,6 +26,7 @@ _RESERVED_CLIENT_FIELDS = frozenset(
         "principal",
         "authenticated_principal",
         "provenance",
+        "response_provenance",
         "source",
     }
 )
