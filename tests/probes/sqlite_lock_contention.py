@@ -87,7 +87,7 @@ def run_probe(root: Path) -> dict[str, object]:
     blocker.close()
     thread.join(timeout=2.0)
     if thread.is_alive():
-        raise RuntimeError("contention worker did not finish within the lease bound")
+        raise RuntimeError("contention worker did not finish within the probe timeout")
     if worker_error:
         raise worker_error[0]
 
@@ -102,8 +102,10 @@ def run_probe(root: Path) -> dict[str, object]:
         journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
     if target_count != 1:
         raise RuntimeError(f"target operation was silently lost or duplicated: count={target_count}")
-    if "sqlite.lock_retry" not in events or events[-1] != "sqlite.lock_recovered":
-        raise RuntimeError(f"contention did not produce durable retry/recovery diagnostics: {events}")
+    if "sqlite.lock_retry" not in events or any(event != "sqlite.lock_retry" for event in events):
+        raise RuntimeError(f"contention did not produce the durable v1 retry trace: {events}")
+    if worker_result.get("result") != "written":
+        raise RuntimeError(f"contention operation did not return normal success: {worker_result}")
     if LOCK_HOLD_SECONDS <= RENEWAL_INTERVAL_SECONDS:
         raise RuntimeError("probe lock must outlive one renewal interval")
 

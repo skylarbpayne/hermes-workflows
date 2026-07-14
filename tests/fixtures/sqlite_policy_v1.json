@@ -1,5 +1,12 @@
 {
   "schema_version": 1,
+  "retry_contract": {
+    "budget_semantics": "retry_admission",
+    "success_semantics": "authoritative_operation_result",
+    "recovery_trace": "durable_sqlite.lock_retry_plus_normal_result",
+    "emits_lock_recovered": false,
+    "completion_deadline": false
+  },
   "policy": {
     "schema_version": 1,
     "journal_mode": "wal",

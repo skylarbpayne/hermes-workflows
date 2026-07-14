@@ -42,6 +42,13 @@ def test_versioned_policy_and_lease_plan_match_frozen_fixture():
     fixture = _fixture()
     policy = _policy()
 
+    assert fixture["retry_contract"] == {
+        "budget_semantics": "retry_admission",
+        "success_semantics": "authoritative_operation_result",
+        "recovery_trace": "durable_sqlite.lock_retry_plus_normal_result",
+        "emits_lock_recovered": False,
+        "completion_deadline": False,
+    }
     assert policy.to_dict() == fixture["policy"]
     plan = lease_retry_plan(
         policy,
@@ -128,7 +135,7 @@ def test_lease_plan_rejects_a_busy_timeout_that_cannot_fit():
         lease_retry_plan(policy, lease_seconds=0.5, renewal_interval_seconds=0.1)
 
 
-def test_known_lock_retries_with_bounded_jitter_and_durable_recovery_diagnostic(tmp_path):
+def test_known_lock_retries_with_bounded_jitter_and_durable_retry_trace(tmp_path):
     policy = _policy()
     outcomes: list[object] = [
         sqlite3.OperationalError("database is locked"),
@@ -161,7 +168,6 @@ def test_known_lock_retries_with_bounded_jitter_and_durable_recovery_diagnostic(
     assert [record["event"] for record in records] == [
         "sqlite.lock_retry",
         "sqlite.lock_retry",
-        "sqlite.lock_recovered",
     ]
     assert records[-1]["operation"] == "renew_command_lease"
     assert records[-1]["lock_count"] == 2
@@ -312,7 +318,7 @@ def test_retry_rechecks_lease_budget_immediately_before_the_next_operation(monke
     assert diagnostics[-1]["elapsed_ms"] == pytest.approx(200.0)
 
 
-def test_recovered_retry_must_complete_within_the_lease_budget(monkeypatch):
+def test_admitted_retry_success_is_authoritative_after_the_lease_budget(monkeypatch):
     policy = SQLitePolicyV1(
         busy_timeout_ms=10,
         retry_initial_delay_ms=10,
@@ -335,25 +341,64 @@ def test_recovered_retry_must_complete_within_the_lease_budget(monkeypatch):
 
     monkeypatch.setattr(sqlite_policy.time, "monotonic", lambda: now)
 
-    with pytest.raises(SQLiteLockExhausted) as raised:
-        run_with_lock_retry(
-            operation,
-            policy=policy,
-            lease_seconds=0.2,
-            renewal_interval_seconds=0.05,
-            operation_name="claim_command",
-            diagnostic_sink=lambda record: diagnostics.append(dict(record)),
-            sleep=lambda _: None,
-            random_value=lambda: 0.5,
-        )
+    result = run_with_lock_retry(
+        operation,
+        policy=policy,
+        lease_seconds=0.2,
+        renewal_interval_seconds=0.05,
+        operation_name="claim_command",
+        diagnostic_sink=lambda record: diagnostics.append(dict(record)),
+        sleep=lambda _: None,
+        random_value=lambda: 0.5,
+    )
 
-    assert raised.value.attempts == 2
+    assert result == "written"
     assert operation_calls == 2
-    assert [record["event"] for record in diagnostics] == [
-        "sqlite.lock_retry",
-        "sqlite.lock_exhausted",
-    ]
-    assert diagnostics[-1]["elapsed_ms"] == pytest.approx(200.0)
+    assert [record["event"] for record in diagnostics] == ["sqlite.lock_retry"]
+
+
+def test_success_never_emits_recovered_or_reinvokes_the_effect():
+    policy = SQLitePolicyV1(
+        busy_timeout_ms=10,
+        retry_initial_delay_ms=10,
+        retry_max_delay_ms=10,
+        retry_max_attempts=2,
+        retry_jitter_ratio=0.0,
+        lease_safety_margin_ms=10,
+    )
+    attempts = 0
+    committed_effects: list[str] = []
+    diagnostics: list[str] = []
+
+    def operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        committed_effects.append("effect-1")
+        return "written"
+
+    def emit(record):
+        event = str(record["event"])
+        if event == "sqlite.lock_recovered":
+            raise RuntimeError("recovered diagnostics are outside the v1 contract")
+        diagnostics.append(event)
+
+    result = run_with_lock_retry(
+        operation,
+        policy=policy,
+        lease_seconds=0.2,
+        renewal_interval_seconds=0.05,
+        operation_name="commit_effect",
+        diagnostic_sink=emit,
+        sleep=lambda _: None,
+        random_value=lambda: 0.5,
+    )
+
+    assert result == "written"
+    assert attempts == 2
+    assert committed_effects == ["effect-1"]
+    assert diagnostics == ["sqlite.lock_retry"]
 
 
 def test_non_lock_database_errors_are_never_retried_or_swallowed():
@@ -410,7 +455,7 @@ def test_two_connections_recover_after_contention_without_duplicate_write(tmp_pa
                 apply_writable_pragmas(writer, policy)
                 writer.execute("INSERT INTO effects VALUES ('target')")
 
-        run_with_lock_retry(
+        result = run_with_lock_retry(
             insert_once,
             policy=policy,
             lease_seconds=0.5,
@@ -423,7 +468,9 @@ def test_two_connections_recover_after_contention_without_duplicate_write(tmp_pa
         blocker.close()
 
     assert released.is_set()
-    assert diagnostics[-1]["event"] == "sqlite.lock_recovered"
+    assert result is None
+    assert diagnostics
+    assert all(record["event"] == "sqlite.lock_retry" for record in diagnostics)
     with sqlite3.connect(db) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM effects WHERE operation_id = 'target'"

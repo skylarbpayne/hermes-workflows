@@ -389,7 +389,7 @@ def run_with_lock_retry(
     sleep: Callable[[float], None] = time.sleep,
     random_value: Callable[[], float] = random.random,
 ) -> Any:
-    """Retry known lock failures only, bounded by the active lease safety window."""
+    """Retry known lock failures only when another attempt fits the lease budget."""
 
     if not callable(operation):
         raise TypeError("operation must be callable")
@@ -424,7 +424,7 @@ def run_with_lock_retry(
                 )
                 raise SQLiteLockExhausted(operation_name, attempt - 1, plan.budget_ms)
         try:
-            result = operation()
+            return operation()
         except sqlite3.OperationalError as error:
             classification = classify_sqlite_lock(error)
             if classification is None:
@@ -526,41 +526,6 @@ def run_with_lock_retry(
                 )
                 raise SQLiteLockExhausted(operation_name, attempt, plan.budget_ms) from error
             continue
-        if lock_count:
-            elapsed_ms = (time.monotonic() - started) * 1000.0
-            if elapsed_ms + policy.busy_timeout_ms > plan.budget_ms:
-                _emit_diagnostic(
-                    diagnostic_sink,
-                    _diagnostic_record(
-                        event="sqlite.lock_exhausted",
-                        operation=operation_name,
-                        attempt=attempt,
-                        max_attempts=plan.max_attempts,
-                        lock_count=lock_count,
-                        classification=last_classification,
-                        elapsed_ms=elapsed_ms,
-                        delay_ms=None,
-                        policy=policy,
-                        plan=plan,
-                    ),
-                )
-                raise SQLiteLockExhausted(operation_name, attempt, plan.budget_ms)
-            _emit_diagnostic(
-                diagnostic_sink,
-                _diagnostic_record(
-                    event="sqlite.lock_recovered",
-                    operation=operation_name,
-                    attempt=attempt,
-                    max_attempts=plan.max_attempts,
-                    lock_count=lock_count,
-                    classification="locked",
-                    elapsed_ms=elapsed_ms,
-                    delay_ms=None,
-                    policy=policy,
-                    plan=plan,
-                ),
-            )
-        return result
     raise AssertionError("bounded SQLite retry loop terminated without result or error")
 
 

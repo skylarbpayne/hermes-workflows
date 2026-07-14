@@ -23,15 +23,15 @@ Every writable connection must apply and verify:
 
 Only `sqlite3.OperationalError` values identified as SQLite `BUSY`/`LOCKED`, or SQLite's known `database ... is locked` messages, are retryable. Integrity errors, full disks, missing tables, I/O errors, malformed SQL, and every unknown database error escape unchanged. Do not wrap broad database failures in this retry helper.
 
-`run_with_lock_retry()` emits one durable diagnostic per lock decision through a supplied sink. `JsonlSQLiteDiagnosticSink` appends canonical JSON and calls `fsync` for every record. Integrations may provide a database/event sink, but they must preserve the version-1 fields:
+`run_with_lock_retry()` emits one durable diagnostic per retry or exhaustion decision through a supplied sink. `JsonlSQLiteDiagnosticSink` appends canonical JSON and calls `fsync` for every record. Integrations may provide a database/event sink, but they must preserve the version-1 fields:
 
-- event: `sqlite.lock_retry`, `sqlite.lock_recovered`, or `sqlite.lock_exhausted`
+- event: `sqlite.lock_retry` or `sqlite.lock_exhausted`
 - operation and attempt/max-attempt counts
 - lock count and classification
 - busy timeout, lease, renewal interval, and lease-safe budget
 - elapsed time and the selected delay when retrying
 
-Exhaustion raises `SQLiteLockExhausted`; it is never reported as success and never silently discarded.
+Exhaustion raises `SQLiteLockExhausted`; it is never reported as success and never silently discarded. Version 1 does not emit `sqlite.lock_recovered`: a prior durable `sqlite.lock_retry` record plus the operation's normal result is the recovery trace.
 
 ## Lease-safe bound
 
@@ -51,9 +51,13 @@ The plan admits only the largest prefix of attempts for which:
 
 `attempts * B + sum(D_i) <= budget_ms`
 
-If even one busy timeout cannot fit, `lease_retry_plan()` raises `LeaseUnsafePolicy`. Runtime elapsed time is re-read after each durable diagnostic and sleep before another operation can start, so slow diagnostics or a slow host fail explicitly instead of consuming the lease window. Jitter is bounded by `retry_jitter_ratio`; it cannot expand beyond the calculated worst case.
+HW-13 v1 is an admission-bounded retry policy, not a completion or publication deadline. The usable lease budget controls whether a retry may begin. Before every retry after the first, `run_with_lock_retry()` durably emits `sqlite.lock_retry`, applies only bounded jitter and sleep, re-reads monotonic time immediately before invoking the operation, and invokes it only when `elapsed_ms + busy_timeout_ms <= budget_ms`. If admission fails, it durably emits `sqlite.lock_exhausted` and raises without invoking another operation.
 
-The contention probe holds `BEGIN IMMEDIATE` longer than one renewal interval, then verifies recovery before lease exhaustion, durable lock/recovery diagnostics, and exactly one target write:
+If even one busy timeout cannot fit, `lease_retry_plan()` raises `LeaseUnsafePolicy`. Runtime elapsed time is re-read after each durable diagnostic and sleep before another operation can start, so slow diagnostics or a slow host fail explicitly instead of starting another SQLite unit outside the admission window. Jitter is bounded by `retry_jitter_ratio`; it cannot expand beyond the calculated worst case.
+
+The operation callable must be one bounded SQLite unit using the configured busy timeout, and it must own any domain idempotency needed for retry. Once an admitted operation returns normally, that result is authoritative and is returned immediately without a subsequent diagnostic callback, elapsed-time failure, or exception translation. Version 1 does not promise wall-clock completion or publication within the lease budget. Recovered-diagnostic and publication-deadline semantics require a separately specified, transaction-aware successor.
+
+The contention probe holds `BEGIN IMMEDIATE` longer than one renewal interval, then verifies at least one durable retry record, normal success, and exactly one target write:
 
 ```console
 python tests/probes/sqlite_lock_contention.py
