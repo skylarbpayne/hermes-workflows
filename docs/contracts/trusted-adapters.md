@@ -37,6 +37,8 @@ The server-owned context contains:
 
 The HTTP body may contain workflow response data such as `action`, feedback, or typed fields. These client-controlled keys are reserved and stripped: `by`, `user`, `display_label`, `principal`, `authenticated_principal`, `provenance`, and `source`. They can neither override nor supplement the server-owned context.
 
+Stamped response payloads are bounded before use: at most 32 nested JSON levels, 4,096 JSON value nodes, and 65,536 UTF-8 bytes in deterministic canonical encoding. The raw HTTP body has the same 65,536-byte ceiling. Malformed or recursively over-deep input is rejected as a generic bounded JSON validation error rather than exposing decoder/runtime details. Provenance `schema_version` is the exact JSON integer `1`; booleans and floating-point spellings such as `1.0` are invalid.
+
 A policy may pass an expected principal to the hook or to `require_authenticated_principal`. Identity matching includes issuer, subject, platform, tenant, and chat. Any mismatch fails closed. A display-label match never counts.
 
 ## Adapter responsibilities

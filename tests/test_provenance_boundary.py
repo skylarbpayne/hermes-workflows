@@ -15,6 +15,7 @@ from hermes_workflows.provenance import (
     AuthenticatedPrincipalV1,
     EventProvenanceV1,
     ResponseProvenanceV1,
+    StampedResponseV1,
     TrustedGatewayContextV1,
     TrustedGatewayHTTPHookV1,
     legacy_unverified_provenance,
@@ -186,6 +187,43 @@ def test_canonical_projection_round_trips_but_rejects_unknown_or_malformed_trust
         project_response_provenance({"response_provenance": missing_principal})
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_response_provenance_schema_version_requires_an_exact_integer(schema_version):
+    with pytest.raises(TypeError, match="schema_version must be an integer"):
+        ResponseProvenanceV1(
+            schema_version=schema_version,
+            kind="legacy_unverified",
+        )
+
+
+def test_stamped_response_rejects_payloads_over_the_json_depth_bound():
+    nested = None
+    for _ in range(40):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="response payload exceeds JSON limits"):
+        StampedResponseV1(
+            {"nested": nested},
+            ResponseProvenanceV1(kind="legacy_unverified"),
+        )
+
+
+def test_stamped_response_rejects_payloads_over_the_json_node_bound():
+    with pytest.raises(ValueError, match="response payload exceeds JSON limits"):
+        StampedResponseV1(
+            {"items": list(range(5_000))},
+            ResponseProvenanceV1(kind="legacy_unverified"),
+        )
+
+
+def test_stamped_response_rejects_payloads_over_the_canonical_byte_bound():
+    with pytest.raises(ValueError, match="response payload exceeds JSON limits"):
+        StampedResponseV1(
+            {"text": "x" * (70 * 1024)},
+            ResponseProvenanceV1(kind="legacy_unverified"),
+        )
+
+
 def test_trusted_context_validation_rejects_unscoped_or_naive_authentication_evidence():
     with pytest.raises(ValueError, match="tenant_id or chat_id"):
         AuthenticatedPrincipalV1(
@@ -223,3 +261,14 @@ def test_actual_http_spoof_probe_never_accepts_client_skylar_identity():
     assert trace["response"]["provenance"]["principal"]["subject"] == "not-skylar"
     assert trace["response"]["provenance"]["display_label"] == "Not Skylar"
     assert trace["response"]["payload"] == {"action": "approve"}
+    for case in ("malformed_rejection", "deep_rejection"):
+        assert trace[case]["status"] == 400
+        assert "error" not in trace[case]
+        assert "RecursionError" not in trace[case]["body"]
+        assert any(
+            message in trace[case]["body"]
+            for message in (
+                "valid bounded UTF-8 JSON object",
+                "response payload exceeds JSON limits",
+            )
+        )

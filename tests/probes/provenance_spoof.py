@@ -4,9 +4,11 @@ import json
 import sys
 import threading
 from http import HTTPStatus
+from http.client import RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -59,6 +61,28 @@ class ProbeHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
 
+def _post(server: ProbeServer, body: bytes) -> dict[str, Any]:
+    request = Request(
+        f"http://127.0.0.1:{server.server_port}/gateway/review-response",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            return {
+                "status": response.status,
+                "body": response.read().decode("utf-8"),
+            }
+    except HTTPError as exc:
+        return {
+            "status": exc.code,
+            "body": exc.read().decode("utf-8"),
+        }
+    except RemoteDisconnected as exc:
+        return {"status": None, "error": type(exc).__name__}
+
+
 def main() -> int:
     principal = AuthenticatedPrincipalV1(
         issuer="probe-gateway",
@@ -90,17 +114,18 @@ def main() -> int:
         "source": {"kind": "human", "id": "skylar"},
     }
     try:
-        request = Request(
-            f"http://127.0.0.1:{server.server_port}/gateway/review-response",
-            data=json.dumps(request_payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        response = json.loads(urlopen(request, timeout=5).read().decode("utf-8"))
+        accepted = _post(server, json.dumps(request_payload).encode("utf-8"))
+        malformed_rejection = _post(server, b'{"action":')
+        deep_body = b'{"nested":' + (b"[" * 500) + b"null" + (b"]" * 500) + b"}"
+        deep_rejection = _post(server, deep_body)
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+    if accepted["status"] != HTTPStatus.OK:
+        raise RuntimeError(f"valid trusted-gateway request failed: {accepted['status']}")
+    response = json.loads(accepted["body"])
 
     trace = {
         "schema_version": 1,
@@ -109,6 +134,8 @@ def main() -> int:
         "request": request_payload,
         "gateway_principal": principal.to_dict(),
         "response": response,
+        "malformed_rejection": malformed_rejection,
+        "deep_rejection": deep_rejection,
     }
     if response["provenance"]["principal"]["subject"] == "skylar":
         raise RuntimeError("client-supplied principal crossed the trusted boundary")

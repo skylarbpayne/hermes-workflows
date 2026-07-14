@@ -46,6 +46,10 @@ _RESPONSE_PROVENANCE_FIELDS = frozenset(
 )
 _MAX_TEXT_BYTES = 1024
 _MAX_HTTP_BODY_BYTES = 64 * 1024
+_MAX_RESPONSE_JSON_DEPTH = 32
+_MAX_RESPONSE_JSON_NODES = 4096
+_MAX_RESPONSE_CANONICAL_BYTES = 64 * 1024
+_RESPONSE_LIMITS_ERROR = "response payload exceeds JSON limits"
 
 
 @dataclass(frozen=True)
@@ -156,7 +160,9 @@ class ResponseProvenanceV1:
     schema_version: int = PROVENANCE_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
-        if isinstance(self.schema_version, bool) or self.schema_version != PROVENANCE_CONTRACT_VERSION:
+        if type(self.schema_version) is not int:
+            raise TypeError("schema_version must be an integer")
+        if self.schema_version != PROVENANCE_CONTRACT_VERSION:
             raise ValueError(f"schema_version must equal {PROVENANCE_CONTRACT_VERSION}")
         if self.kind not in _PROVENANCE_KINDS:
             raise ValueError(f"unknown provenance kind: {self.kind!r}")
@@ -257,7 +263,10 @@ class StampedResponseV1:
     def __init__(self, payload: Mapping[str, Any], provenance: ResponseProvenanceV1) -> None:
         if not isinstance(payload, Mapping):
             raise TypeError("response payload must be a JSON object")
-        normalized = _normalize_json(payload)
+        try:
+            normalized = _normalize_json(payload)
+        except RecursionError as exc:
+            raise ValueError(_RESPONSE_LIMITS_ERROR) from exc
         if not isinstance(normalized, dict):
             raise TypeError("response payload must be a JSON object")
         if not isinstance(provenance, ResponseProvenanceV1):
@@ -293,8 +302,8 @@ class TrustedGatewayHTTPHookV1:
             raise TypeError("trusted gateway context is required")
         try:
             payload = json.loads(bytes(body).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("HTTP body must be a valid UTF-8 JSON object") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise ValueError("HTTP body must be a valid bounded UTF-8 JSON object") from exc
         if not isinstance(payload, dict):
             raise TypeError("HTTP body must be a JSON object")
 
@@ -448,22 +457,44 @@ def _require_exact_fields(payload: Mapping[str, Any], fields: frozenset[str], *,
 
 
 def _normalize_json(value: object) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
-            raise ValueError("response payload JSON numbers must be finite")
-        return value
-    if isinstance(value, Mapping):
-        normalized: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("response payload JSON object keys must be strings")
-            normalized[key] = _normalize_json(item)
-        return normalized
-    if isinstance(value, (list, tuple)):
-        return [_normalize_json(item) for item in value]
-    raise TypeError(f"response payload value of type {type(value).__name__} is not JSON")
+    nodes = 0
+
+    def normalize(item: object, *, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if depth > _MAX_RESPONSE_JSON_DEPTH or nodes > _MAX_RESPONSE_JSON_NODES:
+            raise ValueError(_RESPONSE_LIMITS_ERROR)
+        if item is None or isinstance(item, (str, bool, int)):
+            return item
+        if isinstance(item, float):
+            if item != item or item in (float("inf"), float("-inf")):
+                raise ValueError("response payload JSON numbers must be finite")
+            return item
+        if isinstance(item, Mapping):
+            normalized: dict[str, Any] = {}
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise TypeError("response payload JSON object keys must be strings")
+                normalized[key] = normalize(child, depth=depth + 1)
+            return normalized
+        if isinstance(item, (list, tuple)):
+            return [normalize(child, depth=depth + 1) for child in item]
+        raise TypeError(f"response payload value of type {type(item).__name__} is not JSON")
+
+    normalized = normalize(value, depth=0)
+    try:
+        canonical = json.dumps(
+            normalized,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (RecursionError, ValueError) as exc:
+        raise ValueError(_RESPONSE_LIMITS_ERROR) from exc
+    if len(canonical) > _MAX_RESPONSE_CANONICAL_BYTES:
+        raise ValueError(_RESPONSE_LIMITS_ERROR)
+    return normalized
 
 
 def _freeze_json_object(value: Mapping[str, Any]) -> Mapping[str, Any]:
