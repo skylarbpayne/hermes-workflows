@@ -962,6 +962,50 @@ def test_dashboard_review_response_strips_all_client_identity_and_provenance_fie
     assert signal["payload"]["source"]["channel"] == "local-dashboard"
 
 
+def test_dashboard_review_response_replays_normalized_revision_after_step_completion(tmp_path, monkeypatch):
+    db = tmp_path / "workflow.sqlite"
+    WorkflowEngine(db).run_until_idle(
+        dashboard_review_decision_workflow,
+        {},
+        workflow_id="wf_dashboard_normalized_revision_replay",
+        workflow_ref="tests.test_dashboard_plugin:dashboard_review_decision_workflow",
+    )
+    configure_test_dbs(monkeypatch, tmp_path, {"runtime-smoke": str(db)})
+    api = load_dashboard_api()
+    body = {
+        "db": "runtime-smoke",
+        "workflow_id": "wf_dashboard_normalized_revision_replay",
+        "key": "review_dashboard_decision",
+        "payload": {"action": " request_changes ", "feedback": "  Tighten the opening.  "},
+        "idempotency_key": "dashboard-normalized-replay-1",
+    }
+
+    first = run(api.respond_review_request(body))
+    replay_body = dict(body)
+    replay_body["payload"] = {"action": "request_changes", "feedback": "Tighten the opening."}
+    second = run(api.respond_review_request(replay_body))
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert dashboard_operator_response_counts(db, "wf_dashboard_normalized_revision_replay", "review_dashboard_decision") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+    conflicting_body = dict(body)
+    conflicting_body["payload"] = {"action": "request_changes", "feedback": "Use a different structure."}
+    with pytest.raises(Exception, match="already has a recorded decision/response"):
+        run(api.respond_review_request(conflicting_body))
+    assert dashboard_operator_response_counts(db, "wf_dashboard_normalized_revision_replay", "review_dashboard_decision") == {
+        "signals": 1,
+        "steps": 1,
+        "commands": 1,
+        "command_status": "pending",
+    }
+
+
 def test_dashboard_review_response_idempotency_key_replay_does_not_duplicate_continuation(tmp_path, monkeypatch):
     db = tmp_path / "workflow.sqlite"
     WorkflowEngine(db).run_until_idle(

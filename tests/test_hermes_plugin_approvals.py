@@ -332,6 +332,46 @@ def test_workflow_review_respond_strips_client_identity_and_records_normalized_r
     assert signal["idempotency_key"].startswith("revision:wf_plugin_review:review_plugin_draft:revision-action:v1:")
 
 
+def test_workflow_review_respond_replays_normalized_revision_after_step_completion(tmp_path):
+    from hermes_workflows.hermes_plugin_approvals import register
+
+    db = tmp_path / "workflow.sqlite"
+    create_pending_review(db)
+    plugin_context = FakePluginContext()
+    register(plugin_context)
+    handler = plugin_context.tools["workflow_review_respond"]["handler"]
+    body = {
+        "db": str(db),
+        "workflow_id": "wf_plugin_review",
+        "key": "review_plugin_draft",
+        "payload": {"action": " request_changes ", "feedback": "  Make it concrete.  "},
+        "by": "operator",
+        "channel": "hermes-plugin",
+        "message_id": "tool-normalized-replay-1",
+        "resume": False,
+    }
+
+    first = parse_tool_result(handler(body))
+    replay_body = dict(body)
+    replay_body["payload"] = {"action": "request_changes", "feedback": "Make it concrete."}
+    second = parse_tool_result(handler(replay_body))
+
+    assert first["success"] is True
+    assert second["success"] is True
+    events = WorkflowEngine(db).events("wf_plugin_review")
+    assert len([event for event in events if event["type"] == "SignalReceived" and event["key"] == "signal:operator.response:review_plugin_draft"]) == 1
+    assert len([event for event in events if event["type"] == "StepCompleted" and event["key"] == "review_plugin_draft"]) == 1
+
+    conflicting_body = dict(body)
+    conflicting_body["payload"] = {"action": "request_changes", "feedback": "Use a different structure."}
+    conflicting = json.loads(handler(conflicting_body))
+    assert conflicting["success"] is False
+    assert "already has a recorded decision/response" in conflicting["error"]
+    events = WorkflowEngine(db).events("wf_plugin_review")
+    assert len([event for event in events if event["type"] == "SignalReceived" and event["key"] == "signal:operator.response:review_plugin_draft"]) == 1
+    assert len([event for event in events if event["type"] == "StepCompleted" and event["key"] == "review_plugin_draft"]) == 1
+
+
 def test_workflow_approval_decide_can_resume_when_explicitly_requested(tmp_path):
     from hermes_workflows.hermes_plugin_approvals import register
 

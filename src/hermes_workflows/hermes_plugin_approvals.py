@@ -307,20 +307,17 @@ def _receipt_to_payload(receipt: Any, *, resume_requested: bool) -> dict[str, An
 
 
 def _revision_schema_for_response(engine: WorkflowEngine, workflow_id: str, key: str) -> dict[str, Any] | None:
-    matching_step = next(
+    matching_request = next(
         (
-            step
-            for step in engine.list_operator_steps(status="waiting")
-            if step.get("workflow_id") == workflow_id and step.get("key") == key
+            event.get("payload")
+            for event in reversed(engine.events(workflow_id))
+            if event.get("type") == "ApprovalRequested" and event.get("key") == f"approval:{key}"
         ),
         None,
     )
-    if not isinstance(matching_step, dict):
+    if not isinstance(matching_request, dict):
         return None
-    descriptor = matching_step.get("schema_descriptor")
-    if not isinstance(descriptor, dict):
-        request = matching_step.get("request")
-        descriptor = request.get("schema_descriptor") if isinstance(request, dict) else None
+    descriptor = matching_request.get("schema_descriptor")
     return descriptor if isinstance(descriptor, dict) and is_revision_action_schema(descriptor) else None
 
 
