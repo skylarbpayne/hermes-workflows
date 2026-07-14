@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "old_rows": [
+    {
+      "name": "free_form_plugin_label",
+      "row": {
+        "action": "approve",
+        "by": "skylar",
+        "source": {
+          "kind": "human",
+          "id": "skylar",
+          "channel": "hermes-plugin",
+          "message_id": "tool-call-17"
+        }
+      },
+      "expected": {
+        "schema_version": 1,
+        "kind": "legacy_unverified",
+        "principal": null,
+        "display_label": "skylar",
+        "event": {
+          "channel": "hermes-plugin",
+          "message_id": "tool-call-17",
+          "message_url": null,
+          "event_id": null
+        }
+      }
+    },
+    {
+      "name": "old_row_with_trusted_looking_source",
+      "row": {
+        "action": "approve",
+        "by": "skylar",
+        "source": {
+          "kind": "authenticated_principal",
+          "id": "skylar",
+          "channel": "discord",
+          "event_id": "evt-old"
+        }
+      },
+      "expected": {
+        "schema_version": 1,
+        "kind": "legacy_unverified",
+        "principal": null,
+        "display_label": "skylar",
+        "event": {
+          "channel": "discord",
+          "message_id": null,
+          "message_url": null,
+          "event_id": "evt-old"
+        }
+      }
+    },
+    {
+      "name": "label_only_row",
+      "row": {
+        "action": "reject",
+        "by": "operator"
+      },
+      "expected": {
+        "schema_version": 1,
+        "kind": "legacy_unverified",
+        "principal": null,
+        "display_label": "operator",
+        "event": null
+      }
+    },
+    {
+      "name": "existing_local_dashboard_row",
+      "row": {
+        "action": "approve",
+        "by": "skylar",
+        "source": {
+          "kind": "human",
+          "id": "skylar",
+          "channel": "local-dashboard",
+          "message_id": "local-click-old"
+        }
+      },
+      "expected": {
+        "schema_version": 1,
+        "kind": "unattributed_local_operator",
+        "principal": null,
+        "display_label": null,
+        "event": {
+          "channel": "local-dashboard",
+          "message_id": "local-click-old",
+          "message_url": null,
+          "event_id": null
+        }
+      }
+    }
+  ]
+}
