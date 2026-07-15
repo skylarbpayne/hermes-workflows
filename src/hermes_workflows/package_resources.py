@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import shutil
 import stat
 from dataclasses import dataclass
 from importlib import metadata, resources
@@ -254,6 +254,95 @@ def _validate_new_destination(root: Path) -> None:
             raise ValueError(f"package payload destination ancestor is not a directory: {current}")
 
 
+def _directory_open_flags() -> int:
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required_flags):
+        raise OSError("package payload writes require no-follow directory descriptors")
+    required_dir_fd = (os.open, os.mkdir, os.stat, os.unlink, os.rmdir)
+    if any(function not in os.supports_dir_fd for function in required_dir_fd):
+        raise OSError("package payload writes require descriptor-relative filesystem operations")
+    if os.stat not in os.supports_follow_symlinks:
+        raise OSError("package payload writes require no-follow descriptor-relative stat")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_directory_path(path: Path) -> int:
+    flags = _directory_open_flags()
+    descriptor = os.open(path.anchor, flags)
+    current = Path(path.anchor)
+    try:
+        for component in path.parts[1:]:
+            current = current / component
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as exc:
+                try:
+                    mode = os.stat(component, dir_fd=descriptor, follow_symlinks=False).st_mode
+                except OSError:
+                    raise ValueError(f"package payload destination parent changed during validation: {current}") from exc
+                if stat.S_ISLNK(mode):
+                    raise ValueError(f"package payload destination contains symlink ancestor: {current}") from exc
+                if not stat.S_ISDIR(mode):
+                    raise ValueError(f"package payload destination ancestor is not a directory: {current}") from exc
+                raise ValueError(f"package payload destination parent changed during validation: {current}") from exc
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _entry_matches_stat(parent_fd: int, name: str, expected: os.stat_result) -> bool:
+    try:
+        actual = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return _same_file_identity(actual, expected)
+
+
+def _entry_matches_fd(parent_fd: int, name: str, descriptor: int) -> bool:
+    try:
+        actual = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = os.fstat(descriptor)
+    except OSError:
+        return False
+    return stat.S_ISDIR(actual.st_mode) and _same_file_identity(actual, expected)
+
+
+def _path_matches_fd(path: Path, descriptor: int) -> bool:
+    try:
+        current = _open_directory_path(path)
+    except (OSError, ValueError):
+        return False
+    try:
+        return _same_file_identity(os.fstat(current), os.fstat(descriptor))
+    finally:
+        os.close(current)
+
+
+def _remove_created_entries(
+    files: list[Tuple[int, str, os.stat_result]],
+    directories: list[Tuple[int, str, os.stat_result]],
+) -> None:
+    for parent_fd, name, expected in reversed(files):
+        if _entry_matches_stat(parent_fd, name, expected):
+            try:
+                os.unlink(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+    for parent_fd, name, expected in reversed(directories):
+        if _entry_matches_stat(parent_fd, name, expected):
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+
+
 def write_package_payload(
     manifest: PackageResourceManifestV1,
     destination: PathLike,
@@ -267,19 +356,63 @@ def write_package_payload(
     payload = _validated_payload_bytes(packaged)
     root = Path(destination)
     _validate_new_destination(root)
-    if root.exists() or root.is_symlink():
+    if not root.name:
         raise FileExistsError(f"refusing to replace existing destination: {root}")
 
-    root.mkdir()
+    parent_fd = _open_directory_path(root.parent)
+    root_fd = None
+    directory_fds = {}
+    created_files = []
+    created_directories = []
     written = []
     try:
+        try:
+            os.mkdir(root.name, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise FileExistsError(f"refusing to replace existing destination: {root}") from exc
+        root_stat = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+        created_directories.append((parent_fd, root.name, root_stat))
+        root_fd = os.open(root.name, _directory_open_flags(), dir_fd=parent_fd)
+        if not _entry_matches_fd(parent_fd, root.name, root_fd):
+            raise ValueError("package payload destination changed during creation")
+        directory_fds[()] = root_fd
+
         for entry, data in payload:
-            path = root / entry.path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("xb") as handle:
+            parts = PurePosixPath(entry.path).parts
+            parent_parts = ()
+            for component in parts[:-1]:
+                child_parts = parent_parts + (component,)
+                if child_parts not in directory_fds:
+                    component_parent_fd = directory_fds[parent_parts]
+                    os.mkdir(component, dir_fd=component_parent_fd)
+                    component_stat = os.stat(component, dir_fd=component_parent_fd, follow_symlinks=False)
+                    created_directories.append((component_parent_fd, component, component_stat))
+                    child_fd = os.open(component, _directory_open_flags(), dir_fd=component_parent_fd)
+                    if not _entry_matches_fd(component_parent_fd, component, child_fd):
+                        os.close(child_fd)
+                        raise ValueError("package payload destination directory changed during creation")
+                    directory_fds[child_parts] = child_fd
+                parent_parts = child_parts
+
+            file_parent_fd = directory_fds[parent_parts]
+            file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            file_fd = os.open(parts[-1], file_flags, 0o666, dir_fd=file_parent_fd)
+            file_stat = os.fstat(file_fd)
+            created_files.append((file_parent_fd, parts[-1], file_stat))
+            with os.fdopen(file_fd, "wb") as handle:
                 handle.write(data)
-            written.append(path)
+            written.append(root / entry.path)
+
+        if not _path_matches_fd(root.parent, parent_fd) or not _entry_matches_fd(parent_fd, root.name, root_fd):
+            raise ValueError("package payload destination changed before completion")
     except Exception:
-        shutil.rmtree(root)
+        _remove_created_entries(created_files, created_directories)
         raise
+    finally:
+        for parts, descriptor in reversed(tuple(directory_fds.items())):
+            if parts:
+                os.close(descriptor)
+        if root_fd is not None:
+            os.close(root_fd)
+        os.close(parent_fd)
     return tuple(written)

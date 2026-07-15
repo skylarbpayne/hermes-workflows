@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_workflows.package_resources as package_resources
 from hermes_workflows.package_resources import (
     PackageResourceManifestV1,
     foundation_manifest,
@@ -76,6 +77,64 @@ def test_copy_refuses_symlinked_destination_ancestor_without_writing_through_it(
         write_package_payload(foundation_manifest(), alias / "destination")
 
     assert tuple(outside.iterdir()) == ()
+
+
+def test_copy_refuses_destination_ancestor_swapped_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    validated_parent = tmp_path / "validated-parent"
+    validated_parent.mkdir()
+    moved_parent = tmp_path / "moved-parent"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    user_file = outside / "mine.txt"
+    user_file.write_bytes(b"keep me")
+    destination = validated_parent / "destination"
+    real_validate = package_resources._validate_new_destination
+
+    def validate_then_swap(root: Path) -> None:
+        real_validate(root)
+        validated_parent.rename(moved_parent)
+        validated_parent.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(package_resources, "_validate_new_destination", validate_then_swap)
+
+    with pytest.raises(ValueError, match="destination"):
+        write_package_payload(foundation_manifest(), destination)
+
+    assert user_file.read_bytes() == b"keep me"
+    assert not (outside / "destination").exists()
+    assert tuple(moved_parent.iterdir()) == ()
+
+
+def test_copy_cleans_descriptor_relative_when_parent_is_swapped_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    bound_parent = tmp_path / "bound-parent"
+    bound_parent.mkdir()
+    moved_parent = tmp_path / "moved-parent"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    user_file = outside / "mine.txt"
+    user_file.write_bytes(b"keep me")
+    destination = bound_parent / "destination"
+    real_path_matches = package_resources._path_matches_fd
+
+    def swap_then_match(path: Path, descriptor: int) -> bool:
+        bound_parent.rename(moved_parent)
+        bound_parent.symlink_to(outside, target_is_directory=True)
+        return real_path_matches(path, descriptor)
+
+    monkeypatch.setattr(package_resources, "_path_matches_fd", swap_then_match)
+
+    with pytest.raises(ValueError, match="destination"):
+        write_package_payload(foundation_manifest(), destination)
+
+    assert user_file.read_bytes() == b"keep me"
+    assert not (outside / "destination").exists()
+    assert tuple(moved_parent.iterdir()) == ()
 
 
 def test_clean_installed_wheel_reads_validates_copies_and_installs_without_source_checkout(tmp_path: Path):
