@@ -38,6 +38,51 @@ def _installed(profile: Path) -> Path:
     return profile / "plugins" / plugin_install.PLUGIN_NAME
 
 
+def _tree_snapshot(root: Path):
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", os.readlink(path))
+        elif path.is_dir():
+            snapshot[relative] = ("directory", None)
+        else:
+            snapshot[relative] = ("file", path.read_bytes())
+    return snapshot
+
+
+@pytest.mark.parametrize("action", ["install", "upgrade", "rollback", "uninstall", "discovery"])
+def test_symlinked_profile_root_is_rejected_without_touching_target(tmp_path: Path, action: str):
+    target = tmp_path / "profile-target"
+    target.mkdir()
+    (target / "user-file.txt").write_bytes(b"must remain byte-for-byte unchanged\n")
+
+    if action == "rollback":
+        old = _versioned_payload(tmp_path, "0.0.1rc0", "symlink-root-rollback")
+        plugin_install.install_plugin(target, payload_root=old, expected_package_version="0.0.1rc0")
+        plugin_install.upgrade_plugin(target)
+    elif action != "install":
+        plugin_install.install_plugin(target)
+
+    profile = tmp_path / "supplied-profile"
+    profile.symlink_to(target, target_is_directory=True)
+    before = _tree_snapshot(target)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="profile home.*symlink"):
+        if action == "install":
+            plugin_install.install_plugin(profile)
+        elif action == "upgrade":
+            plugin_install.upgrade_plugin(profile)
+        elif action == "rollback":
+            plugin_install.rollback_plugin(profile)
+        elif action == "uninstall":
+            plugin_install.uninstall_plugin(profile)
+        else:
+            plugin_install.discover_installed_plugin(profile)
+
+    assert _tree_snapshot(target) == before
+
+
 def test_canonical_payload_has_one_version_and_all_dashboard_surfaces():
     payload = plugin_install.inspect_payload(PAYLOAD_ROOT)
     fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))

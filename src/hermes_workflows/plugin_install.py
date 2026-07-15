@@ -378,10 +378,18 @@ def _validate_owned_tree(root: Path) -> Mapping[str, Any]:
     return receipt
 
 
-def _profile_paths(profile_home: PathLike) -> Tuple[Path, Path, Path, Path]:
-    home = Path(profile_home).expanduser().resolve()
-    if home.exists() and (home.is_symlink() or not home.is_dir()):
+def _validated_profile_home(profile_home: PathLike) -> Path:
+    home = Path(profile_home).expanduser()
+    if home.is_symlink():
         raise UserFileConflictError("profile home must be a directory, not a file or symlink")
+    home = home.resolve()
+    if home.exists() and not home.is_dir():
+        raise UserFileConflictError("profile home must be a directory, not a file or symlink")
+    return home
+
+
+def _profile_paths(profile_home: PathLike) -> Tuple[Path, Path, Path, Path]:
+    home = _validated_profile_home(profile_home)
     home.mkdir(parents=True, exist_ok=True)
     plugins = home / "plugins"
     if plugins.exists() and (plugins.is_symlink() or not plugins.is_dir()):
@@ -778,7 +786,7 @@ def uninstall_plugin(profile_home: PathLike) -> PluginLifecycleReport:
 
 
 def discover_installed_plugin(profile_home: PathLike) -> PluginDiscovery:
-    home = Path(profile_home).expanduser().resolve()
+    home = _validated_profile_home(profile_home)
     destination = home / "plugins" / PLUGIN_NAME
     receipt = _validate_owned_tree(destination)
     manifest = _dashboard_manifest(destination / "dashboard" / "manifest.json")
