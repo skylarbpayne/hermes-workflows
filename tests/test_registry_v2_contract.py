@@ -51,6 +51,36 @@ def test_target_schema_fixture_round_trip_and_normalized_fingerprint() -> None:
     assert encode_registry_v2(reordered_loaded.catalog) == encode_registry_v2(loaded.catalog)
 
 
+def test_v2_state_root_uses_one_nfc_canonical_spelling() -> None:
+    composed = json.loads(VALID.read_text(encoding="utf-8"))
+    decomposed = copy.deepcopy(composed)
+    composed["state_root"] = "café"
+    decomposed["state_root"] = "cafe\u0301"
+
+    composed_catalog = decode_registry(json.dumps(composed)).catalog
+    decomposed_catalog = decode_registry(json.dumps(decomposed)).catalog
+
+    assert composed_catalog.state_root == decomposed_catalog.state_root == "café"
+    assert encode_registry_v2(composed_catalog) == encode_registry_v2(decomposed_catalog)
+    assert composed_catalog.fingerprint == decomposed_catalog.fingerprint
+
+
+def test_v2_db_paths_use_one_nfc_canonical_spelling() -> None:
+    composed = json.loads(VALID.read_text(encoding="utf-8"))
+    decomposed = copy.deepcopy(composed)
+    composed["dbs"]["primary"]["path"] = "café/workflows.sqlite"
+    decomposed["dbs"]["primary"]["path"] = "cafe\u0301/workflows.sqlite"
+
+    composed_catalog = decode_registry(json.dumps(composed)).catalog
+    decomposed_catalog = decode_registry(json.dumps(decomposed)).catalog
+
+    assert composed_catalog.dbs["primary"].path == decomposed_catalog.dbs["primary"].path == (
+        "café/workflows.sqlite"
+    )
+    assert encode_registry_v2(composed_catalog) == encode_registry_v2(decomposed_catalog)
+    assert composed_catalog.fingerprint == decomposed_catalog.fingerprint
+
+
 def test_v1_is_read_only_compatible_and_migration_is_a_deterministic_dry_run() -> None:
     before = LEGACY.read_bytes()
 
@@ -69,6 +99,27 @@ def test_v1_is_read_only_compatible_and_migration_is_a_deterministic_dry_run() -
         "target_registry": json.loads(encode_registry_v2(loaded.catalog)),
     }
     assert migration.canonical_target_json == encode_registry_v2(loaded.catalog)
+
+
+def test_v1_dry_run_normalizes_paths_to_one_nfc_canonical_target(tmp_path: Path) -> None:
+    composed = json.loads(LEGACY.read_text(encoding="utf-8"))
+    decomposed = copy.deepcopy(composed)
+    composed["dbs"]["audit"]["path"] = "café/audit/workflows.sqlite"
+    composed["dbs"]["primary"] = "café/primary/workflows.sqlite"
+    decomposed["dbs"]["audit"]["path"] = "cafe\u0301/audit/workflows.sqlite"
+    decomposed["dbs"]["primary"] = "cafe\u0301/primary/workflows.sqlite"
+    composed_path = tmp_path / "composed.json"
+    decomposed_path = tmp_path / "decomposed.json"
+    composed_path.write_text(json.dumps(composed), encoding="utf-8")
+    decomposed_path.write_text(json.dumps(decomposed), encoding="utf-8")
+
+    composed_plan = dry_run_migrate_registry_file(composed_path)
+    decomposed_plan = dry_run_migrate_registry_file(decomposed_path)
+
+    assert composed_plan.catalog.state_root == decomposed_plan.catalog.state_root == "café"
+    assert composed_plan.canonical_target_json == decomposed_plan.canonical_target_json
+    assert composed_plan.catalog.fingerprint == decomposed_plan.catalog.fingerprint
+    assert composed_plan.would_write is decomposed_plan.would_write is False
 
 
 def test_v1_marker_is_accepted_but_v2_never_emits_it() -> None:

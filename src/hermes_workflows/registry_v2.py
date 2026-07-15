@@ -409,7 +409,7 @@ def _parse_registry_v2(payload: Mapping[str, Any]) -> RegistryCatalogV2:
         raise ValueError("schema_version must equal 2")
     state_root = RegistryLocationV1(
         registry_file="workflows.registry.json",
-        state_root=payload["state_root"],
+        state_root=_normalize_path_string(payload["state_root"]),
     ).state_root
     dbs = _parse_v2_dbs(payload["dbs"])
     workflows = _parse_workflows(payload["workflows"], dbs=dbs)
@@ -446,7 +446,7 @@ def _parse_legacy_registry(payload: Mapping[str, Any]) -> RegistryCatalogV2:
             path = raw_db["path"]
         else:
             raise TypeError("legacy DB entries must be strings or path objects")
-        validated = RelativeDbPathV1(alias=alias, path=path).path
+        validated = RelativeDbPathV1(alias=alias, path=_normalize_path_string(path)).path
         legacy_paths[alias] = validated
 
     state_roots = {path.split("/", 1)[0] for path in legacy_paths.values() if "/" in path}
@@ -476,7 +476,7 @@ def _parse_v2_dbs(value: object) -> dict[str, RegistryDbV2]:
         if not isinstance(raw_db, Mapping):
             raise TypeError("registry-v2 DB entries must be objects")
         _require_exact_fields(raw_db, required=frozenset({"path"}), optional=frozenset())
-        path = RelativeDbPathV1(alias=alias, path=raw_db["path"]).path
+        path = RelativeDbPathV1(alias=alias, path=_normalize_path_string(raw_db["path"])).path
         dbs[alias] = RegistryDbV2(alias=alias, path=path)
     return dict(sorted(dbs.items()))
 
@@ -699,6 +699,12 @@ def _require_public_alias(value: object) -> str:
             "public registry consumers require a configured DB alias",
         )
     return value
+
+
+def _normalize_path_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("registry paths must be strings")
+    return unicodedata.normalize("NFC", value)
 
 
 def _optional_text(value: object, *, label: str, max_bytes: int) -> str | None:
