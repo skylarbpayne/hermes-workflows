@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -379,13 +380,38 @@ def _validate_owned_tree(root: Path) -> Mapping[str, Any]:
 
 
 def _validated_profile_home(profile_home: PathLike) -> Path:
-    home = Path(profile_home).expanduser()
-    if home.is_symlink():
-        raise UserFileConflictError("profile home must be a directory, not a file or symlink")
-    home = home.resolve()
-    if home.exists() and not home.is_dir():
-        raise UserFileConflictError("profile home must be a directory, not a file or symlink")
-    return home
+    raw_home = os.fspath(profile_home)
+    if not isinstance(raw_home, str) or not raw_home or "\x00" in raw_home:
+        raise UserFileConflictError("profile home must be a nonempty filesystem path")
+    expanded_home = os.path.expanduser(raw_home)
+    if raw_home.startswith("~") and expanded_home == raw_home:
+        raise UserFileConflictError("profile home user expansion could not be resolved")
+
+    component_text = os.path.splitdrive(expanded_home)[1]
+    if os.altsep:
+        component_text = component_text.replace(os.altsep, os.sep)
+    if any(component in {".", ".."} for component in component_text.split(os.sep)):
+        raise UserFileConflictError("profile home traversal components are not allowed")
+
+    anchored_home = expanded_home if os.path.isabs(expanded_home) else os.path.join(os.getcwd(), expanded_home)
+    home = Path(anchored_home)
+    current = Path(home.anchor)
+    candidates = [current]
+    for component in home.parts[1:]:
+        current = current / component
+        candidates.append(current)
+
+    for candidate in candidates:
+        try:
+            mode = candidate.lstat().st_mode
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(mode):
+            raise UserFileConflictError(f"profile home path contains symlink component: {candidate}")
+        if not stat.S_ISDIR(mode):
+            raise UserFileConflictError(f"profile home path component must be a directory: {candidate}")
+
+    return home.resolve()
 
 
 def _validated_config_path(home: Path) -> Path:
