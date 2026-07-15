@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 from hermes_workflows import plugin_install
+
+
+def _scratch_base():
+    if sys.platform != "darwin":
+        return None
+
+    base = Path("/private/tmp")
+    try:
+        resolved = base.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("macOS probe scratch base /private/tmp is unavailable") from exc
+    if resolved != base or base.is_symlink() or not base.is_dir():
+        raise RuntimeError("macOS probe scratch base /private/tmp must be a real non-symlink directory")
+    if not os.access(base, os.W_OK | os.X_OK):
+        raise RuntimeError("macOS probe scratch base /private/tmp must be writable and searchable")
+    return str(base)
 
 
 def _old_payload(root: Path) -> Path:
@@ -27,7 +45,7 @@ def _old_payload(root: Path) -> Path:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="hermes-workflows-plugin-probe-") as raw:
+    with tempfile.TemporaryDirectory(prefix="hermes-workflows-plugin-probe-", dir=_scratch_base()) as raw:
         root = Path(raw)
         profile = root / "profile"
         old_payload = _old_payload(root)
@@ -37,6 +55,7 @@ def main() -> int:
         rollback = plugin_install.rollback_plugin(profile)
         uninstall = plugin_install.uninstall_plugin(profile)
         result = {
+            "scratch_root": str(root),
             "temporary_profile": True,
             "live_profile_mutated": False,
             "wheel_payload_verified": False,

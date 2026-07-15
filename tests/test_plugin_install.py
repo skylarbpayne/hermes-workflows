@@ -698,3 +698,38 @@ def test_fresh_profile_probe_exercises_discovery_upgrade_rollback_and_uninstall(
     assert receipt["uninstall"]["action"] == "uninstall"
     assert receipt["live_profile_mutated"] is False
     assert receipt["wheel_payload_verified"] is False
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS temp roots can contain symlink ancestors")
+def test_fresh_profile_probe_ignores_symlink_rooted_inherited_tmpdir(tmp_path: Path):
+    inherited_target = tmp_path / "inherited-target"
+    inherited_target.mkdir()
+    inherited_tmpdir = tmp_path / "inherited-tmpdir"
+    inherited_tmpdir.symlink_to(inherited_target, target_is_directory=True)
+
+    completed = subprocess.run(
+        [sys.executable, "tests/probes/fresh_profile_plugin.py"],
+        cwd=REPO_ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT / "src"),
+            "TMPDIR": str(inherited_tmpdir),
+        },
+    )
+    receipt = json.loads(completed.stdout)
+
+    scratch_root = Path(receipt["scratch_root"])
+    assert scratch_root.parent == Path("/private/tmp")
+    assert not scratch_root.exists()
+    assert receipt["temporary_profile"] is True
+    assert receipt["discovered"]["plugin_name"] == plugin_install.PLUGIN_NAME
+    assert receipt["upgrade"]["plugin_version"] == plugin_install.PACKAGE_VERSION
+    assert receipt["rollback"]["plugin_version"] == "0.0.1rc0"
+    assert receipt["uninstall"]["action"] == "uninstall"
+    assert receipt["profile_removed"] is True
+    assert receipt["live_profile_mutated"] is False
+    assert receipt["wheel_payload_verified"] is False
