@@ -4,7 +4,7 @@ import subprocess
 import sys
 import zipfile
 from dataclasses import FrozenInstanceError
-from importlib import metadata
+from importlib import metadata, resources
 from pathlib import Path
 
 import pytest
@@ -23,6 +23,14 @@ from hermes_workflows.package_resources import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_NAME = "plugin_payload_manifest.v1.json"
+PAYLOAD_PATHS = (
+    "plugin_payload/hermes-workflows-approvals/__init__.py",
+    "plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js",
+    "plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css",
+    "plugin_payload/hermes-workflows-approvals/dashboard/manifest.json",
+    "plugin_payload/hermes-workflows-approvals/dashboard/plugin_api.py",
+    "plugin_payload/hermes-workflows-approvals/plugin.yaml",
+)
 
 
 def _file(path="plugin_payload/example.txt", sha256="a" * 64, size_bytes=1):
@@ -69,16 +77,26 @@ class _HostileManifest(PackageResourceManifestV1):
         }
 
 
-def test_foundation_manifest_is_frozen_empty_and_canonical():
+def _packaged_bytes(relative: str) -> bytes:
+    resource = resources.files("hermes_workflows")
+    for part in relative.split("/"):
+        resource = resource.joinpath(part)
+    return resource.read_bytes()
+
+
+def test_foundation_manifest_is_frozen_nonempty_and_canonical():
     manifest = foundation_manifest()
 
-    assert manifest == _manifest()
-    assert manifest.files == ()
+    assert tuple(entry.path for entry in manifest.files) == PAYLOAD_PATHS
+    for entry in manifest.files:
+        data = _packaged_bytes(entry.path)
+        assert entry.sha256 == hashlib.sha256(data).hexdigest()
+        assert entry.size_bytes == len(data)
     with pytest.raises(FrozenInstanceError):
         manifest.owner_id = "other"
 
     expected = {
-        "files": [],
+        "files": [entry.to_dict() for entry in manifest.files],
         "owner_id": "hermes-workflows",
         "package_name": "hermes-workflows",
         "package_version": installed_package_version(),
@@ -123,11 +141,19 @@ def test_manifest_resource_is_present_and_canonical_in_built_wheel(tmp_path):
     assert len(wheels) == 1
 
     member = "hermes_workflows/" + MANIFEST_NAME
+    payload_members = tuple("hermes_workflows/" + path for path in PAYLOAD_PATHS)
     with zipfile.ZipFile(wheels[0]) as archive:
         assert member in archive.namelist()
         resource_text = archive.read(member).decode("utf-8")
+        manifest = manifest_from_json(resource_text)
+        assert tuple(entry.path for entry in manifest.files) == PAYLOAD_PATHS
+        for entry, payload_member in zip(manifest.files, payload_members):
+            assert payload_member in archive.namelist()
+            data = archive.read(payload_member)
+            assert entry.sha256 == hashlib.sha256(data).hexdigest()
+            assert entry.size_bytes == len(data)
 
-    assert resource_text == canonical_manifest_json(foundation_manifest())
+    assert resource_text == canonical_manifest_json(manifest)
 
 
 def test_canonical_json_round_trips_and_rejects_unknown_fields():
@@ -281,10 +307,11 @@ def test_all_schema_versions_must_equal_one():
         _manifest(schema_version=2)
 
 
-def test_empty_payload_performs_no_filesystem_write(tmp_path):
+def test_packaged_payload_writes_validated_bytes_to_a_new_destination(tmp_path):
     destination = tmp_path / "must-not-exist"
 
     written = write_package_payload(foundation_manifest(), destination)
 
-    assert written == ()
-    assert not destination.exists()
+    assert tuple(path.relative_to(destination).as_posix() for path in written) == PAYLOAD_PATHS
+    for path, relative in zip(written, PAYLOAD_PATHS):
+        assert path.read_bytes() == _packaged_bytes(relative)

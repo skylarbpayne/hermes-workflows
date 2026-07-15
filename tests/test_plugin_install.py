@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hermes_workflows import plugin_install
+from hermes_workflows.package_resources import PackageResourceManifestV1, foundation_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -438,6 +439,27 @@ def test_canonical_payload_has_one_version_and_all_dashboard_surfaces():
     assert payload.dashboard_manifest["css"] == "dist/style.css"
     assert "__HERMES_PLUGINS__.register" in (PAYLOAD_ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
     assert (PAYLOAD_ROOT / "dashboard" / "plugin_api.py").read_text(encoding="utf-8").find("router = APIRouter()") >= 0
+
+
+def test_default_install_refuses_package_manifest_byte_mismatch_before_profile_mutation(tmp_path: Path, monkeypatch):
+    manifest = foundation_manifest()
+    first = manifest.files[0]
+    mismatched = first.__class__(first.schema_version, first.path, "0" * 64, first.size_bytes)
+    hostile = PackageResourceManifestV1(
+        schema_version=manifest.schema_version,
+        owner_id=manifest.owner_id,
+        package_name=manifest.package_name,
+        package_version=manifest.package_version,
+        payload_root=manifest.payload_root,
+        files=(mismatched,) + manifest.files[1:],
+    )
+    monkeypatch.setattr(plugin_install.package_resources, "foundation_manifest", lambda: hostile)
+    profile = tmp_path / "profile"
+
+    with pytest.raises(plugin_install.PayloadValidationError, match="manifest"):
+        plugin_install.install_plugin(profile)
+
+    assert not profile.exists()
 
 
 def test_install_is_profile_scoped_atomic_enabled_and_reports_reload_contract(tmp_path: Path):

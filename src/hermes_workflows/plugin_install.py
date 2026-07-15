@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
+from . import package_resources
 from .package_resources import installed_package_version
 
 
@@ -203,6 +204,11 @@ def _tree_files(root: Path, *, error_type: type[PluginInstallError]) -> Tuple[st
     return tuple(sorted(discovered))
 
 
+def _is_installer_generated_bytecode(relative: str) -> bool:
+    parts = PurePosixPath(relative).parts
+    return "__pycache__" in parts and relative.endswith(".pyc")
+
+
 def _plugin_yaml_identity(path: Path) -> Tuple[str, str]:
     _regular_file(path, error_type=PayloadValidationError, label="plugin.yaml")
     name = None
@@ -252,10 +258,13 @@ def inspect_payload(
     *,
     expected_package_version: Optional[str] = None,
 ) -> PayloadDescriptor:
+    packaged_payload = payload_root is None
     root = canonical_payload_root() if payload_root is None else Path(payload_root)
     if not root.is_absolute():
         root = root.resolve()
     actual_files = _tree_files(root, error_type=PayloadValidationError)
+    if packaged_payload:
+        actual_files = tuple(relative for relative in actual_files if not _is_installer_generated_bytecode(relative))
     if actual_files != PAYLOAD_FILES:
         missing = sorted(set(PAYLOAD_FILES) - set(actual_files))
         unexpected = sorted(set(actual_files) - set(PAYLOAD_FILES))
@@ -274,6 +283,17 @@ def inspect_payload(
         path = root / relative
         _regular_file(path, error_type=PayloadValidationError, label=relative)
         files.append({"path": relative, "sha256": _sha256_file(path), "size_bytes": path.stat().st_size})
+    if packaged_payload:
+        try:
+            manifest = package_resources.foundation_manifest()
+        except (TypeError, ValueError, OSError) as exc:
+            raise PayloadValidationError(f"package payload manifest validation failed: {exc}") from exc
+        manifest_paths = tuple(f"plugin_payload/{PLUGIN_NAME}/{relative}" for relative in PAYLOAD_FILES)
+        if tuple(entry.path for entry in manifest.files) != manifest_paths:
+            raise PayloadValidationError("package payload manifest paths do not match the canonical payload")
+        for entry, actual in zip(manifest.files, files):
+            if entry.sha256 != actual["sha256"] or entry.size_bytes != actual["size_bytes"]:
+                raise PayloadValidationError(f"package payload manifest bytes do not match: {entry.path}")
     unsigned = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "owner_id": OWNER_ID,
@@ -658,7 +678,7 @@ def _install_or_upgrade(
 ) -> PluginLifecycleReport:
     validated_home = _validated_profile_home(profile_home)
     source = canonical_payload_root() if payload_root is None else Path(payload_root).resolve()
-    descriptor = inspect_payload(source, expected_package_version=expected_package_version)
+    descriptor = inspect_payload(payload_root, expected_package_version=expected_package_version)
     home, plugins, destination, rollback = _profile_paths(validated_home)
     _recover_interrupted(plugins, destination, rollback)
     if require_existing and not destination.exists():

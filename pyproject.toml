@@ -41,6 +41,15 @@ packages = ["src/hermes_workflows"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/hermes_workflows/plugin_payload_manifest.v1.json" = "hermes_workflows/plugin_payload_manifest.v1.json"
+"src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js" = "hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js"
+"src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css" = "hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/presentation/2026-07-02/**"]
+artifacts = [
+    "src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js",
+    "src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css",
+]
 
 [dependency-groups]
 dev = ["pytest>=7", "build>=1", "tomli>=2; python_version<'3.11'"]

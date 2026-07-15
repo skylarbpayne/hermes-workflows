@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from importlib import metadata, resources
 from pathlib import Path, PurePosixPath
@@ -12,6 +14,14 @@ from typing import Any, Dict, Mapping, Tuple, Union
 _SCHEMA_VERSION = 1
 _DISTRIBUTION_NAME = "hermes-workflows"
 _MANIFEST_RESOURCE = "plugin_payload_manifest.v1.json"
+_CANONICAL_PAYLOAD_PATHS = (
+    "plugin_payload/hermes-workflows-approvals/__init__.py",
+    "plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js",
+    "plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css",
+    "plugin_payload/hermes-workflows-approvals/dashboard/manifest.json",
+    "plugin_payload/hermes-workflows-approvals/dashboard/plugin_api.py",
+    "plugin_payload/hermes-workflows-approvals/plugin.yaml",
+)
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _FILE_FIELDS = frozenset({"schema_version", "path", "sha256", "size_bytes"})
@@ -185,15 +195,38 @@ def manifest_from_json(value: str) -> PackageResourceManifestV1:
     return manifest
 
 
+def _resource_bytes(relative: str) -> bytes:
+    resource = resources.files("hermes_workflows")
+    for part in relative.split("/"):
+        resource = resource.joinpath(part)
+    return resource.read_bytes()
+
+
+def _validated_payload_bytes(manifest: PackageResourceManifestV1) -> Tuple[Tuple[PackageResourceFileV1, bytes], ...]:
+    validated = []
+    for entry in manifest.files:
+        try:
+            data = _resource_bytes(entry.path)
+        except (FileNotFoundError, IsADirectoryError, OSError) as exc:
+            raise ValueError(f"packaged payload resource is missing or unreadable: {entry.path}") from exc
+        if len(data) != entry.size_bytes or hashlib.sha256(data).hexdigest() != entry.sha256:
+            raise ValueError(f"packaged payload resource does not match its manifest: {entry.path}")
+        validated.append((entry, data))
+    return tuple(validated)
+
+
 def foundation_manifest() -> PackageResourceManifestV1:
     text = resources.files("hermes_workflows").joinpath(_MANIFEST_RESOURCE).read_text(encoding="utf-8")
     manifest = manifest_from_json(text)
     if manifest.owner_id != _DISTRIBUTION_NAME or manifest.package_name != _DISTRIBUTION_NAME:
         raise ValueError("foundation manifest owner and package must be hermes-workflows")
-    if manifest.payload_root != "plugin_payload" or manifest.files:
-        raise ValueError("foundation manifest must declare the empty plugin_payload foundation")
+    if manifest.payload_root != "plugin_payload":
+        raise ValueError("foundation manifest payload_root must equal plugin_payload")
+    if tuple(entry.path for entry in manifest.files) != _CANONICAL_PAYLOAD_PATHS:
+        raise ValueError("foundation manifest must declare the exact canonical plugin payload")
     if text != canonical_manifest_json(manifest):
         raise ValueError("foundation manifest resource must contain canonical JSON")
+    _validated_payload_bytes(manifest)
     return manifest
 
 
@@ -202,14 +235,184 @@ def ownership_key(manifest: PackageResourceManifestV1) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _validate_new_destination(root: Path) -> None:
+    if not root.is_absolute():
+        raise ValueError("package payload destination must be absolute")
+    if ".." in root.parts:
+        raise ValueError("package payload destination must not contain traversal components")
+
+    current = Path(root.anchor)
+    for component in root.parts[1:-1]:
+        current = current / component
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            raise ValueError(f"package payload destination parent does not exist: {current}")
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"package payload destination contains symlink ancestor: {current}")
+        if not stat.S_ISDIR(mode):
+            raise ValueError(f"package payload destination ancestor is not a directory: {current}")
+
+
+def _directory_open_flags() -> int:
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required_flags):
+        raise OSError("package payload writes require no-follow directory descriptors")
+    required_dir_fd = (os.open, os.mkdir, os.stat, os.unlink, os.rmdir)
+    if any(function not in os.supports_dir_fd for function in required_dir_fd):
+        raise OSError("package payload writes require descriptor-relative filesystem operations")
+    if os.stat not in os.supports_follow_symlinks:
+        raise OSError("package payload writes require no-follow descriptor-relative stat")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_directory_path(path: Path) -> int:
+    flags = _directory_open_flags()
+    descriptor = os.open(path.anchor, flags)
+    current = Path(path.anchor)
+    try:
+        for component in path.parts[1:]:
+            current = current / component
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as exc:
+                try:
+                    mode = os.stat(component, dir_fd=descriptor, follow_symlinks=False).st_mode
+                except OSError:
+                    raise ValueError(f"package payload destination parent changed during validation: {current}") from exc
+                if stat.S_ISLNK(mode):
+                    raise ValueError(f"package payload destination contains symlink ancestor: {current}") from exc
+                if not stat.S_ISDIR(mode):
+                    raise ValueError(f"package payload destination ancestor is not a directory: {current}") from exc
+                raise ValueError(f"package payload destination parent changed during validation: {current}") from exc
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _entry_matches_stat(parent_fd: int, name: str, expected: os.stat_result) -> bool:
+    try:
+        actual = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return _same_file_identity(actual, expected)
+
+
+def _entry_matches_fd(parent_fd: int, name: str, descriptor: int) -> bool:
+    try:
+        actual = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = os.fstat(descriptor)
+    except OSError:
+        return False
+    return stat.S_ISDIR(actual.st_mode) and _same_file_identity(actual, expected)
+
+
+def _path_matches_fd(path: Path, descriptor: int) -> bool:
+    try:
+        current = _open_directory_path(path)
+    except (OSError, ValueError):
+        return False
+    try:
+        return _same_file_identity(os.fstat(current), os.fstat(descriptor))
+    finally:
+        os.close(current)
+
+
+def _remove_created_entries(
+    files: list[Tuple[int, str, os.stat_result]],
+    directories: list[Tuple[int, str, os.stat_result]],
+) -> None:
+    for parent_fd, name, expected in reversed(files):
+        if _entry_matches_stat(parent_fd, name, expected):
+            try:
+                os.unlink(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+    for parent_fd, name, expected in reversed(directories):
+        if _entry_matches_stat(parent_fd, name, expected):
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+
+
 def write_package_payload(
     manifest: PackageResourceManifestV1,
     destination: PathLike,
 ) -> Tuple[Path, ...]:
-    """Return without touching the filesystem for the empty foundation payload."""
+    """Copy the exact validated package payload into a new destination root."""
 
-    if not isinstance(manifest, PackageResourceManifestV1):
-        raise TypeError("manifest must be a PackageResourceManifestV1")
-    if manifest.files:
-        raise NotImplementedError("package payload copying is outside the foundation seam")
-    return ()
+    canonical = canonical_manifest_json(manifest)
+    packaged = foundation_manifest()
+    if canonical != canonical_manifest_json(packaged):
+        raise ValueError("manifest must exactly match the packaged payload manifest")
+    payload = _validated_payload_bytes(packaged)
+    root = Path(destination)
+    _validate_new_destination(root)
+    if not root.name:
+        raise FileExistsError(f"refusing to replace existing destination: {root}")
+
+    parent_fd = _open_directory_path(root.parent)
+    root_fd = None
+    directory_fds = {}
+    created_files = []
+    created_directories = []
+    written = []
+    try:
+        try:
+            os.mkdir(root.name, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise FileExistsError(f"refusing to replace existing destination: {root}") from exc
+        root_stat = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+        created_directories.append((parent_fd, root.name, root_stat))
+        root_fd = os.open(root.name, _directory_open_flags(), dir_fd=parent_fd)
+        if not _entry_matches_fd(parent_fd, root.name, root_fd):
+            raise ValueError("package payload destination changed during creation")
+        directory_fds[()] = root_fd
+
+        for entry, data in payload:
+            parts = PurePosixPath(entry.path).parts
+            parent_parts = ()
+            for component in parts[:-1]:
+                child_parts = parent_parts + (component,)
+                if child_parts not in directory_fds:
+                    component_parent_fd = directory_fds[parent_parts]
+                    os.mkdir(component, dir_fd=component_parent_fd)
+                    component_stat = os.stat(component, dir_fd=component_parent_fd, follow_symlinks=False)
+                    created_directories.append((component_parent_fd, component, component_stat))
+                    child_fd = os.open(component, _directory_open_flags(), dir_fd=component_parent_fd)
+                    if not _entry_matches_fd(component_parent_fd, component, child_fd):
+                        os.close(child_fd)
+                        raise ValueError("package payload destination directory changed during creation")
+                    directory_fds[child_parts] = child_fd
+                parent_parts = child_parts
+
+            file_parent_fd = directory_fds[parent_parts]
+            file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            file_fd = os.open(parts[-1], file_flags, 0o666, dir_fd=file_parent_fd)
+            file_stat = os.fstat(file_fd)
+            created_files.append((file_parent_fd, parts[-1], file_stat))
+            with os.fdopen(file_fd, "wb") as handle:
+                handle.write(data)
+            written.append(root / entry.path)
+
+        if not _path_matches_fd(root.parent, parent_fd) or not _entry_matches_fd(parent_fd, root.name, root_fd):
+            raise ValueError("package payload destination changed before completion")
+    except Exception:
+        _remove_created_entries(created_files, created_directories)
+        raise
+    finally:
+        for parts, descriptor in reversed(tuple(directory_fds.items())):
+            if parts:
+                os.close(descriptor)
+        if root_fd is not None:
+            os.close(root_fd)
+        os.close(parent_fd)
+    return tuple(written)
