@@ -4,8 +4,6 @@ import argparse
 import json
 import os
 import platform
-import shutil
-import subprocess
 import sys
 import time
 from collections import Counter
@@ -18,6 +16,7 @@ from .approvals import ApprovalDecisionInput
 from .dashboard import render_dashboard
 from .dashboard_server import serve_dashboard
 from .engine import JsonCodec, RunResult, WorkflowEngine
+from .installed_environment import resolve_installed_execution
 from .invocation import InvocationService, TrustedResumer
 from .registry import WorkflowRegistry, looks_like_path
 from .runner_api import default_db_path, default_workflow_id, infer_project_root, run_workflow_function
@@ -175,34 +174,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-def _uv_cwd_for_run(args: argparse.Namespace) -> Path:
-    if args.project_root is not None:
-        return infer_project_root(args.project_root)
-    if args.config is not None:
-        return infer_project_root(start=args.config)
-    ref = str(args.workflow_ref)
-    path_candidate = ref.rsplit(":", 1)[0] if ":" in ref and ref.rsplit(":", 1)[0].endswith(".py") else ref
-    path = Path(path_candidate).expanduser()
-    if path.suffix == ".py" or path.exists():
-        return infer_project_root(start=path)
-    return Path.cwd()
-
-
-def run_via_uv(raw_argv: list[str], args: argparse.Namespace) -> int:
-    uv = shutil.which("uv")
-    if uv is None:
-        # Keep the CLI usable in minimal environments; tests and normal installs
-        # with uv still exercise the blessed uv path.
-        return main(["_run-engine", *raw_argv[1:]])
-    child_args = ["_run-engine", *raw_argv[1:]]
-    cmd = [uv, "run", "python", "-m", "hermes_workflows", *child_args]
-    env = os.environ.copy()
-    env.pop("VIRTUAL_ENV", None)
-    env["HERMES_WORKFLOWS_UV_CHILD"] = "1"
-    completed = subprocess.run(cmd, env=env, cwd=_uv_cwd_for_run(args))
-    return int(completed.returncode)
-
-
 def resolve_run_invocation(args: argparse.Namespace) -> tuple[Callable[..., Any], str, Path, str, Any]:
     config_path = args.config
     if args.project_root is not None:
@@ -300,6 +271,13 @@ def run_engine_cli(args: argparse.Namespace) -> int:
         resumes += 1
     print_json(result_payload(result))
     return 0
+
+
+def run_installed_cli(args: argparse.Namespace) -> int:
+    execution = resolve_installed_execution()
+    if execution.python_executable != sys.executable or execution.environment != dict(os.environ):
+        raise RuntimeError("installed workflow execution must retain the current interpreter and environment")
+    return run_engine_cli(args)
 
 
 def run_worker_registry_cli(args: argparse.Namespace) -> int:
@@ -510,8 +488,7 @@ def add_runner_service_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    argv = normalize_agent_value_options(raw_argv)
+    argv = normalize_agent_value_options(list(argv) if argv is not None else sys.argv[1:])
     parser = argparse.ArgumentParser(prog="hermes-workflows")
     visible_commands = (
         "{registry,invoke,resume-trusted,resume-pending,start,run,runner,worker,signal,"
@@ -560,7 +537,10 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--id", required=True, dest="workflow_id")
     start.add_argument("--input-json", required=True)
 
-    run = sub.add_parser("run", help="Run or resume a workflow through uv using a registry name, module ref, or file path")
+    run = sub.add_parser(
+        "run",
+        help="Run or resume a workflow in the installed environment using a registry name, module ref, or file path",
+    )
     run.add_argument("workflow_ref", help="registry alias, module:function, workflow.py, or workflow.py:function")
     run.add_argument("--config", type=Path)
     run.add_argument("--db", help="configured DB alias or explicit local DB path; defaults to <project-root>/.hermes/workflows.sqlite")
@@ -571,20 +551,6 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--watch", action="store_true", help="Keep re-invoking the same workflow entrypoint/DB until terminal or --max-resumes")
     run.add_argument("--poll-interval", type=float, default=1.0)
     run.add_argument("--max-resumes", type=positive_int)
-    run.add_argument("--direct", action="store_true", help=argparse.SUPPRESS)
-
-    run_engine = sub.add_parser("_run-engine", help=argparse.SUPPRESS)
-    run_engine.add_argument("workflow_ref", help=argparse.SUPPRESS)
-    run_engine.add_argument("--config", type=Path)
-    run_engine.add_argument("--db")
-    run_engine.add_argument("--id", dest="workflow_id")
-    run_engine.add_argument("--input-json", default="{}")
-    run_engine.add_argument("--project-root", type=Path)
-    run_engine.add_argument("--no-drain", action="store_true")
-    run_engine.add_argument("--watch", action="store_true")
-    run_engine.add_argument("--poll-interval", type=float, default=1.0)
-    run_engine.add_argument("--max-resumes", type=positive_int)
-    sub._choices_actions = [action for action in sub._choices_actions if action.dest != "_run-engine"]
 
     runner = sub.add_parser("runner", help="Canonical Workflow Runner v2 commands")
     runner_sub = runner.add_subparsers(dest="runner_command", required=True)
@@ -796,12 +762,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         return run_doctor(args)
     if args.command == "run":
-        if args.direct:
-            args.command = "_run-engine"
-            return run_engine_cli(args)
-        return run_via_uv(raw_argv, args)
-    if args.command == "_run-engine":
-        return run_engine_cli(args)
+        return run_installed_cli(args)
     if args.command == "worker" and args.config is not None:
         return run_worker_registry_cli(args)
     if args.command == "worker" and (not args.workflow_ref or not args.db or not args.workflow_id):

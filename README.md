@@ -63,6 +63,8 @@ hermes-workflows status \
   --id wf_typed_quickstart
 ```
 
+`hermes-workflows run` stays in the Python interpreter and environment that installed the console script. It does not discover or invoke an unrelated `uv` on `PATH`. Activate and install into the environment you want before running the command; `--project-root` controls project/registry discovery, not interpreter selection.
+
 `run` records or replays the workflow instance. It does not pretend the current process is a forever worker. The canonical foreground continuation command is `hermes-workflows runner run --config ...`: it leases queued workflow/step/agent/bash/child-workflow commands, records outputs, and re-enters the workflow until it is waiting for Review Queue input or terminal. The older `hermes-workflows worker --config ...` spelling remains a compatibility alias, but new docs and operators should prefer `runner run` / `runner once`.
 
 Respond to the Review Queue request through the Hermes dashboard/plugin or another configured review adapter, then start the runner again if you used the bounded smoke command above. A recorded operator response always creates a visible durable continuation command; the runner, not a hidden chat callback, consumes that command. In a real supervised setup, keep `runner run` alive under launchd, systemd, s6, tmux, or another supervisor only after the foreground command works in your workspace. The response payload must match the `returns=` dataclass schema and include provenance from the adapter that recorded it.
