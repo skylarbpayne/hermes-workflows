@@ -388,14 +388,27 @@ def _validated_profile_home(profile_home: PathLike) -> Path:
     return home
 
 
+def _validated_config_path(home: Path) -> Path:
+    config = home / "config.yaml"
+    if config.is_symlink() or (config.exists() and not config.is_file()):
+        raise UserFileConflictError("profile config.yaml must be a regular non-symlink file")
+    return config
+
+
 def _profile_paths(profile_home: PathLike) -> Tuple[Path, Path, Path, Path]:
     home = _validated_profile_home(profile_home)
     home.mkdir(parents=True, exist_ok=True)
+    _validated_config_path(home)
     plugins = home / "plugins"
-    if plugins.exists() and (plugins.is_symlink() or not plugins.is_dir()):
+    if plugins.is_symlink() or (plugins.exists() and not plugins.is_dir()):
         raise UserFileConflictError("profile plugin root must be a directory, not a file or symlink")
     plugins.mkdir(exist_ok=True)
-    return home, plugins, plugins / PLUGIN_NAME, plugins / f".{PLUGIN_NAME}.rollback"
+    destination = plugins / PLUGIN_NAME
+    rollback = plugins / f".{PLUGIN_NAME}.rollback"
+    for managed in (destination, rollback):
+        if managed.is_symlink() or (managed.exists() and not managed.is_dir()):
+            raise UserFileConflictError(f"managed plugin path must be a directory, not a file or symlink: {managed}")
+    return home, plugins, destination, rollback
 
 
 def _write_exclusive(path: Path, data: bytes, *, mode: int) -> None:
@@ -573,9 +586,7 @@ def _update_enablement_text(text: str, *, enabled: bool) -> str:
 
 
 def _config_update(home: Path, *, enabled: bool) -> Tuple[Path, bytes]:
-    config = home / "config.yaml"
-    if config.exists() and (config.is_symlink() or not config.is_file()):
-        raise UserFileConflictError("profile config.yaml must be a regular non-symlink file")
+    config = _validated_config_path(home)
     text = config.read_text(encoding="utf-8") if config.exists() else ""
     updated = _update_enablement_text(text, enabled=enabled).encode("utf-8")
     temporary = home / f".config.yaml.hermes-workflows-{uuid.uuid4().hex}.tmp"

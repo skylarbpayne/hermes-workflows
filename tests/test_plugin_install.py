@@ -51,6 +51,69 @@ def _tree_snapshot(root: Path):
     return snapshot
 
 
+def test_dangling_config_symlink_is_refused_without_any_profile_mutation(tmp_path: Path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    config = profile / "config.yaml"
+    missing_target = tmp_path / "missing-config-target"
+    config.symlink_to(missing_target)
+    before = _tree_snapshot(profile)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="config.yaml.*non-symlink"):
+        plugin_install.install_plugin(profile)
+
+    assert config.is_symlink()
+    assert os.readlink(config) == str(missing_target)
+    assert not missing_target.exists()
+    assert _tree_snapshot(profile) == before
+
+
+def test_dangling_plugin_root_symlink_is_refused_without_any_profile_mutation(tmp_path: Path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    config = profile / "config.yaml"
+    config.write_bytes(b"model:\n  default: user/model\n")
+    plugins = profile / "plugins"
+    missing_target = tmp_path / "missing-plugin-root"
+    plugins.symlink_to(missing_target, target_is_directory=True)
+    before = _tree_snapshot(profile)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="plugin root.*symlink"):
+        plugin_install.install_plugin(profile)
+
+    assert plugins.is_symlink()
+    assert os.readlink(plugins) == str(missing_target)
+    assert not missing_target.exists()
+    assert _tree_snapshot(profile) == before
+
+
+@pytest.mark.parametrize(
+    "managed_name",
+    [plugin_install.PLUGIN_NAME, f".{plugin_install.PLUGIN_NAME}.rollback"],
+)
+def test_dangling_managed_plugin_symlink_is_refused_without_any_profile_mutation(
+    tmp_path: Path,
+    managed_name: str,
+):
+    profile = tmp_path / "profile"
+    plugins = profile / "plugins"
+    plugins.mkdir(parents=True)
+    config = profile / "config.yaml"
+    config.write_bytes(b"model:\n  default: user/model\n")
+    managed_path = plugins / managed_name
+    missing_target = tmp_path / f"missing-{managed_name}"
+    managed_path.symlink_to(missing_target, target_is_directory=True)
+    before = _tree_snapshot(profile)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="plugin.*symlink"):
+        plugin_install.install_plugin(profile)
+
+    assert managed_path.is_symlink()
+    assert os.readlink(managed_path) == str(missing_target)
+    assert not missing_target.exists()
+    assert _tree_snapshot(profile) == before
+
+
 @pytest.mark.parametrize("action", ["install", "upgrade", "rollback", "uninstall", "discovery"])
 def test_symlinked_profile_root_is_rejected_without_touching_target(tmp_path: Path, action: str):
     target = tmp_path / "profile-target"
