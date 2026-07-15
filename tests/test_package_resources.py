@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -135,6 +138,57 @@ def test_copy_cleans_descriptor_relative_when_parent_is_swapped_before_return(
     assert user_file.read_bytes() == b"keep me"
     assert not (outside / "destination").exists()
     assert tuple(moved_parent.iterdir()) == ()
+
+
+def test_clean_sdist_contains_no_private_absolute_user_paths(tmp_path: Path):
+    source_root = tmp_path / "source"
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout.split(b"\0")
+    for encoded_relative in tracked:
+        if not encoded_relative:
+            continue
+        relative = Path(os.fsdecode(encoded_relative))
+        source = REPO_ROOT / relative
+        destination = source_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            destination.symlink_to(os.readlink(source))
+        else:
+            shutil.copyfile(source, destination)
+
+    outdir = tmp_path / "dist"
+    subprocess.run(
+        [sys.executable, "-m", "build", "--sdist", "--outdir", str(outdir)],
+        cwd=source_root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    sdist = next(outdir.glob("*.tar.gz"))
+    account = b"skylarpayne"
+    unix_markers = (b"/" + b"Users" + b"/" + account, b"/" + b"home" + b"/" + account)
+    windows_user_path = re.compile(
+        rb"[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]" + account + rb"(?:[\\/]|$)",
+        re.IGNORECASE,
+    )
+    leaks = []
+
+    with tarfile.open(sdist, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            extracted = archive.extractfile(member)
+            assert extracted is not None
+            contents = extracted.read()
+            if any(marker in contents for marker in unix_markers) or windows_user_path.search(contents):
+                leaks.append(member.name)
+
+    assert leaks == []
 
 
 def test_clean_installed_wheel_reads_validates_copies_and_installs_without_source_checkout(tmp_path: Path):

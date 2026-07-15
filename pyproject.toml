@@ -45,6 +45,7 @@ packages = ["src/hermes_workflows"]
 "src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css" = "hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css"
 
 [tool.hatch.build.targets.sdist]
+exclude = ["docs/presentation/2026-07-02/**"]
 artifacts = [
     "src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js",
     "src/hermes_workflows/plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css",
