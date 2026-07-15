@@ -1,0 +1,37 @@
+{
+  "dbs": {
+    "audit": {
+      "path": "state/audit/workflows.sqlite"
+    },
+    "primary": "state/primary/workflows.sqlite"
+  },
+  "workflows": {
+    "audit-workflow": {
+      "workflow_ref": "example_workflows.audit:audit_workflow",
+      "db": "audit",
+      "title": "Audit workflow",
+      "tags": [
+        "review",
+        "audit"
+      ],
+      "trusted_resume": false
+    },
+    "review-workflow": {
+      "workflow_ref": "example_workflows.review:review_workflow",
+      "db": "primary",
+      "title": "Review workflow",
+      "description": "A deterministic registry-v2 contract fixture.",
+      "tags": [
+        "workflow",
+        "review"
+      ],
+      "default_input": {
+        "mode": "review"
+      },
+      "trusted_resume": true,
+      "kanban_policy": "comment",
+      "dashboard_policy": "receipt",
+      "defaults_overlay": "local"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "state_root": "state",
+  "dbs": {
+    "audit": {
+      "path": "audit/workflows.sqlite"
+    },
+    "primary": {
+      "path": "primary/workflows.sqlite"
+    }
+  },
+  "workflows": {
+    "audit-workflow": {
+      "workflow_ref": "example_workflows.audit:audit_workflow",
+      "db": "audit",
+      "title": "Audit workflow",
+      "tags": [
+        "audit",
+        "review"
+      ]
+    },
+    "review-workflow": {
+      "workflow_ref": "example_workflows.review:review_workflow",
+      "db": "primary",
+      "title": "Review workflow",
+      "description": "A deterministic registry-v2 contract fixture.",
+      "tags": [
+        "review",
+        "workflow"
+      ],
+      "default_input": {
+        "mode": "review"
+      },
+      "trusted_resume": true,
+      "defaults_overlay": "local"
+    }
+  },
+  "runner": {
+    "dbs": [
+      "audit",
+      "primary"
+    ],
+    "lease_seconds": 30
+  }
+}
