@@ -91,7 +91,7 @@ def _prepare_profile_for_action(tmp_path: Path, profile: Path, action: str) -> N
         plugin_install.install_plugin(profile)
 
 
-def _invoke_action(action: str, profile: Path) -> None:
+def _invoke_action(action: str, profile: plugin_install.PathLike) -> None:
     if action == "install":
         plugin_install.install_plugin(profile)
     elif action == "upgrade":
@@ -102,6 +102,18 @@ def _invoke_action(action: str, profile: Path) -> None:
         plugin_install.uninstall_plugin(profile)
     else:
         plugin_install.discover_installed_plugin(profile)
+
+
+RELATIVE_PROFILE_CASES = (
+    pytest.param("profile", "profile", id="string-bare"),
+    pytest.param(Path("profile"), "profile", id="path-bare"),
+    pytest.param("profiles/nested-profile", "profiles/nested-profile", id="string-nested"),
+    pytest.param(Path("profiles") / "nested-profile", "profiles/nested-profile", id="path-nested"),
+    pytest.param("./profile", "profile", id="string-dot"),
+    pytest.param(Path(".") / "profile", "profile", id="path-dot"),
+    pytest.param("nested/../profile", "profile", id="string-parent"),
+    pytest.param(Path("nested") / ".." / "profile", "profile", id="path-parent"),
+)
 
 
 def test_dangling_config_symlink_is_refused_without_any_profile_mutation(tmp_path: Path):
@@ -264,6 +276,19 @@ def test_profile_home_parent_traversal_is_refused_without_normalizing_components
     assert not (tmp_path / "profile").exists()
 
 
+def test_profile_home_dot_traversal_is_refused_without_normalizing_components(tmp_path: Path):
+    anchor = tmp_path / "anchor"
+    anchor.mkdir()
+    supplied_profile = f"{anchor}{os.sep}.{os.sep}profile"
+    before = _lexical_tree_snapshot(tmp_path)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="traversal"):
+        plugin_install.install_plugin(supplied_profile)
+
+    assert _lexical_tree_snapshot(tmp_path) == before
+    assert not (anchor / "profile").exists()
+
+
 def test_real_profile_ancestors_allow_existing_and_missing_leaf_profiles(tmp_path: Path):
     real_parent = tmp_path / "real-parent"
     existing = real_parent / "existing-profile"
@@ -281,19 +306,123 @@ def test_real_profile_ancestors_allow_existing_and_missing_leaf_profiles(tmp_pat
     assert plugin_install.discover_installed_plugin(missing_leaf).plugin_name == plugin_install.PLUGIN_NAME
 
 
-def test_profile_home_expands_tilde_and_anchors_relative_inputs(tmp_path: Path, monkeypatch):
+def test_profile_home_expands_tilde_to_an_absolute_profile(tmp_path: Path, monkeypatch):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
+
+    tilde_report = plugin_install.install_plugin("~/tilde-profile")
+
+    assert tilde_report.profile_home == str((fake_home / "tilde-profile").resolve())
+
+
+def test_relative_missing_leaf_is_refused_before_real_cwd_mutation(tmp_path: Path, monkeypatch):
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
+    before = _lexical_tree_snapshot(work)
 
-    tilde_report = plugin_install.install_plugin("~/tilde-profile")
-    relative_report = plugin_install.install_plugin(Path("profiles") / "relative-profile")
+    with pytest.raises(plugin_install.UserFileConflictError, match="absolute"):
+        plugin_install.install_plugin("profiles/missing-profile")
 
-    assert tilde_report.profile_home == str((fake_home / "tilde-profile").resolve())
-    assert relative_report.profile_home == str((work / "profiles" / "relative-profile").resolve())
+    assert _lexical_tree_snapshot(work) == before
+    assert _lexical_tree_snapshot(work / "profiles") == {".": ("missing", None)}
+
+
+def test_relative_logical_cwd_symlink_alias_is_refused_before_physical_mutation(tmp_path: Path, monkeypatch):
+    physical = tmp_path / "physical-work"
+    physical.mkdir()
+    (physical / "user-file.txt").write_bytes(b"preserve physical cwd bytes\n")
+    logical = tmp_path / "logical-work"
+    logical.symlink_to(physical, target_is_directory=True)
+    monkeypatch.chdir(logical)
+    monkeypatch.setenv("PWD", str(logical))
+    lexical_before = _lexical_tree_snapshot(tmp_path)
+    physical_before = _lexical_tree_snapshot(physical)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="absolute"):
+        plugin_install.install_plugin("profiles/missing-profile")
+
+    assert _lexical_tree_snapshot(tmp_path) == lexical_before
+    assert _lexical_tree_snapshot(physical) == physical_before
+    assert logical.is_symlink()
+    assert os.readlink(logical) == str(physical)
+
+
+@pytest.mark.parametrize("action", ["install", "upgrade", "rollback", "uninstall", "discovery"])
+@pytest.mark.parametrize(("supplied_profile", "target_suffix"), RELATIVE_PROFILE_CASES)
+def test_relative_profile_home_is_refused_for_every_action_without_mutation(
+    tmp_path: Path,
+    monkeypatch,
+    action: str,
+    supplied_profile,
+    target_suffix: str,
+):
+    work = tmp_path / "work"
+    target_profile = work / target_suffix
+    _prepare_profile_for_action(tmp_path, target_profile, action)
+    (work / "nested").mkdir(exist_ok=True)
+    monkeypatch.chdir(work)
+    before = _lexical_tree_snapshot(work)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="absolute"):
+        _invoke_action(action, supplied_profile)
+
+    assert _lexical_tree_snapshot(work) == before
+
+
+@pytest.mark.parametrize("pwd_value", [None, "/poisoned/logical/cwd"])
+def test_relative_profile_refusal_does_not_consult_pwd_or_cwd(tmp_path: Path, monkeypatch, pwd_value):
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    if pwd_value is None:
+        monkeypatch.delenv("PWD", raising=False)
+    else:
+        monkeypatch.setenv("PWD", pwd_value)
+
+    def fail_getcwd():
+        raise AssertionError("relative profile refusal must not consult cwd")
+
+    monkeypatch.setattr(plugin_install.os, "getcwd", fail_getcwd)
+    before = _lexical_tree_snapshot(work)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="absolute"):
+        plugin_install.install_plugin("missing-profile")
+
+    assert _lexical_tree_snapshot(work) == before
+
+
+@pytest.mark.parametrize("action", ["install", "upgrade"])
+def test_relative_install_and_upgrade_refuse_before_payload_discovery(monkeypatch, action: str):
+    def fail_payload_discovery(*args, **kwargs):
+        raise AssertionError("relative profile refusal must precede payload discovery")
+
+    monkeypatch.setattr(plugin_install, "inspect_payload", fail_payload_discovery)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="absolute"):
+        _invoke_action(action, "relative-profile")
+
+
+@pytest.mark.parametrize("invalid_home", ["", "profile\x00home"])
+def test_empty_and_nul_profile_homes_are_refused_without_mutation(tmp_path: Path, invalid_home: str):
+    before = _lexical_tree_snapshot(tmp_path)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="nonempty"):
+        plugin_install.install_plugin(invalid_home)
+
+    assert _lexical_tree_snapshot(tmp_path) == before
+
+
+def test_unresolved_tilde_profile_home_is_refused_without_mutation(tmp_path: Path, monkeypatch):
+    supplied_profile = "~missing-hermes-workflows-user/profile"
+    monkeypatch.setattr(plugin_install.os.path, "expanduser", lambda value: value)
+    before = _lexical_tree_snapshot(tmp_path)
+
+    with pytest.raises(plugin_install.UserFileConflictError, match="expansion.*resolved"):
+        plugin_install.install_plugin(supplied_profile)
+
+    assert _lexical_tree_snapshot(tmp_path) == before
 
 
 def test_canonical_payload_has_one_version_and_all_dashboard_surfaces():

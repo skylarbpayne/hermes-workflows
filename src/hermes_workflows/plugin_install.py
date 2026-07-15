@@ -386,6 +386,8 @@ def _validated_profile_home(profile_home: PathLike) -> Path:
     expanded_home = os.path.expanduser(raw_home)
     if raw_home.startswith("~") and expanded_home == raw_home:
         raise UserFileConflictError("profile home user expansion could not be resolved")
+    if not os.path.isabs(expanded_home):
+        raise UserFileConflictError("profile home must be absolute after user expansion")
 
     component_text = os.path.splitdrive(expanded_home)[1]
     if os.altsep:
@@ -393,8 +395,7 @@ def _validated_profile_home(profile_home: PathLike) -> Path:
     if any(component in {".", ".."} for component in component_text.split(os.sep)):
         raise UserFileConflictError("profile home traversal components are not allowed")
 
-    anchored_home = expanded_home if os.path.isabs(expanded_home) else os.path.join(os.getcwd(), expanded_home)
-    home = Path(anchored_home)
+    home = Path(expanded_home)
     current = Path(home.anchor)
     candidates = [current]
     for component in home.parts[1:]:
@@ -655,9 +656,10 @@ def _install_or_upgrade(
     expected_package_version: Optional[str],
     require_existing: bool,
 ) -> PluginLifecycleReport:
+    validated_home = _validated_profile_home(profile_home)
     source = canonical_payload_root() if payload_root is None else Path(payload_root).resolve()
     descriptor = inspect_payload(source, expected_package_version=expected_package_version)
-    home, plugins, destination, rollback = _profile_paths(profile_home)
+    home, plugins, destination, rollback = _profile_paths(validated_home)
     _recover_interrupted(plugins, destination, rollback)
     if require_existing and not destination.exists():
         raise UserFileConflictError("upgrade requires an existing owned plugin installation")
