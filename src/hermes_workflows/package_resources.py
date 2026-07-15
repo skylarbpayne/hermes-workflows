@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import stat
 from dataclasses import dataclass
 from importlib import metadata, resources
 from pathlib import Path, PurePosixPath
@@ -12,6 +14,14 @@ from typing import Any, Dict, Mapping, Tuple, Union
 _SCHEMA_VERSION = 1
 _DISTRIBUTION_NAME = "hermes-workflows"
 _MANIFEST_RESOURCE = "plugin_payload_manifest.v1.json"
+_CANONICAL_PAYLOAD_PATHS = (
+    "plugin_payload/hermes-workflows-approvals/__init__.py",
+    "plugin_payload/hermes-workflows-approvals/dashboard/dist/index.js",
+    "plugin_payload/hermes-workflows-approvals/dashboard/dist/style.css",
+    "plugin_payload/hermes-workflows-approvals/dashboard/manifest.json",
+    "plugin_payload/hermes-workflows-approvals/dashboard/plugin_api.py",
+    "plugin_payload/hermes-workflows-approvals/plugin.yaml",
+)
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _FILE_FIELDS = frozenset({"schema_version", "path", "sha256", "size_bytes"})
@@ -185,15 +195,38 @@ def manifest_from_json(value: str) -> PackageResourceManifestV1:
     return manifest
 
 
+def _resource_bytes(relative: str) -> bytes:
+    resource = resources.files("hermes_workflows")
+    for part in relative.split("/"):
+        resource = resource.joinpath(part)
+    return resource.read_bytes()
+
+
+def _validated_payload_bytes(manifest: PackageResourceManifestV1) -> Tuple[Tuple[PackageResourceFileV1, bytes], ...]:
+    validated = []
+    for entry in manifest.files:
+        try:
+            data = _resource_bytes(entry.path)
+        except (FileNotFoundError, IsADirectoryError, OSError) as exc:
+            raise ValueError(f"packaged payload resource is missing or unreadable: {entry.path}") from exc
+        if len(data) != entry.size_bytes or hashlib.sha256(data).hexdigest() != entry.sha256:
+            raise ValueError(f"packaged payload resource does not match its manifest: {entry.path}")
+        validated.append((entry, data))
+    return tuple(validated)
+
+
 def foundation_manifest() -> PackageResourceManifestV1:
     text = resources.files("hermes_workflows").joinpath(_MANIFEST_RESOURCE).read_text(encoding="utf-8")
     manifest = manifest_from_json(text)
     if manifest.owner_id != _DISTRIBUTION_NAME or manifest.package_name != _DISTRIBUTION_NAME:
         raise ValueError("foundation manifest owner and package must be hermes-workflows")
-    if manifest.payload_root != "plugin_payload" or manifest.files:
-        raise ValueError("foundation manifest must declare the empty plugin_payload foundation")
+    if manifest.payload_root != "plugin_payload":
+        raise ValueError("foundation manifest payload_root must equal plugin_payload")
+    if tuple(entry.path for entry in manifest.files) != _CANONICAL_PAYLOAD_PATHS:
+        raise ValueError("foundation manifest must declare the exact canonical plugin payload")
     if text != canonical_manifest_json(manifest):
         raise ValueError("foundation manifest resource must contain canonical JSON")
+    _validated_payload_bytes(manifest)
     return manifest
 
 
@@ -202,14 +235,51 @@ def ownership_key(manifest: PackageResourceManifestV1) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _validate_new_destination(root: Path) -> None:
+    if not root.is_absolute():
+        raise ValueError("package payload destination must be absolute")
+    if ".." in root.parts:
+        raise ValueError("package payload destination must not contain traversal components")
+
+    current = Path(root.anchor)
+    for component in root.parts[1:-1]:
+        current = current / component
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            raise ValueError(f"package payload destination parent does not exist: {current}")
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"package payload destination contains symlink ancestor: {current}")
+        if not stat.S_ISDIR(mode):
+            raise ValueError(f"package payload destination ancestor is not a directory: {current}")
+
+
 def write_package_payload(
     manifest: PackageResourceManifestV1,
     destination: PathLike,
 ) -> Tuple[Path, ...]:
-    """Return without touching the filesystem for the empty foundation payload."""
+    """Copy the exact validated package payload into a new destination root."""
 
-    if not isinstance(manifest, PackageResourceManifestV1):
-        raise TypeError("manifest must be a PackageResourceManifestV1")
-    if manifest.files:
-        raise NotImplementedError("package payload copying is outside the foundation seam")
-    return ()
+    canonical = canonical_manifest_json(manifest)
+    packaged = foundation_manifest()
+    if canonical != canonical_manifest_json(packaged):
+        raise ValueError("manifest must exactly match the packaged payload manifest")
+    payload = _validated_payload_bytes(packaged)
+    root = Path(destination)
+    _validate_new_destination(root)
+    if root.exists() or root.is_symlink():
+        raise FileExistsError(f"refusing to replace existing destination: {root}")
+
+    root.mkdir()
+    written = []
+    try:
+        for entry, data in payload:
+            path = root / entry.path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("xb") as handle:
+                handle.write(data)
+            written.append(path)
+    except Exception:
+        shutil.rmtree(root)
+        raise
+    return tuple(written)
