@@ -1352,9 +1352,13 @@ def test_cli_serve_dashboard_can_approve_waiting_workflow(tmp_path):
     }
 
 
-def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(tmp_path):
+def test_hermes_workflows_run_retains_installed_interpreter_without_invoking_uv(tmp_path):
+    execution_record = tmp_path / "installed-execution.json"
     (tmp_path / "alias_wf.py").write_text(
-        "from hermes_workflows import wait_for, workflow\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "from hermes_workflows import workflow\n"
+        f"Path({str(execution_record)!r}).write_text(json.dumps({{'python_executable': sys.executable, 'virtual_env': os.environ.get('VIRTUAL_ENV')}}))\n"
         "@workflow\n"
         "async def alias_workflow(inputs):\n"
         "    return {'message': inputs['message']}\n"
@@ -1375,17 +1379,15 @@ def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    marker = tmp_path / "uv-called.json"
+    marker = tmp_path / "uv-called"
     fake_uv = fake_bin / "uv"
     fake_uv.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, subprocess, sys\n"
-        f"open({str(marker)!r}, 'w').write(json.dumps({{'args': sys.argv[1:], 'cwd': os.getcwd()}}))\n"
-        "args = sys.argv[1:]\n"
-        "assert args[0] == 'run'\n"
-        "raise SystemExit(subprocess.run(args[1:]).returncode)\n"
+        "#!/bin/sh\n"
+        f"touch {marker}\n"
+        "exit 97\n"
     )
     fake_uv.chmod(0o755)
+    installed_env = tmp_path / "installed-env"
 
     payload = json.loads(
         run_cli(
@@ -1396,12 +1398,21 @@ def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(
             str(registry),
             "--project-root",
             str(tmp_path),
-            env_extra={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            env_extra={
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "VIRTUAL_ENV": str(installed_env),
+            },
         ).stdout
     )
 
     assert payload["status"] == "running"
     assert payload["waiting_on"] is None
+    execution = json.loads(execution_record.read_text())
+    assert execution == {
+        "python_executable": sys.executable,
+        "virtual_env": str(installed_env),
+    }
+    assert not marker.exists()
     assert (tmp_path / ".hermes" / "workflows.sqlite").exists()
     completed_payload = run_worker(
         tmp_path,
@@ -1412,11 +1423,6 @@ def test_hermes_workflows_run_uses_uv_and_project_default_db_for_registry_alias(
     )
     assert completed_payload["status"] == "completed"
     assert completed_payload["result"] == {"message": "from-registry"}
-    uv_call = json.loads(marker.read_text())
-    uv_args = uv_call["args"]
-    assert uv_call["cwd"] == str(tmp_path)
-    assert uv_args[:4] == ["run", "python", "-m", "hermes_workflows"]
-    assert "_run-engine" in uv_args
 
 
 def test_workflow_run_helper_supports_direct_uv_script_style_and_default_db(tmp_path):
@@ -1727,7 +1733,7 @@ def test_direct_workflow_run_defaults_db_to_workflow_file_project(tmp_path):
     assert not (caller / ".hermes" / "workflows.sqlite").exists()
 
 
-def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
+def test_run_with_external_config_ignores_path_uv_and_defaults_db_to_config_project(tmp_path):
     project = tmp_path / "workflow_project"
     caller = tmp_path / "caller"
     project.mkdir()
@@ -1746,7 +1752,7 @@ def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
                 "workflows": {
                     "configured": {
                         "workflow_ref": str(project / "configured_wf.py") + ":configured_wf",
-                        "default_input": {"project": "uv-cwd"},
+                        "default_input": {"project": "installed-environment"},
                     }
                 }
             }
@@ -1754,15 +1760,12 @@ def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    marker = tmp_path / "uv-cwd.json"
+    marker = tmp_path / "uv-called"
     fake_uv = fake_bin / "uv"
     fake_uv.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, subprocess, sys\n"
-        f"open({str(marker)!r}, 'w').write(json.dumps({{'args': sys.argv[1:], 'cwd': os.getcwd()}}))\n"
-        "args = sys.argv[1:]\n"
-        "assert args[0] == 'run'\n"
-        "raise SystemExit(subprocess.run(args[1:]).returncode)\n"
+        "#!/bin/sh\n"
+        f"touch {marker}\n"
+        "exit 97\n"
     )
     fake_uv.chmod(0o755)
 
@@ -1783,8 +1786,7 @@ def test_run_via_uv_uses_config_project_as_child_process_cwd(tmp_path):
     assert payload["status"] == "running"
     assert payload["waiting_on"] is None
     assert payload["result"] is None
-    uv_call = json.loads(marker.read_text())
-    assert uv_call["cwd"] == str(project)
+    assert not marker.exists()
     assert (project / ".hermes" / "workflows.sqlite").exists()
     assert not (caller / ".hermes" / "workflows.sqlite").exists()
 
@@ -1807,7 +1809,6 @@ def test_module_ref_run_defaults_db_to_imported_module_project(tmp_path):
             [Path.cwd() / "src", project],
             "run",
             "module_wf:module_workflow",
-            "--direct",
             "--id",
             "wf_module_ref",
         ).stdout
@@ -1820,7 +1821,7 @@ def test_module_ref_run_defaults_db_to_imported_module_project(tmp_path):
     assert not (caller / ".hermes" / "workflows.sqlite").exists()
 
 
-def test_internal_run_engine_command_is_hidden_from_top_level_help(tmp_path):
+def test_removed_internal_run_engine_command_is_absent_from_top_level_help(tmp_path):
     completed = run_cli_from(tmp_path, [Path.cwd() / "src", tmp_path], "--help")
     assert "_run-engine" not in completed.stdout
 

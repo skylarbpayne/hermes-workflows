@@ -72,6 +72,8 @@ hermes-workflows run typed-quickstart \
   --input-json '{"change":"Expose typed workflow contracts."}'
 ```
 
+The command retains the interpreter, `VIRTUAL_ENV`, and environment that own the installed `hermes-workflows` console script. A `uv` executable elsewhere on `PATH` is ignored. Activate and install into the intended environment first; `--project-root` changes project/registry discovery only and never selects another Python environment.
+
 `run` records the workflow activation and queues missing work. It is not the always-on continuation loop. A run can return `running` before the Review Queue request exists because a runner still needs to execute queued steps and replay the workflow to the next wait.
 
 The exact serialized input and initial `run` result are:
