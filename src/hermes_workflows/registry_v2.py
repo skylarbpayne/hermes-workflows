@@ -8,7 +8,7 @@ import re
 import stat
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -107,7 +107,7 @@ class RegistryWorkflowV2:
     title: str | None = None
     description: str | None = None
     tags: tuple[str, ...] = ()
-    default_input: Mapping[str, Any] = MappingProxyType({})
+    default_input: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     trusted_resume: bool = False
     kanban_policy: str = "comment"
     dashboard_policy: str = "receipt"
